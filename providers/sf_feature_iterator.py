@@ -320,7 +320,10 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                             self._provider.fields().names()
                         ):
                             try:
-                                if field_name == self._provider._column_geom:
+                                if (
+                                    field_name == self._provider._column_geom
+                                    and self._provider._geo_column_type != "NUMBER"
+                                ):
                                     continue
                                 column_value = next_result[
                                     desc_result.index(field_name)
@@ -347,7 +350,10 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                         for indx, field_name in enumerate(
                             self._provider.fields().names()
                         ):
-                            if field_name == self._provider._column_geom:
+                            if (
+                                field_name == self._provider._column_geom
+                                and self._provider._geo_column_type != "NUMBER"
+                            ):
                                 continue
                             f.setAttribute(
                                 indx, next_result[desc_result.index(field_name)]
