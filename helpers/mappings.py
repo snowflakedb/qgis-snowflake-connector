@@ -1,6 +1,8 @@
 from qgis.core import QgsWkbTypes
 from qgis.PyQt.QtCore import QVariant
 
+from ..enums.snowflake_metadata_type import SnowflakeMetadataType
+
 mapping_snowflake_qgis_geometry = {
     "LINESTRING": QgsWkbTypes.LineString,
     "MULTILINESTRING": QgsWkbTypes.MultiLineString,
@@ -42,27 +44,72 @@ mapping_snowflake_qgis_type = {
 
 
 SNOWFLAKE_METADATA_TYPE_CODE_DICT = {
-    0: {"name": "FIXED", "qvariant_type": QVariant.Double},  # NUMBER/INT
-    1: {"name": "REAL", "qvariant_type": QVariant.Double},  # REAL
-    2: {"name": "TEXT", "qvariant_type": QVariant.String},  # VARCHAR/STRING
-    3: {"name": "DATE", "qvariant_type": QVariant.Date},  # DATE
-    4: {"name": "TIMESTAMP", "qvariant_type": QVariant.DateTime},  # TIMESTAMP
-    5: {"name": "VARIANT", "qvariant_type": QVariant.String},  # VARIANT
-    6: {
-        "name": "TIMESTAMP_LTZ",
+    SnowflakeMetadataType.FIXED.value: {
+        "name": SnowflakeMetadataType.FIXED.name,
+        "qvariant_type": QVariant.Double,
+    },  # NUMBER/INT
+    SnowflakeMetadataType.REAL.value: {
+        "name": SnowflakeMetadataType.REAL.name,
+        "qvariant_type": QVariant.Double,
+    },  # REAL
+    SnowflakeMetadataType.TEXT.value: {
+        "name": SnowflakeMetadataType.TEXT.name,
+        "qvariant_type": QVariant.String,
+    },  # VARCHAR/STRING
+    SnowflakeMetadataType.DATE.value: {
+        "name": SnowflakeMetadataType.DATE.name,
+        "qvariant_type": QVariant.Date,
+    },  # DATE
+    SnowflakeMetadataType.TIMESTAMP.value: {
+        "name": SnowflakeMetadataType.TIMESTAMP.name,
+        "qvariant_type": QVariant.DateTime,
+    },  # TIMESTAMP
+    SnowflakeMetadataType.VARIANT.value: {
+        "name": SnowflakeMetadataType.VARIANT.name,
+        "qvariant_type": QVariant.String,
+    },  # VARIANT
+    SnowflakeMetadataType.TIMESTAMP_LTZ.value: {
+        "name": SnowflakeMetadataType.TIMESTAMP_LTZ.name,
         "qvariant_type": QVariant.DateTime,
     },  # TIMESTAMP_LTZ
-    7: {"name": "TIMESTAMP_TZ", "qvariant_type": QVariant.DateTime},  # TIMESTAMP_TZ
-    8: {
-        "name": "TIMESTAMP_NTZ",
+    SnowflakeMetadataType.TIMESTAMP_TZ.value: {
+        "name": SnowflakeMetadataType.TIMESTAMP_TZ.name,
+        "qvariant_type": QVariant.DateTime,
+    },  # TIMESTAMP_TZ
+    SnowflakeMetadataType.TIMESTAMP_NTZ.value: {
+        "name": SnowflakeMetadataType.TIMESTAMP_NTZ.name,
         "qvariant_type": QVariant.DateTime,
     },  # TIMESTAMP_NTZ
-    9: {"name": "OBJECT", "qvariant_type": QVariant.String},  # OBJECT
-    10: {"name": "ARRAY", "qvariant_type": QVariant.String},  # ARRAY
-    11: {"name": "BINARY", "qvariant_type": QVariant.BitArray},  # BINARY
-    12: {"name": "TIME", "qvariant_type": QVariant.Time},  # TIME
-    13: {"name": "BOOLEAN", "qvariant_type": QVariant.Bool},  # BOOLEAN
-    14: {"name": "GEOGRAPHY", "qvariant_type": QVariant.String},  # GEOGRAPHY
-    15: {"name": "GEOMETRY", "qvariant_type": QVariant.String},  # GEOMETRY
-    16: {"name": "VECTOR", "qvariant_type": QVariant.Vector2D},  # VECTOR
+    SnowflakeMetadataType.OBJECT.value: {
+        "name": SnowflakeMetadataType.OBJECT.name,
+        "qvariant_type": QVariant.String,
+    },  # OBJECT
+    SnowflakeMetadataType.ARRAY.value: {
+        "name": SnowflakeMetadataType.ARRAY.name,
+        "qvariant_type": QVariant.String,
+    },  # ARRAY
+    SnowflakeMetadataType.BINARY.value: {
+        "name": SnowflakeMetadataType.BINARY.name,
+        "qvariant_type": QVariant.BitArray,
+    },  # BINARY
+    SnowflakeMetadataType.TIME.value: {
+        "name": SnowflakeMetadataType.TIME.name,
+        "qvariant_type": QVariant.Time,
+    },  # TIME
+    SnowflakeMetadataType.BOOLEAN.value: {
+        "name": SnowflakeMetadataType.BOOLEAN.name,
+        "qvariant_type": QVariant.Bool,
+    },  # BOOLEAN
+    SnowflakeMetadataType.GEOGRAPHY.value: {
+        "name": SnowflakeMetadataType.GEOGRAPHY.name,
+        "qvariant_type": QVariant.String,
+    },  # GEOGRAPHY
+    SnowflakeMetadataType.GEOMETRY.value: {
+        "name": SnowflakeMetadataType.GEOMETRY.name,
+        "qvariant_type": QVariant.String,
+    },  # GEOMETRY
+    SnowflakeMetadataType.VECTOR.value: {
+        "name": SnowflakeMetadataType.VECTOR.name,
+        "qvariant_type": QVariant.Vector2D,
+    },  # VECTOR
 }
