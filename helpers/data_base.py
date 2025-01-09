@@ -40,41 +40,23 @@ def filter_geo_columns(
     columns: typing.Iterator[QgsFeature],
 ) -> typing.List[QgsFeature]:
     """
-    Take only the geo columns from a list. Currently, NUMBER that are valid H3, GEOMETRY, and GEOGRAPHY.
+    Take only the geo columns from a list. Currently, GEOMETRY and GEOGRAPHY.
+    H3 is not considered as the H3_IS_VALID_CELL query is too slow.
 
     Args:
         sf_data_provider: The connection to the database.
         connection_name (str): The name of the connection.
         columns (List[QgsFeature]): A list of the column metadata,
             required for the query. It should include the following keys:
-            - 'TABLE_CATALOG': The name of the database.
-            - 'TABLE_SCHEMA': The name of the schema.
             - 'DATA_TYPE': The Snowflake type of the column.
 
     Returns:
         typing.List[QgsFeature]: The `columns` that are geo
     """
     geo_columns = []
-    number_queries = []
-    number_columns = []
     for feat in columns:
         if feat.attribute("DATA_TYPE") in ["GEOMETRY", "GEOGRAPHY"]:
             geo_columns.append(feat)
-        if feat.attribute("DATA_TYPE") == "NUMBER":
-            number_columns.append(feat)
-            table = f'"{feat.attribute("TABLE_CATALOG")}"."{feat.attribute("TABLE_SCHEMA")}"."{feat.attribute("TABLE_NAME")}"'
-            column = f'{table}."{feat.attribute("COLUMN_NAME")}"'
-            number_queries.append(f"""
-(SELECT H3_IS_VALID_CELL({column})
-FROM {table}
-WHERE {column} IS NOT NULL
-LIMIT 1)""")
-    if len(number_queries) > 0:
-        query = f'SELECT {",".join(number_queries)}'
-        result = sf_data_provider.execute_query(query, connection_name).fetchall()[0]
-        for i in range(len(result)):
-            if result[i]:
-                geo_columns.append(number_columns[i])
     return geo_columns
 
 
