@@ -2,7 +2,16 @@ from PyQt5.QtWidgets import QWidget
 from qgis.PyQt.QtGui import QStandardItemModel, QStandardItem
 from qgis.PyQt import uic
 from qgis.PyQt.QtCore import pyqtSignal
-from qgis.PyQt.QtWidgets import QDialog, QMessageBox
+from qgis.PyQt.QtWidgets import (
+    QDialog,
+    QMessageBox,
+    QComboBox,
+    QTableView,
+    QPushButton,
+    QCheckBox,
+    QToolButton,
+    QLineEdit,
+)
 from qgis.core import QgsApplication
 import os
 import typing
@@ -32,6 +41,13 @@ class SFSQLQueryDialog(QDialog, FORM_CLASS_SFCS):
     ) -> None:
         super().__init__(parent)
         self.setupUi(self)
+        self.mGeometryColumnComboBox: QComboBox
+        self.mQueryResultsTableView: QTableView
+        self.mExecuteButton: QPushButton
+        self.mGeometryColumnCheckBox: QCheckBox
+        self.mLoadLayerPushButton: QPushButton
+        self.mClearButton: QToolButton
+        self.mLayerNameLineEdit: QLineEdit
         self.context_information = context_information
         self.settings = get_qsettings()
         self.temp_deactivated_options()
@@ -79,6 +95,11 @@ class SFSQLQueryDialog(QDialog, FORM_CLASS_SFCS):
                 if task_should_run:
                     geo_column_name = self.mGeometryColumnComboBox.currentText()
                     self.context_information["geo_column_name"] = geo_column_name
+                    self.context_information["geo_column_type_is_h3"] = (
+                        self.mGeometryColumnComboBox.itemData(
+                            self.mGeometryColumnComboBox.currentIndex()
+                        )["is_h3"]
+                    )
                     sf_convert_sql_query_to_layer_task = SFConvertSQLQueryToLayerTask(
                         query=query_without_semicolon,
                         layer_name=self.mLayerNameLineEdit.text(),
@@ -148,13 +169,18 @@ class SFSQLQueryDialog(QDialog, FORM_CLASS_SFCS):
             col_names = []
             col_types = []
 
-            for result_meta_data in result[0]:
+            col_description = result[0]
+            h3_column_check = result[2][0]
+
+            for index, result_meta_data in enumerate(col_description):
                 col_name = result_meta_data[0]
                 col_type = result_meta_data[1]
                 col_names.append(col_name)
                 col_types.append(col_type)
-                if col_type in [14, 15]:
-                    self.mGeometryColumnComboBox.addItem(col_name)
+                if col_type in [14, 15] or h3_column_check[index]:
+                    self.mGeometryColumnComboBox.addItem(
+                        col_name, {"is_h3": True if h3_column_check[index] else False}
+                    )
             self.model.setHorizontalHeaderLabels(col_names)
 
             for idx, row in enumerate(result[1]):

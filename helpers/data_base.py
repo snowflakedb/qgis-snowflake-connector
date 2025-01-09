@@ -1,5 +1,7 @@
 import typing
 
+from ..enums.snowflake_metadata_type import SnowflakeMetadataType
+
 from ..managers.sf_connection_manager import SFConnectionManager
 from ..helpers.utils import get_authentification_information, get_qsettings
 from qgis.PyQt.QtCore import QSettings
@@ -33,7 +35,9 @@ ORDER BY SCHEMA_NAME"""
 
 
 def filter_geo_columns(
-    sf_data_provider: SFDataProvider, connection_name: str, columns: typing.Iterator[QgsFeature]
+    sf_data_provider: SFDataProvider,
+    connection_name: str,
+    columns: typing.Iterator[QgsFeature],
 ) -> typing.List[QgsFeature]:
     """
     Take only the geo columns from a list. Currently, NUMBER that are valid H3, GEOMETRY, and GEOGRAPHY.
@@ -75,13 +79,12 @@ LIMIT 1)""")
 
 
 def get_table_geo_columns(
-    sf_data_provider: SFDataProvider, connection_name: str, table_name: str
+    connection_name: str, table_name: str
 ) -> typing.List[QgsFeature]:
     """
     Retrieves a list of the geo columns of a specified table in a database.
 
     Args:
-        sf_data_provider (SFDataProvider): The connection to the database.
         connection_name (str): The name of the database connection.
         table_name (str): The name of the table to retrieve columns from.
 
@@ -91,6 +94,9 @@ def get_table_geo_columns(
     Raises:
         Any exceptions raised by the underlying data provider or database query execution.
     """
+    settings = get_qsettings()
+    auth_information = get_authentification_information(settings, connection_name)
+    sf_data_provider = SFDataProvider(auth_information)
     schema_selected_query = f"""SELECT DISTINCT TABLE_NAME, COLUMN_NAME, DATA_TYPE, TABLE_CATALOG, TABLE_SCHEMA, COMMENT
 FROM INFORMATION_SCHEMA.COLUMNS
 WHERE TABLE_CATALOG ILIKE '{sf_data_provider.connection_params["database"]}'
@@ -99,7 +105,11 @@ ORDER BY TABLE_NAME, COLUMN_NAME"""
 
     sf_data_provider.load_data(schema_selected_query, connection_name)
     columns = sf_data_provider.get_feature_iterator()
-    return filter_geo_columns(sf_data_provider=sf_data_provider, connection_name=connection_name, columns=columns)
+    return filter_geo_columns(
+        sf_data_provider=sf_data_provider,
+        connection_name=connection_name,
+        columns=columns,
+    )
 
 
 def get_geo_columns(
@@ -126,7 +136,11 @@ ORDER BY TABLE_NAME, COLUMN_NAME"""
 
     sf_data_provider.load_data(schema_selected_query, connection_name)
     columns = sf_data_provider.get_feature_iterator()
-    return filter_geo_columns(sf_data_provider=sf_data_provider, connection_name=connection_name, columns=columns)
+    return filter_geo_columns(
+        sf_data_provider=sf_data_provider,
+        connection_name=connection_name,
+        columns=columns,
+    )
 
 
 def get_column_iterator(
@@ -518,8 +532,7 @@ def limit_size_for_type(
     """
     if column_type == "NUMBER":
         return 500000  # 500k
-    return 50000;  # 50k
-
+    return 50000  # 50k
 
 
 def limit_size_for_table(
@@ -710,7 +723,22 @@ def get_limit_sql_query(
     query: str,
     context_information: dict,
     limit: int = 50000,
-) -> typing.Tuple[typing.List[snowflake.connector.cursor.ResultMetadata], list]:
+) -> typing.Tuple[typing.List[snowflake.connector.cursor.ResultMetadata], list, list]:
+    """
+    Executes a SQL query with a specified limit on the number of rows returned.
+
+    Args:
+        query (str): The SQL query to be executed.
+        context_information (dict): A dictionary containing context information, including the connection name.
+        limit (int, optional): The maximum number of rows to return. Defaults to 50000.
+
+    Returns:
+        typing.Tuple[typing.List[snowflake.connector.cursor.ResultMetadata], list, list]:
+            A tuple containing:
+            - A list of column descriptions (metadata) from the query result.
+            - A list of rows from the query result.
+            - A list of H3 columns derived from the query.
+    """
     connection_manager: SFConnectionManager = SFConnectionManager.get_instance()
     cur_desc = connection_manager.execute_query(
         connection_name=context_information["connection_name"],
@@ -721,24 +749,71 @@ def get_limit_sql_query(
     cur_desc.close()
 
     query_columns = ""
+    h3_query_any_value_columns = ""
     for desc in cur_description:
         col_name = desc[0]
         col_type = desc[1]
         if query_columns != "":
             query_columns += ", "
-        if col_type in (14, 15):
+        if h3_query_any_value_columns != "":
+            h3_query_any_value_columns += ", "
+
+        h3_query_any_value_column_value = f'FALSE AS "{col_name}"'
+        if col_type in (
+            SnowflakeMetadataType.GEOGRAPHY.value,
+            SnowflakeMetadataType.GEOMETRY.value,
+        ):
             query_columns += f"ST_ASWKT({col_name}) AS {col_name}"
         else:
             query_columns += f"{col_name}"
+            if col_type == SnowflakeMetadataType.FIXED.value:
+                h3_query_any_value_column_value = (
+                    f'ANY_VALUE(H3_IS_VALID_CELL("{col_name}")) AS "{col_name}"'
+                )
+        h3_query_any_value_columns += h3_query_any_value_column_value
 
-    query = f"SELECT {query_columns} FROM ({query}) LIMIT {limit}"
+    sub_query = f"SELECT {query_columns} FROM ({query}) LIMIT {limit}"
     cur = connection_manager.execute_query(
         connection_name=context_information["connection_name"],
-        query=query,
+        query=sub_query,
         context_information=context_information,
     )
 
     resultset = cur.fetchall()
     cur.close()
 
-    return cur_description, resultset
+    return (
+        cur_description,
+        resultset,
+        get_h3_columns_from_query(
+            h3_query_any_value_columns, query, context_information
+        ),
+    )
+
+
+def get_h3_columns_from_query(
+    query_columns: str, query: str, context_information: dict
+) -> typing.List:
+    """
+    Executes a sub-query to retrieve specified columns from a given query and returns the result set.
+
+    Args:
+        query_columns (str): The columns to be selected in the sub-query.
+        query (str): The main query from which the sub-query will be derived.
+        context_information (dict): A dictionary containing context information, including the connection name.
+
+    Returns:
+        typing.List: A list containing the rows of the result set from the executed sub-query.
+    """
+    connection_manager: SFConnectionManager = SFConnectionManager.get_instance()
+    sub_query = f"SELECT {query_columns} FROM ({query})"
+    cur = connection_manager.execute_query(
+        connection_name=context_information["connection_name"],
+        query=sub_query,
+        context_information=context_information,
+    )
+
+    resultset = cur.fetchall()
+    cur.close()
+
+    return resultset

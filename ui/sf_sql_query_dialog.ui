@@ -119,7 +119,7 @@
          <string>Column that contains the geometry.</string>
         </property>
         <property name="text">
-         <string>Geometry column</string>
+         <string>Geometry/H3 column</string>
         </property>
        </widget>
       </item>

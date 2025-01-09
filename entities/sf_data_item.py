@@ -182,7 +182,7 @@ class SFDataItem(QgsDataItem):
         Creates schema items and appends them to the provided children list.
 
         This method iterates over features obtained from a schema iterator and creates
-        data items based on the feature attributes. It handles naming conflicts by 
+        data items based on the feature attributes. It handles naming conflicts by
         appending column names to the item names if necessary.
 
         Args:
@@ -191,12 +191,8 @@ class SFDataItem(QgsDataItem):
         Returns:
             None
         """
-        auth_information = get_authentification_information(self.settings, self.connection_name)
-        sf_data_provider = SFDataProvider(auth_information)
-        columns = get_table_geo_columns(
-            sf_data_provider, self.connection_name, self.clean_name
-        )
-        columns.sort(key = lambda x: x.attribute(0))
+        columns = get_table_geo_columns(self.connection_name, self.clean_name)
+        columns.sort(key=lambda x: x.attribute(0))
 
         children_item_type = "table"
 
@@ -277,11 +273,15 @@ class SFDataItem(QgsDataItem):
         )
 
         for feat in feature_iterator:
-            is_geo_column = (table_data_item.geom_column == feat.attribute(0))
-            if feat.attribute(1) in [
-                "GEOMETRY",
-                "GEOGRAPHY",
-            ] and not is_geo_column:
+            is_geo_column = table_data_item.geom_column == feat.attribute(0)
+            if (
+                feat.attribute(1)
+                in [
+                    "GEOMETRY",
+                    "GEOGRAPHY",
+                ]
+                and not is_geo_column
+            ):
                 continue
             item = self._create_data_item(
                 name=feat.attribute(0),
@@ -293,7 +293,9 @@ class SFDataItem(QgsDataItem):
             children.append(item)
         feature_iterator.close()
 
-    def get_field_type_svg_name(self, field_type: str, field_pression: int, is_geo_column: bool) -> str:
+    def get_field_type_svg_name(
+        self, field_type: str, field_pression: int, is_geo_column: bool
+    ) -> str:
         snowflake_types = {
             "ARRAY": "array",
             "BINARY": "binary",
@@ -425,7 +427,9 @@ ORDER BY {column_name}"""
                     "geom_type": self.geom_type,
                 }
 
-                limit_size = limit_size_for_table(context_information=context_information)
+                limit_size = limit_size_for_table(
+                    context_information=context_information
+                )
                 table_exceeds_size = check_table_exceeds_size(
                     context_information=context_information,
                 )
