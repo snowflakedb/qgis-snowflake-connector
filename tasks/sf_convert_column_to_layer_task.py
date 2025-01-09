@@ -64,7 +64,7 @@ class SFConvertColumnToLayerTask(QgsTask):
                 geo_column_name=self.column,
                 table_name=self.table,
                 context_information=self.context_information,
-            ) if geo_column_type != "NUMBER" else ["POLYGON"]
+            ) if geo_column_type not in ["NUMBER", "TEXT"] else ["POLYGON"]
             for geo_type in geo_type_list:
                 uri = (
                     f"connection_name={self.connection_name} sql_query= "

@@ -50,7 +50,7 @@ class SFConvertSQLQueryToLayerTask(QgsTask):
         """
         try:
             geo_column_type = (
-                "NUMBER"
+                "TEXT"
                 if self.geo_column_type_is_h3
                 else get_geo_column_type_from_query(
                     query=self.query,
@@ -70,7 +70,7 @@ class SFConvertSQLQueryToLayerTask(QgsTask):
                     query=self.query,
                     context_information=self.context_information,
                 )
-                if geo_column_type != "NUMBER"
+                if geo_column_type not in ["NUMBER", "TEXT"]
                 else ["POLYGON"]
             )
             for geo_type in geo_type_list:

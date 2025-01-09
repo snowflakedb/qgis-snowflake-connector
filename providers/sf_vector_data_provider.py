@@ -114,7 +114,7 @@ class SFVectorDataProvider(QgsVectorDataProvider):
     def createProvider(cls, uri, providerOptions, flags=QgsDataProvider.ReadFlags()):
         """Creates a VectorDataProvider of the appropriate type for the given column"""
         base_provider = SFVectorDataProvider(uri, providerOptions, flags)
-        if base_provider._geo_column_type == "NUMBER":
+        if base_provider._geo_column_type in ["NUMBER", "TEXT"]:
             return SFH3VectorDataProvider(uri, providerOptions, flags)
         elif base_provider._geo_column_type in ["GEOGRAPHY", "GEOMETRY"]:
             return SFGeoVectorDataProvider(uri, providerOptions, flags)

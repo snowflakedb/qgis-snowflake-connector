@@ -33,7 +33,7 @@ class SFConnectTask(QgsTask):
             SELECT TABLE_CATALOG, TABLE_SCHEMA, TABLE_NAME, COMMENT, COLUMN_NAME, DATA_TYPE
             FROM INFORMATION_SCHEMA.COLUMNS
             WHERE TABLE_CATALOG = '{self.auth_information["database"].upper()}'
-            AND DATA_TYPE in ('GEOGRAPHY', 'GEOMETRY', 'NUMBER')
+            AND DATA_TYPE in ('GEOGRAPHY', 'GEOMETRY', 'NUMBER', 'TEXT')
             ORDER BY TABLE_CATALOG, TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, DATA_TYPE
             """
             self.connection_name = connection_name
@@ -81,7 +81,7 @@ class SFConnectTask(QgsTask):
                     standard_item_comment = QStandardItem(feat.attribute("COMMENT"))
 
                 data_type = feat.attribute("DATA_TYPE")
-                if data_type == "NUMBER":
+                if data_type in ["NUMBER", "TEXT"]:
                     data_type = "H3GEO"
 
                 row_items = [

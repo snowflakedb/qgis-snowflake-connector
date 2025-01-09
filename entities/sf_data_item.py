@@ -319,6 +319,10 @@ class SFDataItem(QgsDataItem):
             elif field_pression > 0:
                 return "float"
             return "integer"
+        if field_type == "TEXT":
+            if is_geo_column:
+                return "h3"
+            return "text"
         else:
             if field_type in snowflake_types:
                 return snowflake_types[field_type]
@@ -361,7 +365,7 @@ FROM INFORMATION_SCHEMA.COLUMNS
 WHERE table_catalog = '{auth_information["database"]}'
 {schema_filter}
 {table_filter}
-AND DATA_TYPE in ('GEOGRAPHY', 'GEOMETRY', 'NUMBER')
+AND DATA_TYPE in ('GEOGRAPHY', 'GEOMETRY', 'TEXT', 'INTEGER')
 ORDER BY {column_name}"""
 
         return auth_information, column_name, children_item_type, query

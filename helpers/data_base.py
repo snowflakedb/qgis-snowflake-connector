@@ -55,26 +55,26 @@ def filter_geo_columns(
         typing.List[QgsFeature]: The `columns` that are geo
     """
     geo_columns = []
-    number_queries = []
-    number_columns = []
+    h3_queries = []
+    h3_columns = []
     for feat in columns:
         if feat.attribute("DATA_TYPE") in ["GEOMETRY", "GEOGRAPHY"]:
             geo_columns.append(feat)
-        if feat.attribute("DATA_TYPE") == "NUMBER":
-            number_columns.append(feat)
+        if feat.attribute("DATA_TYPE") in ["TEXT", "INTEGER"]:
+            h3_columns.append(feat)
             table = f'"{feat.attribute("TABLE_CATALOG")}"."{feat.attribute("TABLE_SCHEMA")}"."{feat.attribute("TABLE_NAME")}"'
             column = f'{table}."{feat.attribute("COLUMN_NAME")}"'
-            number_queries.append(f"""
+            h3_queries.append(f"""
 (SELECT H3_IS_VALID_CELL({column})
 FROM {table}
 WHERE {column} IS NOT NULL
 LIMIT 1)""")
-    if len(number_queries) > 0:
-        query = f'SELECT {",".join(number_queries)}'
+    if len(h3_queries) > 0:
+        query = f'SELECT {",".join(h3_queries)}'
         result = sf_data_provider.execute_query(query, connection_name).fetchall()[0]
         for i in range(len(result)):
             if result[i]:
-                geo_columns.append(number_columns[i])
+                geo_columns.append(h3_columns[i])
     return geo_columns
 
 
@@ -131,7 +131,7 @@ def get_geo_columns(
     schema_selected_query = f"""SELECT DISTINCT TABLE_NAME, COLUMN_NAME, DATA_TYPE, TABLE_CATALOG, TABLE_SCHEMA, COMMENT
 FROM INFORMATION_SCHEMA.COLUMNS
 WHERE TABLE_CATALOG ILIKE '{sf_data_provider.connection_params["database"]}'
-AND DATA_TYPE IN ('GEOGRAPHY', 'GEOMETRY', 'NUMBER')
+AND DATA_TYPE IN ('GEOGRAPHY', 'GEOMETRY', 'TEXT', 'INTEGER')
 ORDER BY TABLE_NAME, COLUMN_NAME"""
 
     sf_data_provider.load_data(schema_selected_query, connection_name)
@@ -530,7 +530,7 @@ def limit_size_for_type(
     Returns:
         int: The size limit.
     """
-    if column_type == "NUMBER":
+    if column_type in ["TEXT", "INTEGER"]:
         return 500000  # 500k
     return 50000  # 50k
 

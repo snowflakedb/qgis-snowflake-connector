@@ -179,7 +179,7 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                         f'ST_INTERSECTS("{geom_column}", '
                         f"ST_GEOGRAPHYFROMWKT('{filter_rect.asWktPolygon()}'))"
                     )
-                if self._provider._geometry_type == "NUMBER":
+                if self._provider._geometry_type in ["NUMBER", "TEXT"]:
                     filter_geom_clause = (
                         f'ST_INTERSECTS(H3_CELL_TO_BOUNDARY("{geom_column}"), '
                         f"ST_GEOGRAPHYFROMWKT('{filter_rect.asWktPolygon()}'))"
@@ -196,7 +196,7 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                         where_clause += f" and {clause}"
 
             geom_query = f'ST_ASWKB("{geom_column}"), "{geom_column}", '
-            if self._provider._geo_column_type == "NUMBER":
+            if self._provider._geo_column_type in ["NUMBER", "TEXT"]:
                 geom_query = f'"{geom_column}", "{geom_column}", '
 
             self._request_no_geometry = (
@@ -211,7 +211,7 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                 index = self._provider._fields[self._provider.primary_key()].name()
 
             filter_geo_type = f"ST_ASGEOJSON(\"{geom_column}\"):type ILIKE '{self._provider._geometry_type}'"
-            if self._provider._geo_column_type == "NUMBER":
+            if self._provider._geo_column_type in ["NUMBER", "TEXT"]:
                 filter_geo_type = f'H3_IS_VALID_CELL("{geom_column}")'
 
             order_limit_clause = ""
@@ -283,7 +283,7 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
 
                 if not self._request_no_geometry:
                     geometry = QgsGeometry()
-                    if self._provider._geo_column_type == "NUMBER":
+                    if self._provider._geo_column_type in ["NUMBER", "TEXT"]:
                         cell = next_result[self.index_geom_column]
                         hexVertexCoords = h3.cell_to_boundary(cell)
                         geometry = QgsGeometry.fromPolygonXY(
