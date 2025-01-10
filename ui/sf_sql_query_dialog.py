@@ -1,4 +1,5 @@
 from PyQt5.QtWidgets import QWidget
+from qgis.gui import QgsCollapsibleGroupBox
 from qgis.PyQt.QtGui import QStandardItemModel, QStandardItem
 from qgis.PyQt import uic
 from qgis.PyQt.QtCore import pyqtSignal
@@ -48,6 +49,7 @@ class SFSQLQueryDialog(QDialog, FORM_CLASS_SFCS):
         self.mLoadLayerPushButton: QPushButton
         self.mClearButton: QToolButton
         self.mLayerNameLineEdit: QLineEdit
+        self.mLoadAsNewLayerGroupBox: QgsCollapsibleGroupBox
         self.context_information = context_information
         self.settings = get_qsettings()
         self.temp_deactivated_options()
@@ -57,6 +59,12 @@ class SFSQLQueryDialog(QDialog, FORM_CLASS_SFCS):
             self.on_load_layer_push_button_clicked
         )
         self.mClearButton.clicked.connect(self.on_clear_button_clicked)
+        self.mLoadAsNewLayerGroupBox.collapsedStateChanged.connect(
+            self.on_collapsed_state_changed
+        )
+
+    def on_collapsed_state_changed(self, collapsed):
+        self.temp_deactivated_options()
 
     def on_clear_button_clicked(self):
         self.model = QStandardItemModel()
