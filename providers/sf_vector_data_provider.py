@@ -14,7 +14,7 @@ from qgis.PyQt.QtCore import QMetaType
 
 from .sf_feature_iterator import SFFeatureIterator
 
-from ..helpers.data_base import check_from_clause_exceeds_size
+from ..helpers.data_base import check_from_clause_exceeds_size, limit_size_for_type
 
 from .sf_feature_source import SFFeatureSource
 
@@ -31,6 +31,7 @@ from ..helpers.mappings import (
 
 class SFVectorDataProvider(QgsVectorDataProvider):
     """The general VectorDataProvider, which can be extended based on column type"""
+
     def __init__(
         self,
         uri="",
@@ -366,8 +367,10 @@ class SFVectorDataProvider(QgsVectorDataProvider):
         self._features = []
         self._features_loaded = False
 
+
 class SFGeoVectorDataProvider(SFVectorDataProvider):
     """The VectorDataProvider for GEOGRAPHY and GEOMETRY columns"""
+
     def __init__(
         self,
         uri="",
@@ -383,18 +386,21 @@ class SFGeoVectorDataProvider(SFVectorDataProvider):
             if not self._is_valid:
                 self._feature_count = 0
             else:
-                query = f"SELECT COUNT(*) FROM {self._from_clause}"
-                if self.subsetString():
-                    query += f" AND {self.subsetString()}"
+                if self._is_limited_unordered:
+                    self._feature_count = limit_size_for_type(self._geo_column_type)
+                else:
+                    query = f"SELECT COUNT(*) FROM {self._from_clause}"
+                    if self.subsetString():
+                        query += f" AND {self.subsetString()}"
 
-                cur = self.connection_manager.execute_query(
-                    connection_name=self._connection_name,
-                    query=query,
-                    context_information=self._context_information,
-                )
+                    cur = self.connection_manager.execute_query(
+                        connection_name=self._connection_name,
+                        query=query,
+                        context_information=self._context_information,
+                    )
 
-                self._feature_count = cur.fetchone()[0]
-                cur.close()
+                    self._feature_count = cur.fetchone()[0]
+                    cur.close()
 
         return self._feature_count
 
@@ -427,8 +433,10 @@ class SFGeoVectorDataProvider(SFVectorDataProvider):
 
         return self._extent
 
+
 class SFH3VectorDataProvider(SFVectorDataProvider):
     """The VectorDataProvider for H3 columns"""
+
     def __init__(
         self,
         uri="",
@@ -436,7 +444,7 @@ class SFH3VectorDataProvider(SFVectorDataProvider):
         flags=QgsDataProvider.ReadFlags(),
     ):
         super().__init__(uri, providerOptions, flags)
-        query = f"SELECT H3_IS_VALID_CELL(\"{self._column_geom}\") FROM {self._from_clause} WHERE {self._column_geom} IS NOT NULL LIMIT 1"
+        query = f'SELECT H3_IS_VALID_CELL("{self._column_geom}") FROM {self._from_clause} WHERE {self._column_geom} IS NOT NULL LIMIT 1'
 
         cur = self.connection_manager.execute_query(
             connection_name=self._connection_name,
@@ -454,7 +462,7 @@ class SFH3VectorDataProvider(SFVectorDataProvider):
                 self._feature_count = 0
             else:
                 query = f"SELECT COUNT(*) FROM {self._from_clause}"
-                query += f" WHERE H3_IS_VALID_CELL(\"{self._column_geom}\")"
+                query += f' WHERE H3_IS_VALID_CELL("{self._column_geom}")'
                 if self.subsetString():
                     query += f" AND {self.subsetString()}"
 
