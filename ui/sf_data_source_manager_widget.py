@@ -18,7 +18,7 @@ from qgis.gui import QgsAbstractDataSourceWidget
 from qgis.PyQt import uic
 from qgis.PyQt.QtCore import QModelIndex
 from qgis.PyQt.QtGui import QStandardItemModel, QStandardItem
-from qgis.PyQt.QtWidgets import QMessageBox, QWidget
+from qgis.PyQt.QtWidgets import QMessageBox, QWidget, QComboBox
 import os
 import typing
 
@@ -38,6 +38,7 @@ class SFDataSourceManagerWidget(QgsAbstractDataSourceWidget, FORM_CLASS_SFDSM):
         """
         super().__init__(parent)
         self.setupUi(self)
+        self.cmbConnections: QComboBox
         self.btnNew.clicked.connect(self.on_btn_new_clicked)
         self.btnConnect.clicked.connect(self.on_btn_connect_clicked)
         self.btnEdit.clicked.connect(self.on_btn_edit_clicked)
@@ -251,6 +252,7 @@ class SFDataSourceManagerWidget(QgsAbstractDataSourceWidget, FORM_CLASS_SFDSM):
                     another_window.txtRole.setText(auth_information["role"])
 
                 another_window.mAuthSettings.setUsername(auth_information["username"])
+                another_window.mAuthSettings.setPassword(auth_information["password"])
                 another_window.exec_()
         except Exception as e:
             QMessageBox.information(
