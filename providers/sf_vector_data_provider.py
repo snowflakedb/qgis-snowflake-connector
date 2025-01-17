@@ -265,8 +265,7 @@ class SFVectorDataProvider(QgsVectorDataProvider):
             return False
 
         query = (
-            "SELECT table_name FROM information_schema.tables "
-            "WHERE table_type = 'VIEW'"
+            "SELECT table_name FROM information_schema.tables WHERE table_type = 'VIEW'"
         )
         cur = self.connection_manager.execute_query(
             connection_name=self._connection_name,
@@ -391,7 +390,7 @@ class SFGeoVectorDataProvider(SFVectorDataProvider):
                 else:
                     query = f"SELECT COUNT(*) FROM {self._from_clause} WHERE 1=1"
                     if self.subsetString():
-                        query += f" AND {self.subsetString()}"
+                        query += f" WHERE {self.subsetString()}"
 
                     cur = self.connection_manager.execute_query(
                         connection_name=self._connection_name,
