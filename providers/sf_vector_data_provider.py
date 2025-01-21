@@ -388,7 +388,7 @@ class SFGeoVectorDataProvider(SFVectorDataProvider):
                 if self._is_limited_unordered:
                     self._feature_count = limit_size_for_type(self._geo_column_type)
                 else:
-                    query = f"SELECT COUNT(*) FROM {self._from_clause} WHERE 1=1"
+                    query = f"SELECT COUNT(*) FROM {self._from_clause}"
                     if self.subsetString():
                         query += f" WHERE {self.subsetString()}"
 
