@@ -251,7 +251,7 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
         try:
             hex_to_int = int(hex_cell, 16)
             return hex_to_int
-        except ValueError:
+        except Exception:
             return hex_cell
 
     def fetchFeature(self, f: QgsFeature) -> bool:
