@@ -113,7 +113,7 @@ def get_geo_columns(
     schema_selected_query = f"""SELECT DISTINCT TABLE_NAME, COLUMN_NAME, DATA_TYPE, TABLE_CATALOG, TABLE_SCHEMA, COMMENT
 FROM INFORMATION_SCHEMA.COLUMNS
 WHERE TABLE_CATALOG ILIKE '{sf_data_provider.connection_params["database"]}'
-AND DATA_TYPE IN ('GEOGRAPHY', 'GEOMETRY', 'NUMBER')
+AND DATA_TYPE IN ('GEOGRAPHY', 'GEOMETRY', 'NUMBER', 'TEXT')
 ORDER BY TABLE_NAME, COLUMN_NAME"""
 
     sf_data_provider.load_data(schema_selected_query, connection_name)
@@ -512,7 +512,7 @@ def limit_size_for_type(
     Returns:
         int: The size limit.
     """
-    if column_type == "NUMBER":
+    if column_type in ["NUMBER", "TEXT"]:
         return 500000  # 500k
     return 50000  # 50k
 
@@ -733,7 +733,7 @@ def get_limit_sql_query(
     query_columns = ""
     h3_query_any_value_columns = ""
     for desc in cur_description:
-        col_name = desc[0]
+        col_name = desc[0].replace('"', '""')
         col_type = desc[1]
         if query_columns != "":
             query_columns += ", "
@@ -745,10 +745,13 @@ def get_limit_sql_query(
             SnowflakeMetadataType.GEOGRAPHY.value,
             SnowflakeMetadataType.GEOMETRY.value,
         ):
-            query_columns += f"ST_ASWKT({col_name}) AS {col_name}"
+            query_columns += f'ST_ASWKT("{col_name}") AS "{col_name}"'
         else:
-            query_columns += f"{col_name}"
-            if col_type == SnowflakeMetadataType.FIXED.value:
+            query_columns += f'"{col_name}"'
+            if col_type in [
+                SnowflakeMetadataType.FIXED.value,
+                SnowflakeMetadataType.TEXT.value,
+            ]:
                 h3_query_any_value_column_value = (
                     f'ANY_VALUE(H3_IS_VALID_CELL("{col_name}")) AS "{col_name}"'
                 )
