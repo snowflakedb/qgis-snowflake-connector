@@ -33,7 +33,7 @@ class SFConnectTask(QgsTask):
             SELECT TABLE_CATALOG, TABLE_SCHEMA, TABLE_NAME, COMMENT, COLUMN_NAME, DATA_TYPE
             FROM INFORMATION_SCHEMA.COLUMNS
             WHERE TABLE_CATALOG = '{self.auth_information["database"].upper()}'
-            AND DATA_TYPE in ('GEOGRAPHY', 'GEOMETRY', 'NUMBER')
+            AND DATA_TYPE in ('GEOGRAPHY', 'GEOMETRY', 'NUMBER', 'TEXT')
             ORDER BY TABLE_CATALOG, TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, DATA_TYPE
             """
             self.connection_name = connection_name
@@ -52,18 +52,18 @@ class SFConnectTask(QgsTask):
         """
         try:
             sf_data_provider = SFDataProvider(self.auth_information)
-            columns = get_geo_columns(
-                sf_data_provider, self.connection_name
+            columns = get_geo_columns(sf_data_provider, self.connection_name)
+            columns.sort(
+                key=lambda x: (
+                    x.attribute("TABLE_CATALOG"),
+                    x.attribute("TABLE_SCHEMA"),
+                    x.attribute("TABLE_NAME"),
+                )
             )
-            columns.sort(key=lambda x: (x.attribute("TABLE_CATALOG"), x.attribute("TABLE_SCHEMA"), x.attribute("TABLE_NAME")))
             current_schema = None
             current_item = None
             self.rows_items: typing.List[QStandardItem] = []
             for feat in columns:
-
-                from qgis.core import QgsMessageLog
-                QgsMessageLog.logMessage(f"col {feat.attributes()}", 'SF Plugin')
-
                 if current_schema != feat.attribute("TABLE_SCHEMA"):
                     current_schema = feat.attribute("TABLE_SCHEMA")
                     current_item = QStandardItem(feat.attribute("TABLE_SCHEMA"))
@@ -81,7 +81,7 @@ class SFConnectTask(QgsTask):
                     standard_item_comment = QStandardItem(feat.attribute("COMMENT"))
 
                 data_type = feat.attribute("DATA_TYPE")
-                if data_type == "NUMBER":
+                if data_type in ["NUMBER", "TEXT"]:
                     data_type = "H3GEO"
 
                 row_items = [

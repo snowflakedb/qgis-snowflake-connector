@@ -319,6 +319,10 @@ class SFDataItem(QgsDataItem):
             elif field_pression > 0:
                 return "float"
             return "integer"
+        elif field_type == "TEXT":
+            if is_geo_column:
+                return "h3"
+            return "text"
         else:
             if field_type in snowflake_types:
                 return snowflake_types[field_type]
@@ -361,7 +365,7 @@ FROM INFORMATION_SCHEMA.COLUMNS
 WHERE table_catalog = '{auth_information["database"]}'
 {schema_filter}
 {table_filter}
-AND DATA_TYPE in ('GEOGRAPHY', 'GEOMETRY', 'NUMBER')
+AND DATA_TYPE in ('GEOGRAPHY', 'GEOMETRY', 'NUMBER', 'TEXT')
 ORDER BY {column_name}"""
 
         return auth_information, column_name, children_item_type, query
@@ -440,7 +444,7 @@ ORDER BY {column_name}"""
                         (
                             "The dataset is too large. Please consider using "
                             '"Execute SQL" to limit the result set. If you click '
-                            f'"Proceed", only a random sample of {limit_size//1000} thousand rows '
+                            f'"Proceed", only a random sample of {limit_size // 1000} thousand rows '
                             "will be loaded."
                         ),
                     )

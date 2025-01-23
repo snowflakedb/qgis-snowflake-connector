@@ -70,7 +70,7 @@ class SFConvertSQLQueryToLayerTask(QgsTask):
                     query=self.query,
                     context_information=self.context_information,
                 )
-                if geo_column_type != "NUMBER"
+                if geo_column_type not in ["NUMBER", "TEXT"]
                 else ["POLYGON"]
             )
             for geo_type in geo_type_list:

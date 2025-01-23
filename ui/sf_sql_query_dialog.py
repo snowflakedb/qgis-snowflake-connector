@@ -17,6 +17,8 @@ from qgis.core import QgsApplication
 import os
 import typing
 
+from ..enums.snowflake_metadata_type import SnowflakeMetadataType
+
 from ..helpers.data_base import checks_sql_query_exceeds_size
 from ..helpers.messages import get_proceed_cancel_message_box
 
@@ -185,7 +187,14 @@ class SFSQLQueryDialog(QDialog, FORM_CLASS_SFCS):
                 col_type = result_meta_data[1]
                 col_names.append(col_name)
                 col_types.append(col_type)
-                if col_type in [14, 15] or h3_column_check[index]:
+                if (
+                    col_type
+                    in [
+                        SnowflakeMetadataType.GEOGRAPHY.value,
+                        SnowflakeMetadataType.GEOMETRY.value,
+                    ]
+                    or h3_column_check[index]
+                ):
                     self.mGeometryColumnComboBox.addItem(
                         col_name, {"is_h3": True if h3_column_check[index] else False}
                     )
