@@ -278,6 +278,19 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                     _indx = self._index
                 local_feature: QgsFeature = self._provider._features[_indx]
 
+                while (
+                    self._request.filterRect()
+                    and not self._request.filterRect().isNull()
+                    and not local_feature.geometry().intersects(
+                        self._request.filterRect()
+                    )
+                ):
+                    self._index += 1
+                    if self._index >= len(self._provider._features):
+                        f.setValid(False)
+                        return False
+                    local_feature = self._provider._features[self._index]
+
                 f.setFields(self._provider.fields())
                 f.setGeometry(local_feature.geometry())
                 f.setId(local_feature.id())
