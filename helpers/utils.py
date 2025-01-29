@@ -272,12 +272,13 @@ def check_install_package(package_name) -> None:
                 "-m",
                 "pip",
                 "install",
-                package_name + "[secure-local-storage]",
+                package_name,
             ]
         )
         subprocess.call(
             [python3_path, "-m", "pip", "install", "pyopenssl", "--upgrade"]
         )
+
 
 def check_install_snowflake_connector_package() -> None:
     """
@@ -289,6 +290,7 @@ def check_install_snowflake_connector_package() -> None:
         subprocess.CalledProcessError: If the pip installation commands fail.
     """
     check_install_package("snowflake-connector-python")
+
 
 def check_install_h3_package() -> None:
     """
