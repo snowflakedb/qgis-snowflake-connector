@@ -137,13 +137,13 @@ class SFConnectionManager:
             Exception: If an error occurs while creating the cursor.
         """
         try:
+            connection = None
             if connection_name in self.opened_connections:
                 connection = self.opened_connections[connection_name]
-                if connection.expired:
-                    self.reconnect(connection_name)
-                    connection = self.opened_connections[connection_name]
-                return connection.cursor()
-            return None
+            if connection is None or connection.expired:
+                self.reconnect(connection_name)
+                connection = self.opened_connections[connection_name]
+            return connection.cursor()
         except Exception as e:
             raise e
 
