@@ -9,6 +9,7 @@ from qgis.core import QgsFeature
 from ..providers.sf_data_source_provider import SFDataProvider
 from ..entities.sf_feature_iterator import SFFeatureIterator
 import snowflake.connector
+from snowflake.connector.errors import ProgrammingError
 
 
 def get_schema_iterator(settings: QSettings, connection_name: str) -> SFFeatureIterator:
@@ -731,16 +732,17 @@ def get_limit_sql_query(
     cur_desc.close()
 
     query_columns = ""
-    h3_query_any_value_columns = ""
+    h3_query_any_value_columns = []
     for desc in cur_description:
         col_name = desc[0].replace('"', '""')
         col_type = desc[1]
         if query_columns != "":
             query_columns += ", "
-        if h3_query_any_value_columns != "":
-            h3_query_any_value_columns += ", "
 
-        h3_query_any_value_column_value = f'FALSE AS "{col_name}"'
+        h3_query_any_value_column_value = {
+            "column_value": "FALSE",
+            "col_alias": f'"{col_name}"',
+        }
         if col_type in (
             SnowflakeMetadataType.GEOGRAPHY.value,
             SnowflakeMetadataType.GEOMETRY.value,
@@ -752,10 +754,11 @@ def get_limit_sql_query(
                 SnowflakeMetadataType.FIXED.value,
                 SnowflakeMetadataType.TEXT.value,
             ]:
-                h3_query_any_value_column_value = (
-                    f'ANY_VALUE(H3_IS_VALID_CELL("{col_name}")) AS "{col_name}"'
-                )
-        h3_query_any_value_columns += h3_query_any_value_column_value
+                h3_query_any_value_column_value = {
+                    "column_value": f'ANY_VALUE(H3_IS_VALID_CELL("{col_name}"))',
+                    "col_alias": f'"{col_name}"',
+                }
+        h3_query_any_value_columns.append(h3_query_any_value_column_value)
 
     sub_query = f"SELECT {query_columns} FROM ({query}) LIMIT {limit}"
     cur = connection_manager.execute_query(
@@ -777,7 +780,7 @@ def get_limit_sql_query(
 
 
 def get_h3_columns_from_query(
-    query_columns: str, query: str, context_information: dict
+    query_columns: typing.List[str], query: str, context_information: dict
 ) -> typing.List:
     """
     Executes a sub-query to retrieve specified columns from a given query and returns the result set.
@@ -791,14 +794,52 @@ def get_h3_columns_from_query(
         typing.List: A list containing the rows of the result set from the executed sub-query.
     """
     connection_manager: SFConnectionManager = SFConnectionManager.get_instance()
-    sub_query = f"SELECT {query_columns} FROM ({query})"
-    cur = connection_manager.execute_query(
-        connection_name=context_information["connection_name"],
-        query=sub_query,
-        context_information=context_information,
-    )
+    sub_query = f"SELECT {generate_query_columns(query_columns)} FROM ({query})"
+    cur = None
+    try:
+        cur = connection_manager.execute_query(
+            connection_name=context_information["connection_name"],
+            query=sub_query,
+            context_information=context_information,
+        )
 
-    resultset = cur.fetchall()
-    cur.close()
+        resultset = cur.fetchall()
+        cur.close()
+    except ProgrammingError as e:
+        if cur:
+            cur.close()
+        error_code = e.errno
+        error_message = e.msg
+        if error_code == 100419 and error_message.startswith("100419 (P0000)"):
+            # H3_IS_VALID_CELL is throwing an error because the column is not
+            # H3. All columns will be treated as non-H3.
+            resultset = [tuple(False for col in query_columns)]
+        else:
+            raise e
 
     return resultset
+
+
+def generate_query_columns(
+    columns_info: typing.List[typing.Dict[str, str]], set_value_false: bool = False
+) -> str:
+    """
+    Generates a SQL query string for selecting columns with optional aliasing.
+
+    Args:
+        columns_info (List[Dict[str, str]]): A list of dictionaries where each dictionary contains
+                                             'column_value' and 'col_alias' keys representing the
+                                             column name and its alias respectively.
+        set_value_false (bool, optional): If True, all column values will be replaced with 'FALSE'.
+                                          Defaults to False.
+
+    Returns:
+        str: A string representing the SQL query part for selecting columns with their aliases.
+    """
+    col_map = list(
+        map(
+            lambda col: f"{'FALSE' if set_value_false else col['column_value']} AS {col['col_alias']}",
+            columns_info,
+        )
+    )
+    return ", ".join(col_map)
