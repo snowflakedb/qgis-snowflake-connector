@@ -71,7 +71,7 @@ class SFConvertSQLQueryToLayerTask(QgsTask):
                     context_information=self.context_information,
                 )
                 if geo_column_type not in ["NUMBER", "TEXT"]
-                else ["POLYGON"]
+                else ["MultiPolygon"]
             )
             for geo_type in geo_type_list:
                 uri = (
