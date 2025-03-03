@@ -10,6 +10,10 @@ from ..providers.sf_data_source_provider import SFDataProvider
 from ..entities.sf_feature_iterator import SFFeatureIterator
 import snowflake.connector
 from snowflake.connector.errors import ProgrammingError
+from ..helpers.mappings import (
+    mapping_single_to_multi_geometry_type,
+    mapping_multi_single_to_geometry_type,
+)
 
 
 def get_schema_iterator(settings: QSettings, connection_name: str) -> SFFeatureIterator:
@@ -443,23 +447,11 @@ def get_type_from_table_geo_column(
     Returns:
         list: A list of distinct geographic types found in the specified column, converted to uppercase.
     """
-    connection_manager: SFConnectionManager = SFConnectionManager.get_instance()
-    query_geo_type = (
-        f'SELECT DISTINCT ST_ASGEOJSON("{geo_column_name}"):type '
-        f'FROM "{table_name}" where "{geo_column_name}" IS NOT NULL'
-    )
-    cur = connection_manager.execute_query(
-        connection_name=context_information["connection_name"],
-        query=query_geo_type,
+    return get_geo_types_from_geo_json_column(
+        column=geo_column_name,
+        from_clause=table_name,
         context_information=context_information,
     )
-    geo_type_list = cur.fetchall()
-    cleaned_geo_type_list = []
-    for geo_type_tuple in geo_type_list:
-        geo_type: str = geo_type_tuple[0]
-        cleaned_geo_type_list.append(geo_type.strip('"').upper())
-    cur.close()
-    return cleaned_geo_type_list
 
 
 def get_geo_column_type(
@@ -605,10 +597,33 @@ def get_type_from_query_geo_column(
     query: str,
     context_information: dict,
 ) -> list:
+    return get_geo_types_from_geo_json_column(
+        column=context_information["geo_column_name"],
+        from_clause=f"({query})",
+        context_information=context_information,
+    )
+
+
+def get_geo_types_from_geo_json_column(
+    column: str,
+    from_clause: str,
+    context_information: dict,
+) -> list:
+    """
+    Retrieves distinct geometry types from a GeoJSON column in a Snowflake table.
+
+    Args:
+        column (str): The name of the column containing GeoJSON data.
+        from_clause (str): The FROM clause specifying the table name or query.
+        context_information (dict): A dictionary containing context information, including the connection name.
+
+    Returns:
+        list: A list of distinct geometry types.
+    """
     connection_manager: SFConnectionManager = SFConnectionManager.get_instance()
     query_geo_type = (
-        f'SELECT DISTINCT ST_ASGEOJSON("{context_information["geo_column_name"]}"):type '
-        f'FROM ({query}) WHERE "{context_information["geo_column_name"]}" IS NOT NULL'
+        f'SELECT DISTINCT ST_ASGEOJSON("{column}"):type::string '
+        f'FROM {from_clause} WHERE "{column}" IS NOT NULL'
     )
     cur = connection_manager.execute_query(
         connection_name=context_information["connection_name"],
@@ -617,9 +632,20 @@ def get_type_from_query_geo_column(
     )
     geo_type_list = cur.fetchall()
     cleaned_geo_type_list = []
+
     for geo_type_tuple in geo_type_list:
         geo_type: str = geo_type_tuple[0]
-        cleaned_geo_type_list.append(geo_type.strip('"').upper())
+        if geo_type.lower().startswith("multi"):
+            # Checks if the single type already exists and removes it
+            single_type = mapping_multi_single_to_geometry_type.get(geo_type)
+            if single_type and single_type in cleaned_geo_type_list:
+                cleaned_geo_type_list.remove(single_type)
+        else:
+            # Checks if the multi type already exists
+            multi_type = mapping_single_to_multi_geometry_type.get(geo_type)
+            if multi_type and multi_type in cleaned_geo_type_list:
+                continue
+        cleaned_geo_type_list.append(geo_type)
     cur.close()
     return cleaned_geo_type_list
 
