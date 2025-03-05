@@ -22,6 +22,7 @@ from qgis.core import (
     Qgis,
 )
 import h3.api.basic_int as h3
+from ..helpers.mappings import mapping_multi_single_to_geometry_type
 
 
 class SFFeatureIterator(QgsAbstractFeatureIterator):
@@ -214,7 +215,14 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
             else:
                 index = self._provider._fields[self._provider.primary_key()].name()
 
-            filter_geo_type = f"ST_ASGEOJSON(\"{geom_column}\"):type ILIKE '{self._provider._geometry_type}'"
+            mapped_type = mapping_multi_single_to_geometry_type.get(
+                self._provider._geometry_type
+            )
+
+            filter_geo_type = f"ST_ASGEOJSON(\"{geom_column}\"):type::string IN ('{self._provider._geometry_type}'"
+            if mapped_type is not None:
+                filter_geo_type += f", '{mapped_type}'"
+            filter_geo_type += ")"
             if self._provider._geo_column_type in ["NUMBER", "TEXT"]:
                 filter_geo_type = f'H3_IS_VALID_CELL("{geom_column}")'
 

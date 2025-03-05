@@ -3,14 +3,26 @@ from qgis.PyQt.QtCore import QVariant
 
 from ..enums.snowflake_metadata_type import SnowflakeMetadataType
 
+
+mapping_single_to_multi_geometry_type = {
+    "Point": "MultiPoint",
+    "LineString": "MultiLineString",
+    "Polygon": "MultiPolygon",
+}
+
+mapping_multi_single_to_geometry_type = {
+    "MultiPoint": "Point",
+    "MultiLineString": "LineString",
+    "MultiPolygon": "Polygon",
+}
+
 mapping_snowflake_qgis_geometry = {
-    "LINESTRING": QgsWkbTypes.LineString,
-    "MULTILINESTRING": QgsWkbTypes.MultiLineString,
-    "MULTIPOINT": QgsWkbTypes.MultiPolygon,
-    "MULTIPOLYGON": QgsWkbTypes.MultiPolygon,
-    "POINT": QgsWkbTypes.Point,
-    "POLYGON": QgsWkbTypes.Polygon,
-    # ...
+    "LineString": QgsWkbTypes.LineString,
+    "MultiLineString": QgsWkbTypes.MultiLineString,
+    "MultiPoint": QgsWkbTypes.MultiPoint,
+    "MultiPolygon": QgsWkbTypes.MultiPolygon,
+    "Point": QgsWkbTypes.Point,
+    "Polygon": QgsWkbTypes.Polygon,
 }
 
 mapping_snowflake_qgis_type = {
