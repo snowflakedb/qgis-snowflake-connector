@@ -2,6 +2,7 @@ from ..helpers.data_base import check_table_exceeds_size
 from ..helpers.messages import get_proceed_cancel_message_box
 from ..helpers.utils import (
     get_auth_information,
+    get_auth_method_config,
     get_authentification_information,
     get_connection_child_groups,
     get_qsettings,
@@ -18,7 +19,7 @@ from qgis.gui import QgsAbstractDataSourceWidget
 from qgis.PyQt import uic
 from qgis.PyQt.QtCore import QModelIndex
 from qgis.PyQt.QtGui import QStandardItemModel, QStandardItem
-from qgis.PyQt.QtWidgets import QMessageBox, QWidget, QComboBox
+from qgis.PyQt.QtWidgets import QMessageBox, QWidget, QComboBox, QTabWidget
 import os
 import typing
 
@@ -251,8 +252,35 @@ class SFDataSourceManagerWidget(QgsAbstractDataSourceWidget, FORM_CLASS_SFDSM):
                 if "role" in auth_information:
                     another_window.txtRole.setText(auth_information["role"])
 
-                another_window.mAuthSettings.setUsername(auth_information["username"])
-                another_window.mAuthSettings.setPassword(auth_information["password"])
+                if auth_information["password_encrypted"]:
+                    m_auth_settings_tab_widget: QTabWidget = (
+                        another_window.mAuthSettings.findChild(QTabWidget)
+                    )
+                    if m_auth_settings_tab_widget:
+                        m_auth_settings_tab_widget.setCurrentIndex(0)
+
+                    m_auth_settings_combo_box: QComboBox = (
+                        another_window.mAuthSettings.findChild(QComboBox)
+                    )
+
+                    auth_method_config = get_auth_method_config(
+                        auth_information["config_id"]
+                    )
+
+                    for i in range(m_auth_settings_combo_box.count()):
+                        m_auth_settings_combo_box.setCurrentIndex(i)
+                        if (
+                            m_auth_settings_combo_box.currentText()
+                            == auth_method_config.name()
+                        ):
+                            break
+                else:
+                    another_window.mAuthSettings.setUsername(
+                        auth_information["username"]
+                    )
+                    another_window.mAuthSettings.setPassword(
+                        auth_information["password"]
+                    )
                 another_window.exec_()
         except Exception as e:
             QMessageBox.information(

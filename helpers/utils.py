@@ -4,6 +4,7 @@ from typing import Dict
 from qgis.PyQt.QtCore import QSettings
 import os
 from qgis.PyQt.QtWidgets import QMessageBox
+from qgis.core import QgsApplication, QgsAuthMethodConfig
 
 
 def add_task_to_running_queue(task_name: str, status: str) -> None:
@@ -106,6 +107,16 @@ def get_authentification_information(settings: QSettings, connection_name: str) 
     auth_info["username"] = settings.value("username", defaultValue="")
     auth_info["connection_type"] = settings.value("connection_type", defaultValue="")
     auth_info["password"] = settings.value("password", defaultValue="")
+    auth_info["config_id"] = settings.value("config_id", defaultValue="")
+    auth_info["password_encrypted"] = settings.value(
+        "password_encrypted", defaultValue=False
+    )
+    if auth_info["password_encrypted"]:
+        encrypted_credentials = get_encrypted_credentials(
+            settings.value("config_id", defaultValue="")
+        )
+        auth_info["username"] = encrypted_credentials["username"]
+        auth_info["password"] = encrypted_credentials["password"]
     role = settings.value("role", defaultValue="")
     if role != "":
         auth_info["role"] = role
@@ -193,6 +204,9 @@ def set_connection_settings(connection_settings: dict) -> None:
         settings.setValue("role", connection_settings["role"])
     if connection_settings["connection_type"] == "Default Authentication":
         settings.setValue("password", connection_settings["password"])
+    settings.setValue("password_encrypted", connection_settings["password_encrypted"])
+    if "config_id" in connection_settings:
+        settings.setValue("config_id", connection_settings["config_id"])
     settings.endGroup()
     settings.sync()
 
@@ -363,7 +377,17 @@ def get_auth_information(connection_name: str) -> dict:
     auth_info["database"] = settings.value("database", defaultValue="")
     auth_info["username"] = settings.value("username", defaultValue="")
     auth_info["connection_type"] = settings.value("connection_type", defaultValue="")
+    auth_info["password_encrypted"] = settings.value(
+        "password_encrypted", defaultValue=False
+    )
     auth_info["password"] = settings.value("password", defaultValue="")
+    auth_info["config_id"] = settings.value("config_id", defaultValue="")
+    if auth_info["password_encrypted"]:
+        encrypted_credentials = get_encrypted_credentials(
+            settings.value("config_id", defaultValue="")
+        )
+        auth_info["username"] = encrypted_credentials["username"]
+        auth_info["password"] = encrypted_credentials["password"]
     role = settings.value("role", defaultValue="")
     if role != "":
         auth_info["role"] = role
@@ -432,3 +456,33 @@ def get_path_nodes(path: str):
     table_name = path_splitted[4] if len(path_splitted) > 4 else None
 
     return connection_name, schema_name, table_name
+
+
+def get_encrypted_credentials(config_id: str) -> dict[str, str]:
+    """
+    Retrieves encrypted credentials from QGIS authentication manager.
+
+    Args:
+        config_id (str): The ID of the authentication configuration to load.
+
+    Returns:
+        dict[str, str]: A dictionary containing the encrypted credentials.
+    """
+    method_config = get_auth_method_config(config_id)
+    return method_config.configMap()
+
+
+def get_auth_method_config(config_id: str) -> QgsAuthMethodConfig:
+    """
+    Retrieves authentication method configuration from QGIS authentication manager.
+
+    Args:
+        config_id (str): The ID of the authentication configuration to load.
+
+    Returns:
+        QgsAuthMethodConfig: The authentication method configuration.
+    """
+    auth_manager = QgsApplication.authManager()
+    method_config = QgsAuthMethodConfig()
+    auth_manager.loadAuthenticationConfig(config_id, method_config, True)
+    return method_config
