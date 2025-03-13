@@ -189,8 +189,7 @@ class SFConnectionStringDialog(QDialog, FORM_CLASS_SFCS):
                 if is_default_auth:
                     conn_settings["config_id"] = self.mAuthSettings.configId()
 
-            if self.txtRole.text() != "":
-                conn_settings["role"] = self.txtRole.text()
+            conn_settings["role"] = self.txtRole.text()
             set_connection_settings(conn_settings)
             if self.connection_name != self.txtName.text():
                 if self.connection_name is not None and self.connection_name != "":
