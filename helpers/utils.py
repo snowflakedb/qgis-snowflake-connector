@@ -111,6 +111,13 @@ def get_authentification_information(settings: QSettings, connection_name: str) 
     auth_info["password_encrypted"] = settings.value(
         "password_encrypted", defaultValue=False
     )
+
+    if type(auth_info["password_encrypted"]) is str:
+        if auth_info["password_encrypted"].lower() == "true":
+            auth_info["password_encrypted"] = True
+        else:
+            auth_info["password_encrypted"] = False
+
     if auth_info["password_encrypted"]:
         encrypted_credentials = get_encrypted_credentials(
             settings.value("config_id", defaultValue="")
@@ -380,6 +387,13 @@ def get_auth_information(connection_name: str) -> dict:
     auth_info["password_encrypted"] = settings.value(
         "password_encrypted", defaultValue=False
     )
+
+    if type(auth_info["password_encrypted"]) is str:
+        if auth_info["password_encrypted"].lower() == "true":
+            auth_info["password_encrypted"] = True
+        else:
+            auth_info["password_encrypted"] = False
+
     auth_info["password"] = settings.value("password", defaultValue="")
     auth_info["config_id"] = settings.value("config_id", defaultValue="")
     if auth_info["password_encrypted"]:
