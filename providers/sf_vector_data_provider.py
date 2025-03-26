@@ -443,7 +443,7 @@ class SFH3VectorDataProvider(SFVectorDataProvider):
         flags=QgsDataProvider.ReadFlags(),
     ):
         super().__init__(uri, providerOptions, flags)
-        query = f'SELECT H3_IS_VALID_CELL("{self._column_geom}") FROM {self._from_clause} WHERE {self._column_geom} IS NOT NULL LIMIT 1'
+        query = f'SELECT H3_IS_VALID_CELL("{self._column_geom}") FROM {self._from_clause} WHERE "{self._column_geom}" IS NOT NULL LIMIT 1'
 
         cur = self.connection_manager.execute_query(
             connection_name=self._connection_name,
