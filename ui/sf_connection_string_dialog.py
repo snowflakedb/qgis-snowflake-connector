@@ -13,7 +13,12 @@ from qgis.PyQt.QtWidgets import (
 import os
 import typing
 
-from ..helpers.utils import get_qsettings, remove_connection, set_connection_settings
+from ..helpers.utils import (
+    get_encrypted_credentials,
+    get_qsettings,
+    remove_connection,
+    set_connection_settings,
+)
 
 from ..managers.sf_connection_manager import SFConnectionManager
 
@@ -48,7 +53,7 @@ class SFConnectionStringDialog(QDialog, FORM_CLASS_SFCS):
         self.mAuthSettings: QgsAuthSettingsWidget
         self.setupUi(self)
         self.btnConnect.clicked.connect(self.test_connection_clicked)
-        self.buttonBox.clicked.connect(self.button_box_ok_clicked)
+        self.buttonBox.accepted.connect(self.button_box_ok_clicked)
         self.settings = get_qsettings()
         self.cbxConnectionType.addItem("Default Authentication")
         self.cbxConnectionType.addItem("Single sign-on (SSO)")
@@ -91,20 +96,47 @@ class SFConnectionStringDialog(QDialog, FORM_CLASS_SFCS):
             list: A list of strings representing the names of unfilled required fields.
         """
         fields = [
-            (self.txtName, "Connection Name"),
-            (self.txtWarehouse, "Warehouse"),
-            (self.txtAccount, "Account"),
-            (self.txtDatabase, "Database"),
+            (self.txtName, "Connection Name", "text"),
+            (self.txtWarehouse, "Warehouse", "text"),
+            (self.txtAccount, "Account", "text"),
+            (self.txtDatabase, "Database", "text"),
         ]
 
-        unfilled_required_fields = [
-            f"- {field_name}\n" for widget, field_name in fields if widget.text() == ""
-        ]
-
-        if self.mAuthSettings.username() == "":
-            unfilled_required_fields.append(
-                "- Username (Under the Basic Authentification Tab)\n"
+        if self.mAuthSettings.configurationTabIsSelected():
+            fields.append(
+                (
+                    self.mAuthSettings,
+                    "Authentication Configuration",
+                    "configId",
+                )
             )
+        else:
+            fields.append(
+                (
+                    self.mAuthSettings,
+                    "Username (Under the Basic Authentification Tab)",
+                    "username",
+                )
+            )
+
+            if self.cbxConnectionType.currentText() == "Default Authentication":
+                fields.append(
+                    (
+                        self.mAuthSettings,
+                        "Password (Under the Basic Authentification Tab)",
+                        "password",
+                    )
+                )
+
+        unfilled_required_fields = []
+        for widget, field_name, method_name in fields:
+            try:
+                method_to_call = getattr(widget, method_name)
+                if method_to_call() == "":
+                    unfilled_required_fields.append(f"- {field_name}\n")
+            except Exception as _:
+                pass
+
         return unfilled_required_fields
 
     def button_box_ok_clicked(self) -> None:
@@ -130,18 +162,34 @@ class SFConnectionStringDialog(QDialog, FORM_CLASS_SFCS):
                     f"Please specify all mandatory fields:\n{''.join(fields_not_verified)}",
                 )
                 return
+
+            config_tab_selected = self.mAuthSettings.configurationTabIsSelected()
             conn_settings = {
+                "username": self.mAuthSettings.username(),
                 "name": self.txtName.text(),
                 "warehouse": self.txtWarehouse.text(),
                 "account": self.txtAccount.text(),
                 "database": self.txtDatabase.text(),
-                "username": self.mAuthSettings.username(),
                 "connection_type": self.cbxConnectionType.currentText(),
+                "password_encrypted": config_tab_selected,
             }
-            if self.txtRole.text() != "":
-                conn_settings["role"] = self.txtRole.text()
-            if self.cbxConnectionType.currentText() == "Default Authentication":
+
+            is_default_auth = (
+                self.cbxConnectionType.currentText() == "Default Authentication"
+            )
+
+            if is_default_auth:
                 conn_settings["password"] = self.mAuthSettings.password()
+
+            if config_tab_selected:
+                encrypted_config_values = get_encrypted_credentials(
+                    self.mAuthSettings.configId()
+                )
+                conn_settings["username"] = encrypted_config_values["username"]
+                if is_default_auth:
+                    conn_settings["config_id"] = self.mAuthSettings.configId()
+
+            conn_settings["role"] = self.txtRole.text()
             set_connection_settings(conn_settings)
             if self.connection_name != self.txtName.text():
                 if self.connection_name is not None and self.connection_name != "":
@@ -167,6 +215,14 @@ class SFConnectionStringDialog(QDialog, FORM_CLASS_SFCS):
             Exception: If there is an unexpected error during the connection process.
         """
         try:
+            fields_not_verified = self.get_unfilled_required_fields()
+            if len(fields_not_verified) > 0:
+                QMessageBox.critical(
+                    self,
+                    "Error message in New/Edit connection",
+                    f"Please specify all mandatory fields:\n{''.join(fields_not_verified)}",
+                )
+                return
             sf_connection_manager = SFConnectionManager.get_instance()
             connection_params = {
                 "user": self.mAuthSettings.username(),
@@ -177,19 +233,27 @@ class SFConnectionStringDialog(QDialog, FORM_CLASS_SFCS):
                 "network_timeout": 20,
                 "socket_timeout": 20,
             }
+
+            is_default_auth = (
+                self.cbxConnectionType.currentText() == "Default Authentication"
+            )
+
             if self.txtRole.text() != "":
                 connection_params["role"] = self.txtRole.text()
-            if self.cbxConnectionType.currentText() == "Default Authentication":
+            if is_default_auth:
                 connection_params["password"] = self.mAuthSettings.password()
-                conn = sf_connection_manager.create_snowflake_connection(
-                    connection_params
-                )
-
             elif self.cbxConnectionType.currentText() == "Single sign-on (SSO)":
                 connection_params["authenticator"] = "externalbrowser"
-                conn = sf_connection_manager.create_snowflake_connection(
-                    connection_params
+
+            if self.mAuthSettings.configurationTabIsSelected():
+                encrypted_credentials = get_encrypted_credentials(
+                    self.mAuthSettings.configId()
                 )
+                connection_params["user"] = encrypted_credentials["username"]
+                if is_default_auth:
+                    connection_params["password"] = encrypted_credentials["password"]
+
+            conn = sf_connection_manager.create_snowflake_connection(connection_params)
 
             if conn:
                 conn.close()

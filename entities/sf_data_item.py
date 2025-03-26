@@ -10,6 +10,7 @@ from ..helpers.messages import get_proceed_cancel_message_box
 from ..helpers.utils import (
     decodeUri,
     get_auth_information,
+    get_auth_method_config,
     get_authentification_information,
     get_connection_child_groups,
     get_path_nodes,
@@ -18,7 +19,6 @@ from ..helpers.utils import (
     on_handle_warning,
     remove_connection,
 )
-from ..providers.sf_data_source_provider import SFDataProvider
 from ..tasks.sf_convert_column_to_layer_task import SFConvertColumnToLayerTask
 from ..ui.sf_connection_string_dialog import SFConnectionStringDialog
 from PyQt5.QtCore import pyqtSignal
@@ -31,7 +31,7 @@ from qgis.core import (
     QgsVectorLayer,
 )
 from qgis.PyQt.QtGui import QIcon
-from qgis.PyQt.QtWidgets import QMessageBox, QAction, QWidget
+from qgis.PyQt.QtWidgets import QMessageBox, QAction, QWidget, QTabWidget, QComboBox
 import typing
 
 
@@ -670,12 +670,30 @@ ORDER BY {column_name}"""
         if "role" in auth_information:
             sf_connection_string_dialog_window.txtRole.setText(auth_information["role"])
 
-        sf_connection_string_dialog_window.mAuthSettings.setUsername(
-            auth_information["username"]
-        )
-        sf_connection_string_dialog_window.mAuthSettings.setPassword(
-            auth_information["password"]
-        )
+        if auth_information["password_encrypted"]:
+            m_auth_settings_tab_widget: QTabWidget = (
+                sf_connection_string_dialog_window.mAuthSettings.findChild(QTabWidget)
+            )
+            if m_auth_settings_tab_widget:
+                m_auth_settings_tab_widget.setCurrentIndex(0)
+
+            m_auth_settings_combo_box: QComboBox = (
+                sf_connection_string_dialog_window.mAuthSettings.findChild(QComboBox)
+            )
+
+            auth_method_config = get_auth_method_config(auth_information["config_id"])
+
+            for i in range(m_auth_settings_combo_box.count()):
+                m_auth_settings_combo_box.setCurrentIndex(i)
+                if m_auth_settings_combo_box.currentText() == auth_method_config.name():
+                    break
+        else:
+            sf_connection_string_dialog_window.mAuthSettings.setUsername(
+                auth_information["username"]
+            )
+            sf_connection_string_dialog_window.mAuthSettings.setPassword(
+                auth_information["password"]
+            )
         sf_connection_string_dialog_window.update_connections_signal.connect(
             self.on_update_connections_handle
         )
