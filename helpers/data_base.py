@@ -59,9 +59,31 @@ def filter_geo_columns(
         typing.List[QgsFeature]: The `columns` that are geo
     """
     geo_columns = []
+    number_queries = []
+    h3_columns = []
     for feat in columns:
         if feat.attribute("DATA_TYPE") in ["GEOMETRY", "GEOGRAPHY"]:
             geo_columns.append(feat)
+
+        if (
+            feat.attribute("DATA_TYPE") == ["NUMBER", "TEXT"]
+            and feat.attribute("COMMENT")
+            and "h3" in feat.attribute("COMMENT").lower()
+        ):
+            h3_columns.append(feat)
+            table = f'"{feat.attribute("TABLE_CATALOG")}"."{feat.attribute("TABLE_SCHEMA")}"."{feat.attribute("TABLE_NAME")}"'
+            column = f'{table}."{feat.attribute("COLUMN_NAME")}"'
+            number_queries.append(f"""
+                (SELECT H3_IS_VALID_CELL({column})
+                FROM {table}
+                WHERE {column} IS NOT NULL
+                LIMIT 1)""")
+    if len(number_queries) > 0:
+        query = f"SELECT {','.join(number_queries)}"
+        result = sf_data_provider.execute_query(query, connection_name).fetchall()[0]
+        for i in range(len(result)):
+            if result[i]:
+                geo_columns.append(h3_columns[i])
     return geo_columns
 
 
