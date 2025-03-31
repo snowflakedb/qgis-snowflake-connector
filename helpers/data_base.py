@@ -66,7 +66,7 @@ def filter_geo_columns(
             geo_columns.append(feat)
 
         if (
-            feat.attribute("DATA_TYPE") == ["NUMBER", "TEXT"]
+            feat.attribute("DATA_TYPE") in ["NUMBER", "TEXT"]
             and feat.attribute("COMMENT")
             and "h3" in feat.attribute("COMMENT").lower()
         ):
