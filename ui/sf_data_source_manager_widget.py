@@ -1,4 +1,4 @@
-from ..helpers.data_base import check_table_exceeds_size
+from ..helpers.data_base import check_table_exceeds_size, limit_size_for_table
 from ..helpers.messages import get_proceed_cancel_message_box
 from ..helpers.utils import (
     get_auth_information,
@@ -106,13 +106,15 @@ class SFDataSourceManagerWidget(QgsAbstractDataSourceWidget, FORM_CLASS_SFDSM):
                 context_information=context_information,
             )
 
+            limit_size = limit_size_for_table(context_information=context_information)
+
             if table_exceeds_size:
                 response = get_proceed_cancel_message_box(
                     "SFConvertColumnToLayerTask Dataset is too large",
                     (
                         "The dataset is too large. Please consider using "
                         '"Execute SQL" to limit the result set. If you click '
-                        '"Proceed", only a random sample of 50000 rows '
+                        f'"Proceed", only a random sample of {limit_size // 1000} thousand rows '
                         "will be loaded."
                     ),
                 )
