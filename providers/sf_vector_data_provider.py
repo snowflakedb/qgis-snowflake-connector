@@ -93,6 +93,7 @@ class SFVectorDataProvider(QgsVectorDataProvider):
             self._is_limited_unordered = check_from_clause_exceeds_size(
                 from_clause=self._from_clause,
                 context_information=self._context_information,
+                limit_size=limit_size_for_type(self._geo_column_type),
             )
 
         self.get_geometry_column()
@@ -455,11 +456,14 @@ class SFH3VectorDataProvider(SFVectorDataProvider):
 
     def featureCount(self) -> int:
         """returns the number of entities in the table"""
-
         if not self._feature_count:
             if not self._is_valid:
                 self._feature_count = 0
             else:
+                if self._is_limited_unordered:
+                    self._feature_count = limit_size_for_type(self._geo_column_type)
+                    return self._feature_count
+
                 query = f"SELECT COUNT(*) FROM {self._from_clause}"
                 query += f' WHERE H3_IS_VALID_CELL("{self._column_geom}")'
                 if self.subsetString():
