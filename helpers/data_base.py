@@ -527,7 +527,7 @@ def limit_size_for_type(
     Returns:
         int: The size limit.
     """
-    if column_type in ["NUMBER", "TEXT"]:
+    if column_type in ["NUMBER", "TEXT", "H3GEO"]:
         return 500000  # 500k
     return 50000  # 50k
 
