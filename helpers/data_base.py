@@ -773,7 +773,7 @@ def get_limit_sql_query(
     connection_manager: SFConnectionManager = SFConnectionManager.get_instance()
     cur_desc = connection_manager.execute_query(
         connection_name=context_information["connection_name"],
-        query=query,
+        query=f"SELECT * FROM ({query}) LIMIT 0",
         context_information=context_information,
     )
     cur_description = cur_desc.description
@@ -842,7 +842,7 @@ def get_h3_columns_from_query(
         typing.List: A list containing the rows of the result set from the executed sub-query.
     """
     connection_manager: SFConnectionManager = SFConnectionManager.get_instance()
-    sub_query = f"SELECT {generate_query_columns(query_columns)} FROM ({query})"
+    sub_query = f"SELECT {generate_query_columns(query_columns)} FROM (SELECT * FROM ({query}) LIMIT 1)"
     cur = None
     try:
         cur = connection_manager.execute_query(
