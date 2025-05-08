@@ -891,3 +891,107 @@ def generate_query_columns(
         )
     )
     return ", ".join(col_map)
+
+
+def get_table_columns(
+    context_information: dict,
+) -> typing.List[typing.Tuple[str]]:
+    """Retrieves the column names for a specified table in a Snowflake database.
+
+    This function queries the `INFORMATION_SCHEMA.COLUMNS` view to obtain the
+    names of all columns for a given table, within a specific database and schema,
+    using an established Snowflake connection.
+
+    Args:
+        context_information (dict): A dictionary containing the necessary
+            information to identify the table and the connection.
+            It must include the following keys:
+            - 'database_name' (str): The name of the database where the table resides.
+              The search for this name is case-insensitive.
+            - 'schema_name' (str): The name of the schema where the table resides.
+              The search for this name is case-insensitive.
+            - 'table_name' (str): The name of the table whose columns are to be fetched.
+              The search for this name is case-insensitive.
+            - 'connection_name' (str): The name or identifier of the Snowflake
+              connection to be used for executing the query.
+
+    Returns:
+        typing.List[typing.Tuple[str]]: A list of tuples, where each tuple
+        contains a single string element representing a column name from the
+        specified table. For example: `[('COLUMN_A',), ('COLUMN_B',)]`.
+        Returns an empty list if the table has no columns or if the table
+        is not found.
+    """
+    connection_manager: SFConnectionManager = SFConnectionManager.get_instance()
+    query_table_columns = (
+        "SELECT COLUMN_NAME "
+        "FROM INFORMATION_SCHEMA.COLUMNS "
+        f"WHERE TABLE_CATALOG ILIKE '{context_information['database_name']}' "
+        f"AND TABLE_SCHEMA ILIKE '{context_information['schema_name']}' "
+        f"AND TABLE_NAME ILIKE '{context_information['table_name']}' "
+        "AND DATA_TYPE NOT IN ('GEOGRAPHY', 'GEOMETRY') "
+        "ORDER BY COLUMN_NAME"
+    )
+
+    cur = connection_manager.execute_query(
+        connection_name=context_information["connection_name"],
+        query=query_table_columns,
+        context_information=context_information,
+    )
+
+    result_rows = cur.fetchall()
+    cur.close()
+    return result_rows
+
+
+def update_table_feature(
+    context_information: dict,
+) -> bool:
+    """Updates a specific feature's geometry in a Snowflake table.
+
+    This function constructs and executes an SQL UPDATE statement to modify the
+    geometry of a row identified by its primary key in a specified table.
+    It uses a connection manager to handle the database interaction.
+
+    Args:
+        context_information: A dictionary containing the necessary information
+            for the update operation. Expected keys are:
+            - 'table_name' (str): The name of the table to update.
+            - 'column_geom' (str): The name of the geometry column to be updated.
+            - 'primary_key_name' (str): The name of the primary key column used
+              in the WHERE clause.
+            - 'geometry_wkt' (str): The Well-Known Text (WKT) representation of
+              the new geometry.
+            - 'primary_key_value' (any): The value of the primary key for the
+              feature to be updated.
+            - 'connection_name' (str): The name of the Snowflake connection to use.
+
+    Returns:
+        bool: True if the update operation was successful and the cursor was
+              closed, False if an exception occurred during the process.
+    """
+    try:
+        connection_manager: SFConnectionManager = SFConnectionManager.get_instance()
+        update_sql = (
+            f"UPDATE {context_information['table_name']} "
+            f"SET {context_information['column_geom']} = %s "
+            f"WHERE {context_information['primary_key_name']} = %s"
+        )
+
+        params = (
+            context_information["geometry_wkt"],
+            context_information["primary_key_value"],
+        )
+
+        cur = connection_manager.execute_query_with_params(
+            connection_name=context_information["connection_name"],
+            query=update_sql,
+            params=params,
+            context_information=context_information,
+        )
+
+        cur.close()
+        return True
+    except Exception as e:
+        print(str(e))
+        return False

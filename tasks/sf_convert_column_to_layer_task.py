@@ -31,6 +31,7 @@ class SFConvertColumnToLayerTask(QgsTask):
             self.schema = context_information["schema_name"]
             self.table = context_information["table_name"]
             self.column = context_information["geo_column"]
+            self.primary_key = context_information["primary_key"]
 
             self.path = path
             super().__init__(
@@ -81,7 +82,8 @@ class SFConvertColumnToLayerTask(QgsTask):
                     f"table_name={self.table} srid={srid} "
                     f"geom_column={self.column} "
                     f"geometry_type={geo_type} "
-                    f"geo_column_type={geo_column_type}"
+                    f"geo_column_type={geo_column_type} "
+                    f"primary_key={self.primary_key}"
                 )
 
                 layer_name = (

@@ -1,5 +1,12 @@
-from ..helpers.data_base import check_table_exceeds_size, limit_size_for_table
-from ..helpers.messages import get_proceed_cancel_message_box
+from ..helpers.data_base import (
+    check_table_exceeds_size,
+    get_table_columns,
+    limit_size_for_table,
+)
+from ..helpers.messages import (
+    get_proceed_cancel_message_box,
+    get_set_primary_key_message_box,
+)
 from ..helpers.utils import (
     get_auth_information,
     get_auth_method_config,
@@ -120,6 +127,23 @@ class SFDataSourceManagerWidget(QgsAbstractDataSourceWidget, FORM_CLASS_SFDSM):
                 )
                 if response == QMessageBox.Cancel:
                     return False
+
+            context_information["primary_key"] = ""
+            if data_type != "H3GEO":
+                message_box_accept, primary_key_selected = (
+                    get_set_primary_key_message_box(
+                        "Set Primary Key",
+                        (
+                            "Please set the primary key for the table.\nIf you click "
+                            '"Skip", the table will be loaded without a primary key.'
+                        ),
+                        get_table_columns(context_information),
+                    )
+                )
+
+                context_information["primary_key"] = (
+                    primary_key_selected if message_box_accept == QMessageBox.Ok else ""
+                )
 
             path = f"/Snowflake/{selected_connection}/{schema}/{table}"
 
