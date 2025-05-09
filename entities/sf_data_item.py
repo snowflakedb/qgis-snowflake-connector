@@ -469,7 +469,7 @@ ORDER BY {column_name}"""
                 snowflake_covert_column_to_layer_task.on_handle_warning.connect(
                     slot=on_handle_warning
                 )
-                snowflake_covert_column_to_layer_task.on_hadle_finished.connect(
+                snowflake_covert_column_to_layer_task.on_handle_finished.connect(
                     slot=self.on_handle_finished
                 )
                 QgsApplication.taskManager().addTask(

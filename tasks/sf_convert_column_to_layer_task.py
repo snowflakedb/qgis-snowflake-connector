@@ -10,7 +10,7 @@ from qgis.PyQt.QtCore import pyqtSignal
 class SFConvertColumnToLayerTask(QgsTask):
     on_handle_error = pyqtSignal(str, str)
     on_handle_warning = pyqtSignal(str, str)
-    on_hadle_finished = pyqtSignal(str)
+    on_handle_finished = pyqtSignal(str)
 
     def __init__(self, context_information: dict, path: str) -> None:
         """
@@ -112,4 +112,4 @@ class SFConvertColumnToLayerTask(QgsTask):
             None
         """
         if result:
-            self.on_hadle_finished.emit(self.path)
+            self.on_handle_finished.emit(self.path)

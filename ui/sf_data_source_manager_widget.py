@@ -146,7 +146,7 @@ class SFDataSourceManagerWidget(QgsAbstractDataSourceWidget, FORM_CLASS_SFDSM):
                 snowflake_covert_column_to_layer_task.on_handle_error.connect(
                     on_handle_error
                 )
-                snowflake_covert_column_to_layer_task.on_handle_warning.connect(
+                snowflake_covert_column_to_layer_task.on_handle_finished.connect(
                     slot=self.on_handle_finished
                 )
                 QgsApplication.taskManager().addTask(
