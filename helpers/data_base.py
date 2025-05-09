@@ -992,6 +992,5 @@ def update_table_feature(
 
         cur.close()
         return True
-    except Exception as e:
-        print(str(e))
+    except Exception as _:
         return False

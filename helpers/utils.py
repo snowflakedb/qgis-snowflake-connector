@@ -501,3 +501,47 @@ def get_auth_method_config(config_id: str) -> QgsAuthMethodConfig:
     method_config = QgsAuthMethodConfig()
     auth_manager.loadAuthenticationConfig(config_id, method_config, True)
     return method_config
+
+
+def prompt_and_get_primary_key(context_information: dict, data_type: str) -> str:
+    """Prompts the user to select a primary key for a table.
+
+    If the data_type is not 'H3GEO' or 'H3', this function displays a dialog
+    box allowing the user to choose a primary key from the table's columns.
+    The columns are fetched using the `get_table_columns` helper function
+    with the provided `context_information`.
+
+    If the user confirms their selection (e.g., clicks "Ok"), the selected
+    column name is returned as the primary key. If the user cancels or
+    chooses to skip, or if the `data_type` is 'H3GEO' or 'H3', an empty
+    string is returned, indicating no primary key has been set.
+
+    Args:
+        context_information: A dictionary containing contextual details,
+            used by `get_table_columns` to fetch column names for the table.
+        data_type: A string indicating the type of data. If this is
+            'H3GEO' or 'H3', the primary key selection process is skipped.
+
+    Returns:
+        The name of the column selected as the primary key, or an empty
+        string if no primary key is selected or the process is skipped.
+    """
+    from ..helpers.data_base import get_table_columns
+    from ..helpers.messages import get_set_primary_key_message_box
+
+    primary_key = ""
+    if data_type not in ["H3GEO", "H3"]:
+        message_box_accept, primary_key_selected = get_set_primary_key_message_box(
+            "Set Primary Key",
+            (
+                "Please set the primary key for the table.\nIf you click "
+                '"Skip", the table will be loaded without a primary key.'
+            ),
+            get_table_columns(context_information),
+        )
+
+        primary_key = (
+            primary_key_selected if message_box_accept == QMessageBox.Ok else ""
+        )
+
+    return primary_key

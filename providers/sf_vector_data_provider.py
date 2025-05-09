@@ -135,6 +135,7 @@ class SFVectorDataProvider(QgsVectorDataProvider):
             QgsVectorDataProvider.CreateSpatialIndex | QgsVectorDataProvider.SelectAtId
         )
 
+        # An empty string used as a primary key signifies the absence of a defined primary key.
         if (
             self._primary_key == ""
             or self._geometry_type == "H3"
@@ -195,7 +196,8 @@ class SFVectorDataProvider(QgsVectorDataProvider):
 
     def updateExtents(self) -> None:
         """Update extent"""
-        return self._extent.setMinimal()
+        if self._extent is not None:
+            self._extent.setMinimal()
 
     def get_geometry_column(self) -> str:
         """Returns the name of the geometry column"""
