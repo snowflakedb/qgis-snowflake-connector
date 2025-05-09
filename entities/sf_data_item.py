@@ -6,7 +6,9 @@ from ..helpers.data_base import (
     get_features_iterator,
     get_table_geo_columns,
 )
-from ..helpers.messages import get_proceed_cancel_message_box
+from ..helpers.messages import (
+    get_proceed_cancel_message_box,
+)
 from ..helpers.utils import (
     decodeUri,
     get_auth_information,
@@ -14,6 +16,7 @@ from ..helpers.utils import (
     get_authentification_information,
     get_connection_child_groups,
     get_path_nodes,
+    prompt_and_get_primary_key,
     get_qsettings,
     on_handle_error,
     on_handle_warning,
@@ -451,6 +454,10 @@ ORDER BY {column_name}"""
                     if response == QMessageBox.Cancel:
                         return False
 
+                context_information["primary_key"] = prompt_and_get_primary_key(
+                    context_information=context_information, data_type=self.geom_column
+                )
+
                 schema_data_item._running_tasks[self.path()] = True
                 snowflake_covert_column_to_layer_task = SFConvertColumnToLayerTask(
                     context_information=context_information,
@@ -462,7 +469,7 @@ ORDER BY {column_name}"""
                 snowflake_covert_column_to_layer_task.on_handle_warning.connect(
                     slot=on_handle_warning
                 )
-                snowflake_covert_column_to_layer_task.on_hadle_finished.connect(
+                snowflake_covert_column_to_layer_task.on_handle_finished.connect(
                     slot=self.on_handle_finished
                 )
                 QgsApplication.taskManager().addTask(

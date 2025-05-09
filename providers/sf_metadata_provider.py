@@ -39,9 +39,11 @@ class SFMetadataProvider(QgsProviderMetadata):
         geo_column = parts["geo_column"]
         geometry_type = parts["geometry_type"]
         geo_column_type = parts["geo_column_type"]
+        primary_key = parts["primary_key"]
         uri = (
             f"connection_name={connection_name} sql={sql_query} "
             f"schema_name={schema_name} table_name={table_name} srid={srid} "
-            f"geo_column={geo_column} geometry_type={geometry_type} geo_column_type={geo_column_type}"
+            f"geo_column={geo_column} geometry_type={geometry_type} geo_column_type={geo_column_type} "
+            f"primary_key={primary_key}"
         )
         return uri

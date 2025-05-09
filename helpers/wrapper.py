@@ -18,6 +18,7 @@ def parse_uri(
     geom_column = parsed_uri.get("geom_column", None)
     geometry_type = parsed_uri.get("geometry_type", None)
     geo_column_type = parsed_uri.get("geo_column_type", None)
+    primary_key = parsed_uri.get("primary_key", "")
 
     # check parsing results
     if not connection_name:
@@ -37,4 +38,5 @@ def parse_uri(
         geom_column,
         geometry_type,
         geo_column_type,
+        primary_key,
     )

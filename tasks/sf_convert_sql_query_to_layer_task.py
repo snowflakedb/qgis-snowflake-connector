@@ -28,6 +28,11 @@ class SFConvertSQLQueryToLayerTask(QgsTask):
             )
             self.geo_column_name = context_information["geo_column_name"]
             self.geo_column_type_is_h3 = context_information["geo_column_type_is_h3"]
+            self.primary_key = (
+                context_information["primary_key"]
+                if "primary_key" in context_information
+                else ""
+            )
 
             self.query = query
             self.layer_name = layer_name
@@ -81,7 +86,8 @@ class SFConvertSQLQueryToLayerTask(QgsTask):
                     f"srid={srid} "
                     f"geom_column={self.geo_column_name} "
                     f"geometry_type={geo_type} "
-                    f"geo_column_type={geo_column_type}"
+                    f"geo_column_type={geo_column_type} "
+                    f"primary_key={self.primary_key}"
                 )
 
                 layer_name = (

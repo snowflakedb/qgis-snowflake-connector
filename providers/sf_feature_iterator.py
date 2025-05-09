@@ -92,7 +92,7 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
 
                 # The primary key column must be added if it is not present in the field list.
                 if (
-                    self._provider.primary_key() != -1
+                    self._provider.primary_key() != ""
                     and self._provider.primary_key() not in idx_required
                 ):
                     idx_required.append(self._provider.primary_key())
@@ -128,9 +128,9 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                 )
 
             where_clause_list = []
-            if feature_id_list:
+            if feature_id_list is not None:
                 list_feature_id_string = ", ".join(str(x) for x in feature_id_list)
-                if self._provider.primary_key() == -1:
+                if self._provider.primary_key() == "":
                     feature_clause = (
                         f"sfindexsfrownumberauto in ({list_feature_id_string})"
                     )
@@ -210,7 +210,7 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
             if self._request_no_geometry:
                 geom_query = ""
 
-            if self._provider.primary_key() == -1:
+            if self._provider.primary_key() == "":
                 index = "ROW_NUMBER() OVER (order by 1) as sfindexsfrownumberauto "
             else:
                 index = self._provider._fields[self._provider.primary_key()].name()
