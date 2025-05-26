@@ -1,3 +1,5 @@
+import copy
+import typing
 from qgis.core import (
     QgsCoordinateReferenceSystem,
     QgsDataProvider,
@@ -9,12 +11,17 @@ from qgis.core import (
     QgsRectangle,
     QgsVectorDataProvider,
     QgsWkbTypes,
+    QgsGeometry,
 )
 from qgis.PyQt.QtCore import QMetaType
 
 from .sf_feature_iterator import SFFeatureIterator
 
-from ..helpers.data_base import check_from_clause_exceeds_size, limit_size_for_type
+from ..helpers.data_base import (
+    check_from_clause_exceeds_size,
+    limit_size_for_type,
+    update_table_feature,
+)
 
 from .sf_feature_source import SFFeatureSource
 
@@ -48,7 +55,6 @@ class SFVectorDataProvider(QgsVectorDataProvider):
         self._column_geom = None
         self._fields = None
         self._feature_count = None
-        self._primary_key = None
         self.filter_where_clause = None
         try:
             (
@@ -60,6 +66,7 @@ class SFVectorDataProvider(QgsVectorDataProvider):
                 self._column_geom,
                 self._geometry_type,
                 self._geo_column_type,
+                self._primary_key,
             ) = parse_uri(uri)
 
         except Exception as _:
@@ -124,8 +131,26 @@ class SFVectorDataProvider(QgsVectorDataProvider):
             return base_provider
 
     def capabilities(self) -> QgsVectorDataProvider.Capabilities:
-        return (
+        base_capabilities = (
             QgsVectorDataProvider.CreateSpatialIndex | QgsVectorDataProvider.SelectAtId
+        )
+
+        # An empty string used as a primary key signifies the absence of a defined primary key.
+        if (
+            self._primary_key == ""
+            or self._geometry_type == "H3"
+            or (self._sql_query is not None and self._sql_query != "")
+        ):
+            return base_capabilities
+
+        return (
+            base_capabilities
+            | QgsVectorDataProvider.AddFeatures
+            | QgsVectorDataProvider.DeleteFeatures
+            | QgsVectorDataProvider.ChangeAttributeValues
+            | QgsVectorDataProvider.AddAttributes
+            | QgsVectorDataProvider.DeleteAttributes
+            | QgsVectorDataProvider.ChangeGeometries
         )
 
     def name(self) -> str:
@@ -171,14 +196,14 @@ class SFVectorDataProvider(QgsVectorDataProvider):
 
     def updateExtents(self) -> None:
         """Update extent"""
-        return self._extent.setMinimal()
+        if self._extent is not None:
+            self._extent.setMinimal()
 
     def get_geometry_column(self) -> str:
         """Returns the name of the geometry column"""
         return self._column_geom
 
-    def primary_key(self) -> int:
-        self._primary_key = -1
+    def primary_key(self) -> str:
         return self._primary_key
 
     def fields(self) -> QgsFields:
@@ -366,6 +391,63 @@ class SFVectorDataProvider(QgsVectorDataProvider):
         """Reload data from the data source."""
         self._features = []
         self._features_loaded = False
+
+    def changeGeometryValues(self, geometry_map: typing.Any) -> bool:
+        """Updates the geometry of features in the underlying data source.
+
+        This method iterates through a dictionary mapping feature identifiers to
+        new QgsGeometry objects. For each feature, it constructs a context
+        containing the new geometry (in WKT format), table name, primary key,
+        and geometry column name, then calls an external function
+        `update_table_feature` to persist the change. After all updates,
+        it reloads the data.
+
+        Args:
+            geometry_map: A dictionary where keys are feature identifiers
+            (matching keys in `self._features`) and values are
+            `QgsGeometry` objects representing the new geometries.
+
+        Returns:
+            True if `geometry_map` is a non-empty dictionary and the update
+            process is initiated for all features. False otherwise (e.g.,
+            if `geometry_map` is not a dictionary or is empty).
+        """
+        if isinstance(geometry_map, dict) and geometry_map:
+            for f_key, geometry in geometry_map.items():
+                geometry: QgsGeometry
+                feature: QgsFeature = self._features[f_key]
+                context = copy.deepcopy(self._context_information)
+                context["geometry_wkt"] = geometry.asWkt()
+                context["column_geom"] = self._column_geom
+                context["primary_key_value"] = feature.attribute(self.primary_key())
+                context["primary_key_name"] = self.primary_key()
+                context["table_name"] = self._table_name
+                update_table_feature(context)
+            self.reloadData()
+            return True
+        return False
+
+    def extent(self) -> QgsRectangle:
+        """Returns the extent of the layer.
+
+        Currently, this method returns an empty QgsRectangle,
+        indicating that the extent is unknown or not applicable.
+
+        Returns:
+            QgsRectangle: An empty QgsRectangle.
+        """
+        return QgsRectangle()
+
+    def featureCount(self) -> int:
+        """
+        Returns the number of features in the layer.
+
+        In this specific implementation, it always returns 0.
+
+        Returns:
+            int: The feature count, which is 0.
+        """
+        return 0
 
 
 class SFGeoVectorDataProvider(SFVectorDataProvider):

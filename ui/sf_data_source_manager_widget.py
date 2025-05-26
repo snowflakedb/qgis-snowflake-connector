@@ -1,10 +1,16 @@
-from ..helpers.data_base import check_table_exceeds_size, limit_size_for_table
-from ..helpers.messages import get_proceed_cancel_message_box
+from ..helpers.data_base import (
+    check_table_exceeds_size,
+    limit_size_for_table,
+)
+from ..helpers.messages import (
+    get_proceed_cancel_message_box,
+)
 from ..helpers.utils import (
     get_auth_information,
     get_auth_method_config,
     get_authentification_information,
     get_connection_child_groups,
+    prompt_and_get_primary_key,
     get_qsettings,
     on_handle_error,
     remove_connection,
@@ -121,6 +127,10 @@ class SFDataSourceManagerWidget(QgsAbstractDataSourceWidget, FORM_CLASS_SFDSM):
                 if response == QMessageBox.Cancel:
                     return False
 
+            context_information["primary_key"] = prompt_and_get_primary_key(
+                context_information=context_information, data_type=data_type
+            )
+
             path = f"/Snowflake/{selected_connection}/{schema}/{table}"
 
             if (
@@ -136,7 +146,7 @@ class SFDataSourceManagerWidget(QgsAbstractDataSourceWidget, FORM_CLASS_SFDSM):
                 snowflake_covert_column_to_layer_task.on_handle_error.connect(
                     on_handle_error
                 )
-                snowflake_covert_column_to_layer_task.on_handle_warning.connect(
+                snowflake_covert_column_to_layer_task.on_handle_finished.connect(
                     slot=self.on_handle_finished
                 )
                 QgsApplication.taskManager().addTask(

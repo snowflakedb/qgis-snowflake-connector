@@ -10,7 +10,7 @@ from qgis.PyQt.QtCore import pyqtSignal
 class SFConvertColumnToLayerTask(QgsTask):
     on_handle_error = pyqtSignal(str, str)
     on_handle_warning = pyqtSignal(str, str)
-    on_hadle_finished = pyqtSignal(str)
+    on_handle_finished = pyqtSignal(str)
 
     def __init__(self, context_information: dict, path: str) -> None:
         """
@@ -31,6 +31,7 @@ class SFConvertColumnToLayerTask(QgsTask):
             self.schema = context_information["schema_name"]
             self.table = context_information["table_name"]
             self.column = context_information["geo_column"]
+            self.primary_key = context_information["primary_key"]
 
             self.path = path
             super().__init__(
@@ -81,7 +82,8 @@ class SFConvertColumnToLayerTask(QgsTask):
                     f"table_name={self.table} srid={srid} "
                     f"geom_column={self.column} "
                     f"geometry_type={geo_type} "
-                    f"geo_column_type={geo_column_type}"
+                    f"geo_column_type={geo_column_type} "
+                    f"primary_key={self.primary_key}"
                 )
 
                 layer_name = (
@@ -110,4 +112,4 @@ class SFConvertColumnToLayerTask(QgsTask):
             None
         """
         if result:
-            self.on_hadle_finished.emit(self.path)
+            self.on_handle_finished.emit(self.path)

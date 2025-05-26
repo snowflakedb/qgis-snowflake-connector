@@ -179,6 +179,53 @@ class SFConnectionManager:
         except Exception as e:
             raise e
 
+    def execute_query_with_params(
+        self,
+        connection_name: str,
+        query: str,
+        params: Dict[str, typing.Union[str, None]] = None,
+        context_information: Dict[str, typing.Union[str, None]] = None,
+    ) -> snowflake.connector.cursor.SnowflakeCursor:
+        """Executes a SQL query with parameters on a specified Snowflake connection.
+
+        This method first creates a cursor for the given connection. If context
+        information is provided and includes a 'schema_name', it sets the current
+        schema for the session before executing the main query. The query is then
+        executed with the provided parameters.
+
+        Args:
+            connection_name: The name of the Snowflake connection to use.
+            query: The SQL query string to be executed.
+            params: A dictionary of parameters to be bound to the query.
+                Defaults to None.
+            context_information: An optional dictionary containing contextual
+                information. If it contains a 'schema_name' key with a non-None
+                value, the 'USE SCHEMA' command will be executed before the main
+                query. Defaults to None.
+
+        Returns:
+            A snowflake.connector.cursor.SnowflakeCursor object after executing
+            the query.
+
+        Raises:
+            Exception: Propagates any exception raised by the underlying
+                Snowflake connector during cursor creation or query execution.
+        """
+        try:
+            cursor = self.create_cursor(connection_name)
+            if context_information is not None:
+                if (
+                    "schema_name" in context_information
+                    and context_information["schema_name"] is not None
+                ):
+                    cursor.execute(f'USE SCHEMA "{context_information["schema_name"]}"')
+
+            cursor.execute(query, params=params)
+
+            return cursor
+        except Exception as e:
+            raise e
+
     def reconnect(self, connection_name: str) -> None:
         """
         Reconnects to the specified Snowflake connection.
