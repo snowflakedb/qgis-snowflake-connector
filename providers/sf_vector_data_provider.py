@@ -427,6 +427,28 @@ class SFVectorDataProvider(QgsVectorDataProvider):
             return True
         return False
 
+    def extent(self) -> QgsRectangle:
+        """Returns the extent of the layer.
+
+        Currently, this method returns an empty QgsRectangle,
+        indicating that the extent is unknown or not applicable.
+
+        Returns:
+            QgsRectangle: An empty QgsRectangle.
+        """
+        return QgsRectangle()
+
+    def featureCount(self) -> int:
+        """
+        Returns the number of features in the layer.
+
+        In this specific implementation, it always returns 0.
+
+        Returns:
+            int: The feature count, which is 0.
+        """
+        return 0
+
 
 class SFGeoVectorDataProvider(SFVectorDataProvider):
     """The VectorDataProvider for GEOGRAPHY and GEOMETRY columns"""
