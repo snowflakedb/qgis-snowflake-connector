@@ -4,7 +4,7 @@
 
 [general]
 name=Snowflake Connector for QGIS
-qgisMinimumVersion=3.99
+qgisMinimumVersion=3.34.1
 qgisMaximumVersion=4.99
 supportsQt6=True
 description=This package includes the Snowflake Connector for QGIS.

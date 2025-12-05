@@ -265,6 +265,42 @@ def check_package_installed(package_name) -> bool:
     return False
 
 
+def get_python_executable_path() -> str:
+    """
+    Returns the path to the Python executable in a cross-platform manner.
+
+    Returns:
+        str: The path to the Python executable.
+    """
+    import sys
+    import os
+    import platform
+
+    if platform.system() == "Windows":
+        # On Windows, look for python.exe in the same directory as sys.executable
+        python_dir = os.path.dirname(sys.executable)
+        python_path = os.path.join(python_dir, "python.exe")
+        if os.path.exists(python_path):
+            return python_path
+        # Fallback to python3.exe
+        python3_path = os.path.join(python_dir, "python3.exe")
+        if os.path.exists(python3_path):
+            return python3_path
+    else:
+        # On Unix-like systems, look for python3 in bin directory
+        prefix_path = sys.exec_prefix
+        python3_path = os.path.join(prefix_path, "bin", "python3")
+        if os.path.exists(python3_path):
+            return python3_path
+        # Fallback to python in bin directory
+        python_path = os.path.join(prefix_path, "bin", "python")
+        if os.path.exists(python_path):
+            return python_path
+
+    # Final fallback: use sys.executable itself
+    return sys.executable
+
+
 def check_install_package(package_name) -> None:
     """
     Checks if a given package is installed, and if not, installs it along with the 'pyopenssl' package.
@@ -276,12 +312,9 @@ def check_install_package(package_name) -> None:
     """
     if not check_package_installed(package_name):
         import subprocess
-        import platform
-        import sys
-        import os
-        
-        python3_path = os.path.split(sys.executable)[0] + '/python'
-        subprocess.call([python3_path, "-m", "pip", "install", "pip", "—upgrade"])
+
+        python3_path = get_python_executable_path()
+        subprocess.call([python3_path, "-m", "pip", "install", "pip", "--upgrade"])
         subprocess.call(
             [
                 python3_path,
@@ -334,10 +367,8 @@ def uninstall_snowflake_connector_package() -> None:
         subprocess.CalledProcessError: If the uninstallation process fails.
     """
     import subprocess
-    import platform
-    import sys
 
-    python3_path = os.path.split(sys.executable)[0] + '/python'
+    python3_path = get_python_executable_path()
     subprocess.call(
         [
             python3_path,
