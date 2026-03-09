@@ -274,7 +274,15 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
         # converted via PARSE_JSON in the SELECT projection.
         tuple_column_count = 1 + len(source.fields())
         value_aliases = [f"c{i}" for i in range(1, tuple_column_count + 1)]
-        select_projection = [f"v.{value_aliases[0]}"]
+        geom_alias = value_aliases[0]
+        if use_geometry_type:
+            geom_proj = (
+                f"ST_SETSRID(ST_GEOMETRYFROMWKB(TO_BINARY(v.{geom_alias},"
+                f" 'HEX')), {source_srid})"
+            )
+        else:
+            geom_proj = f"ST_GEOGFROMWKB(TO_BINARY(v.{geom_alias}, 'HEX'))"
+        select_projection = [geom_proj]
         tuple_position = 2
         for field in source.fields():
             alias = value_aliases[tuple_position - 1]
@@ -315,13 +323,19 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
             else:
                 query += ","
 
-            query += f"('{hex_string}'"
+            if hex_string == "":
+                query += "(NULL"
+            else:
+                query += f"('{hex_string}'"
 
             for field in source.fields():
                 query += ","
 
                 if field.name().lower() == geom_column.lower():
-                    query += f"'{hex_string}'"
+                    if hex_string == "":
+                        query += "NULL"
+                    else:
+                        query += f"'{hex_string}'"
                 else:
                     feat_index = feature.fieldNameIndex(field.name())
                     feat_val = feature.attribute(feat_index)

@@ -29,6 +29,15 @@ class TestIssueRegressions(unittest.TestCase):
         self.assertIn("TABLE_SCHEMA ILIKE", content)
         self.assertIn("TABLE_NAME ILIKE", content)
 
+    def test_browser_shows_non_geo_tables(self):
+        """Geo-type filter should only apply at column level, not schema/table level."""
+        content = (ROOT / "entities" / "sf_data_item.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('if self.item_type == "table":', content)
+        self.assertIn("geo_type_filter", content)
+        self.assertIn("not self.geom_column", content)
+
     def test_export_algorithm_has_geometry_insert_sql(self):
         content = (ROOT / "qgis_snowflake_connector_algorithm.py").read_text(
             encoding="utf-8"
@@ -36,6 +45,22 @@ class TestIssueRegressions(unittest.TestCase):
         self.assertIn("def get_geometry_insert_sql(", content)
         self.assertIn("ST_GEOGFROMWKB(TO_BINARY", content)
         self.assertIn("ST_SETSRID(ST_GEOMETRYFROMWKB", content)
+
+    def test_export_select_projection_applies_geometry_conversion(self):
+        """The SELECT projection must wrap the geometry alias with spatial functions."""
+        content = (ROOT / "qgis_snowflake_connector_algorithm.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("ST_GEOGFROMWKB(TO_BINARY(v.", content)
+        self.assertIn("ST_SETSRID(ST_GEOMETRYFROMWKB(TO_BINARY(v.", content)
+
+    def test_export_values_null_for_empty_geometry(self):
+        """Empty hex_string must produce NULL in the VALUES tuple, not empty string."""
+        content = (ROOT / "qgis_snowflake_connector_algorithm.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('if hex_string == "":', content)
+        self.assertIn('query += "(NULL"', content)
 
     def test_data_source_provider_uses_set_subtype(self):
         content = (ROOT / "providers" / "sf_data_source_provider.py").read_text(
@@ -174,7 +199,7 @@ class TestProviderLifecycle(unittest.TestCase):
     """Tests for Track 3: provider cache correctness and geometry handling."""
 
     def test_reload_data_resets_all_caches(self):
-        """reloadData() must clear features list, loaded flag, count, and extent."""
+        """reloadData() must clear features list, loaded flag, count, extent, and fields."""
         content = (ROOT / "providers" / "sf_vector_data_provider.py").read_text(
             encoding="utf-8"
         )
@@ -185,6 +210,26 @@ class TestProviderLifecycle(unittest.TestCase):
         self.assertIn("self._features_loaded = False", body)
         self.assertIn("self._feature_count = None", body)
         self.assertIn("self._extent = None", body)
+        self.assertIn("self._fields = None", body)
+        self.assertIn("self.connect_database()", body)
+
+    def test_fields_query_filters_by_schema(self):
+        """fields() INFORMATION_SCHEMA query must include table_schema ILIKE filter."""
+        content = (ROOT / "providers" / "sf_vector_data_provider.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("table_schema ILIKE", content)
+
+    def test_feature_iterator_logs_errors(self):
+        """fetchFeature() must log attribute errors via QgsMessageLog, not print()."""
+        content = (ROOT / "providers" / "sf_feature_iterator.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("QgsMessageLog.logMessage(", content)
+        self.assertNotIn(
+            'print(\n                                    f"Feature Iterator Error',
+            content,
+        )
 
     def test_subset_string_triggers_reload(self):
         """setSubsetString with updateFeatureCount must call reloadData."""
@@ -326,6 +371,13 @@ class TestStartupReliability(unittest.TestCase):
         self.assertIn("QgsMessageLog.logMessage(", content)
         self.assertIn("return _StubPlugin()", content)
 
+    def test_init_catches_import_errors(self):
+        """classFactory must catch ImportError during plugin load and return stub."""
+        content = (ROOT / "__init__.py").read_text(encoding="utf-8")
+        self.assertIn("except ImportError as imp_err:", content)
+        self.assertIn("cryptography", content)
+        self.assertIn("ExtensionOID", content)
+
     def test_check_install_package_returns_bool(self):
         content = (ROOT / "helpers" / "utils.py").read_text(encoding="utf-8")
         self.assertIn("def check_install_package(package_name) -> bool:", content)
@@ -443,6 +495,47 @@ class TestEditabilityCapabilities(unittest.TestCase):
         )
         params = self._decode_uri(uri)
         self.assertEqual(params.get("primary_key"), "")
+
+
+class TestUpdateNotification(unittest.TestCase):
+    """Tests for #92: plugin update notification."""
+
+    def test_plugin_has_update_check(self):
+        content = (ROOT / "qgis_snowflake_connector.py").read_text(encoding="utf-8")
+        self.assertIn("_check_for_updates", content)
+        self.assertIn("releases/latest", content)
+        self.assertIn("threading.Thread", content)
+
+    def test_update_check_uses_metadata_version(self):
+        content = (ROOT / "qgis_snowflake_connector.py").read_text(encoding="utf-8")
+        self.assertIn("metadata.txt", content)
+        self.assertIn("local_version", content)
+
+
+class TestKeyPairAuth(unittest.TestCase):
+    """Tests for #103: key pair authentication support."""
+
+    def test_connection_dialog_has_key_pair_option(self):
+        content = (ROOT / "dialogs" / "sf_connection_string_dialog.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('"Key Pair"', content)
+        self.assertIn("_txtKeyFile", content)
+        self.assertIn("_txtKeyPassphrase", content)
+        self.assertIn("_browse_key_file", content)
+
+    def test_connection_manager_handles_key_pair(self):
+        content = (ROOT / "managers" / "sf_connection_manager.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('"Key Pair"', content)
+        self.assertIn("private_key_file", content)
+        self.assertIn("private_key_file_pwd", content)
+
+    def test_settings_persist_key_pair_fields(self):
+        content = (ROOT / "helpers" / "utils.py").read_text(encoding="utf-8")
+        self.assertIn('"private_key_file"', content)
+        self.assertIn('"key_passphrase"', content)
 
 
 class TestQualityBaseline(unittest.TestCase):

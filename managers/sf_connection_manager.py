@@ -74,6 +74,13 @@ class SFConnectionManager:
                 conn_params["password"] = connection_params["password"]
             elif connection_params["connection_type"] == "Single sign-on (SSO)":
                 conn_params["authenticator"] = "externalbrowser"
+            elif connection_params["connection_type"] == "Key Pair":
+                key_file = connection_params.get("private_key_file", "")
+                passphrase = connection_params.get("key_passphrase", "")
+                if key_file:
+                    conn_params["private_key_file"] = key_file
+                    if passphrase:
+                        conn_params["private_key_file_pwd"] = passphrase
             if "role" in connection_params:
                 conn_params["role"] = connection_params["role"]
 

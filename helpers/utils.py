@@ -124,6 +124,12 @@ def get_authentification_information(settings: QSettings, connection_name: str) 
         )
         auth_info["username"] = encrypted_credentials["username"]
         auth_info["password"] = encrypted_credentials["password"]
+    auth_info["private_key_file"] = settings.value(
+        "private_key_file", defaultValue=""
+    )
+    auth_info["key_passphrase"] = settings.value(
+        "key_passphrase", defaultValue=""
+    )
     role = settings.value("role", defaultValue="")
     if role != "":
         auth_info["role"] = role
@@ -211,6 +217,13 @@ def set_connection_settings(connection_settings: dict) -> None:
         settings.setValue("role", connection_settings["role"])
     if connection_settings["connection_type"] == "Default Authentication":
         settings.setValue("password", connection_settings["password"])
+    if connection_settings["connection_type"] == "Key Pair":
+        settings.setValue(
+            "private_key_file", connection_settings.get("private_key_file", "")
+        )
+        settings.setValue(
+            "key_passphrase", connection_settings.get("key_passphrase", "")
+        )
     settings.setValue("password_encrypted", connection_settings["password_encrypted"])
     if "config_id" in connection_settings:
         settings.setValue("config_id", connection_settings["config_id"])
@@ -416,6 +429,12 @@ def get_auth_information(connection_name: str) -> dict:
         )
         auth_info["username"] = encrypted_credentials["username"]
         auth_info["password"] = encrypted_credentials["password"]
+    auth_info["private_key_file"] = settings.value(
+        "private_key_file", defaultValue=""
+    )
+    auth_info["key_passphrase"] = settings.value(
+        "key_passphrase", defaultValue=""
+    )
     role = settings.value("role", defaultValue="")
     if role != "":
         auth_info["role"] = role

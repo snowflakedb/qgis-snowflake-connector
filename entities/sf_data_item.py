@@ -367,12 +367,17 @@ class SFDataItem(QgsDataItem):
             table_filter = f"AND TABLE_NAME ILIKE {quote_literal(self.clean_name)}"
             column_name = "COLUMN_NAME"
             children_item_type = "column"
+        geo_type_filter = ""
+        if self.item_type == "table":
+            geo_type_filter = (
+                "AND DATA_TYPE in ('GEOGRAPHY', 'GEOMETRY', 'NUMBER', 'TEXT')"
+            )
         query = f"""SELECT DISTINCT {column_name}
 FROM INFORMATION_SCHEMA.COLUMNS
 WHERE table_catalog ILIKE {quote_literal(auth_information["database"])}
 {schema_filter}
 {table_filter}
-AND DATA_TYPE in ('GEOGRAPHY', 'GEOMETRY', 'NUMBER', 'TEXT')
+{geo_type_filter}
 ORDER BY {column_name}"""
 
         return auth_information, column_name, children_item_type, query
@@ -423,6 +428,8 @@ ORDER BY {column_name}"""
             bool: True if the double click event is handled successfully, False otherwise.
         """
         try:
+            if self.item_type == "table" and not self.geom_column:
+                return False
             schema_data_item = self.parent()
             if (
                 self.item_type == "table"

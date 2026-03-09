@@ -4,9 +4,13 @@ from qgis.PyQt.QtCore import pyqtSignal
 from qgis.PyQt.QtWidgets import (
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
+    QHBoxLayout,
+    QLabel,
     QLineEdit,
     QMessageBox,
     QComboBox,
+    QPushButton,
     QWidget,
 )
 import typing
@@ -44,9 +48,51 @@ class SFConnectionStringDialog(QDialog, Ui_QgsPgNewConnectionBase):
         self.settings = get_qsettings()
         self.cbxConnectionType.addItem("Default Authentication")
         self.cbxConnectionType.addItem("Single sign-on (SSO)")
+        self.cbxConnectionType.addItem("Key Pair")
         self.connection_name = connection_name
         self._sf_connection_manager = SFConnectionManager.get_instance()
+
+        self._setup_key_pair_widgets()
+        self.cbxConnectionType.currentTextChanged.connect(
+            self._on_connection_type_changed
+        )
+        self._on_connection_type_changed(self.cbxConnectionType.currentText())
         self.deactivate_temp()
+
+    def _setup_key_pair_widgets(self) -> None:
+        self._lblKeyFile = QLabel("Private Key File")
+        self._txtKeyFile = QLineEdit()
+        self._txtKeyFile.setPlaceholderText("/path/to/rsa_key.p8")
+        self._btnBrowseKey = QPushButton("...")
+        self._btnBrowseKey.setMaximumWidth(30)
+        self._btnBrowseKey.clicked.connect(self._browse_key_file)
+        key_layout = QHBoxLayout()
+        key_layout.addWidget(self._txtKeyFile)
+        key_layout.addWidget(self._btnBrowseKey)
+        row = self.gridLayout_2.rowCount()
+        self.gridLayout_2.addWidget(self._lblKeyFile, row, 0, 1, 1)
+        self.gridLayout_2.addLayout(key_layout, row, 1, 1, 1)
+
+        self._lblKeyPassphrase = QLabel("Key Passphrase")
+        self._txtKeyPassphrase = QLineEdit()
+        self._txtKeyPassphrase.setEchoMode(QLineEdit.EchoMode.Password)
+        self.gridLayout_2.addWidget(self._lblKeyPassphrase, row + 1, 0, 1, 1)
+        self.gridLayout_2.addWidget(self._txtKeyPassphrase, row + 1, 1, 1, 1)
+
+    def _browse_key_file(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select Private Key File", "", "Key Files (*.p8 *.pem);;All Files (*)"
+        )
+        if path:
+            self._txtKeyFile.setText(path)
+
+    def _on_connection_type_changed(self, text: str) -> None:
+        is_key_pair = text == "Key Pair"
+        self._lblKeyFile.setVisible(is_key_pair)
+        self._txtKeyFile.setVisible(is_key_pair)
+        self._btnBrowseKey.setVisible(is_key_pair)
+        self._lblKeyPassphrase.setVisible(is_key_pair)
+        self._txtKeyPassphrase.setVisible(is_key_pair)
 
     def deactivate_temp(self) -> None:
         self.cb_geometryColumnsOnly.setVisible(False)
@@ -90,6 +136,11 @@ class SFConnectionStringDialog(QDialog, Ui_QgsPgNewConnectionBase):
                         "password",
                     )
                 )
+
+        if self.cbxConnectionType.currentText() == "Key Pair":
+            fields.append(
+                (self._txtKeyFile, "Private Key File", "text")
+            )
 
         unfilled_required_fields = []
         for widget, field_name, method_name in fields:
@@ -140,6 +191,9 @@ class SFConnectionStringDialog(QDialog, Ui_QgsPgNewConnectionBase):
                     conn_settings["config_id"] = self.mAuthSettings.configId()
 
             conn_settings["role"] = self.txtRole.text()
+            if self.cbxConnectionType.currentText() == "Key Pair":
+                conn_settings["private_key_file"] = self._txtKeyFile.text()
+                conn_settings["key_passphrase"] = self._txtKeyPassphrase.text()
             set_connection_settings(conn_settings)
             if self.connection_name != self.txtName.text():
                 if self.connection_name is not None and self.connection_name != "":
@@ -187,6 +241,11 @@ class SFConnectionStringDialog(QDialog, Ui_QgsPgNewConnectionBase):
                 connection_params["password"] = self.mAuthSettings.password()
             elif self.cbxConnectionType.currentText() == "Single sign-on (SSO)":
                 connection_params["authenticator"] = "externalbrowser"
+            elif self.cbxConnectionType.currentText() == "Key Pair":
+                connection_params["private_key_file"] = self._txtKeyFile.text()
+                passphrase = self._txtKeyPassphrase.text()
+                if passphrase:
+                    connection_params["private_key_file_pwd"] = passphrase
 
             if self.mAuthSettings.configurationTabIsSelected():
                 encrypted_credentials = get_encrypted_credentials(

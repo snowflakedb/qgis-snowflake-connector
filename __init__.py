@@ -100,6 +100,31 @@ def classFactory(iface):  # pylint: disable=invalid-name
             pass
         return _StubPlugin()
 
-    from .qgis_snowflake_connector import QGISSnowflakeConnectorPlugin
+    try:
+        from .qgis_snowflake_connector import QGISSnowflakeConnectorPlugin
 
-    return QGISSnowflakeConnectorPlugin()
+        return QGISSnowflakeConnectorPlugin()
+    except ImportError as imp_err:
+        from qgis.core import QgsMessageLog, Qgis
+
+        hint = str(imp_err)
+        if "cryptography" in hint.lower() or "ExtensionOID" in hint:
+            hint += (
+                "\n\nThis is usually caused by an outdated 'cryptography' "
+                "package. Try:\n"
+                "  python3 -m pip install --upgrade cryptography pyopenssl\n"
+                "Then restart QGIS."
+            )
+        QgsMessageLog.logMessage(
+            f"Snowflake Connector failed to load: {hint}",
+            "Snowflake Plugin",
+            Qgis.MessageLevel.Critical,
+        )
+        try:
+            iface.messageBar().pushCritical(
+                "Snowflake Connector",
+                "Plugin failed to load. See Log Messages for details.",
+            )
+        except Exception:
+            pass
+        return _StubPlugin()

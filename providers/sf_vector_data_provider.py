@@ -237,10 +237,17 @@ class SFVectorDataProvider(QgsVectorDataProvider):
             self._fields = QgsFields()
             if self._is_valid:
                 if not self._sql_query:
+                    schema_filter = ""
+                    if self._schema_name:
+                        schema_filter = (
+                            f" AND table_schema ILIKE"
+                            f" {quote_literal(self._schema_name)}"
+                        )
                     query = (
                         "SELECT column_name, data_type FROM information_schema.columns "
-                        f"WHERE table_name ILIKE {quote_literal(self._table_name)} "
-                        "AND data_type NOT IN ('GEOMETRY', 'GEOGRAPHY')"
+                        f"WHERE table_name ILIKE {quote_literal(self._table_name)}"
+                        f"{schema_filter}"
+                        " AND data_type NOT IN ('GEOMETRY', 'GEOGRAPHY')"
                         " ORDER BY column_name, data_type"
                     )
 
@@ -415,6 +422,8 @@ class SFVectorDataProvider(QgsVectorDataProvider):
         self._features_loaded = False
         self._feature_count = None
         self._extent = None
+        self._fields = None
+        self.connect_database()
 
     def changeGeometryValues(self, geometry_map: typing.Any) -> bool:
         """Updates the geometry of features in the underlying data source.

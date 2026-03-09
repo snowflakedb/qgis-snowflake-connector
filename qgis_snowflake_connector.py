@@ -50,8 +50,15 @@ __revision__ = "$Format:%H$"
 import os
 import sys
 import inspect
+import threading
 
-from qgis.core import QgsProcessingAlgorithm, QgsApplication, QgsProviderRegistry
+from qgis.core import (
+    Qgis,
+    QgsMessageLog,
+    QgsProcessingAlgorithm,
+    QgsApplication,
+    QgsProviderRegistry,
+)
 
 from .providers.sf_metadata_provider import SFMetadataProvider
 
@@ -103,8 +110,51 @@ class QGISSnowflakeConnectorPlugin(object):
         sf_metadata_provider = SFMetadataProvider()
         registry.registerProvider(sf_metadata_provider)
 
+    def _check_for_updates(self):
+        """Check GitHub for a newer plugin release in a background thread."""
+        try:
+            import urllib.request
+            import json
+            import configparser
+
+            meta_path = os.path.join(
+                os.path.dirname(__file__), "metadata.txt"
+            )
+            cfg = configparser.ConfigParser()
+            cfg.read(meta_path)
+            local_version = cfg.get("general", "version", fallback="0.0.0")
+
+            url = (
+                "https://api.github.com/repos/"
+                "snowflakedb/qgis-snowflake-connector/releases/latest"
+            )
+            req = urllib.request.Request(
+                url, headers={"Accept": "application/vnd.github.v3+json"}
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read().decode())
+            remote_tag = data.get("tag_name", "").lstrip("v")
+            if not remote_tag:
+                return
+
+            from packaging.version import Version
+
+            if Version(remote_tag) > Version(local_version):
+                QgsMessageLog.logMessage(
+                    f"Snowflake Connector update available: "
+                    f"{local_version} -> {remote_tag}. "
+                    f"Download from {data.get('html_url', '')}",
+                    "Snowflake Plugin",
+                    Qgis.MessageLevel.Info,
+                )
+        except Exception:
+            pass
+
     def initGui(self):
         self.initProcessing()
+        threading.Thread(
+            target=self._check_for_updates, daemon=True
+        ).start()
 
     def unload(self):
         QgsApplication.processingRegistry().removeProvider(self.provider)

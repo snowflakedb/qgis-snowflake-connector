@@ -375,8 +375,10 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                                 )
                                 f.setAttribute(indx, converted_attribute)
                             except Exception as e:
-                                print(
-                                    f"Feature Iterator Error - Conversion issue: {str(e)}"
+                                QgsMessageLog.logMessage(
+                                    f"Feature Iterator Error - Conversion issue: {str(e)}",
+                                    "Snowflake Plugin",
+                                    Qgis.MessageLevel.Warning,
                                 )
 
                 else:
