@@ -36,7 +36,11 @@ from qgis.core import (
 )
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QMessageBox, QAction, QWidget, QTabWidget, QComboBox, QDialog
+import os
 import typing
+
+_IMAGES_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "ui", "images")
+
 
 class SFDataItem(QgsDataItem):
     message_handler = pyqtSignal(str, str)
@@ -291,7 +295,7 @@ class SFDataItem(QgsDataItem):
                 type="field",
                 connection_name=self.connection_name,
                 clean_name=feat.attribute(0),
-                icon_path=f":/plugins/qgis-snowflake-connector/ui/images/fields/{self.get_field_type_svg_name(feat.attribute(1), feat.attribute(2), is_geo_column)}.svg",
+                icon_path=os.path.join(_IMAGES_DIR, "fields", f"{self.get_field_type_svg_name(feat.attribute(1), feat.attribute(2), is_geo_column)}.svg"),
             )
             children.append(item)
         feature_iterator.close()
@@ -395,7 +399,7 @@ ORDER BY {column_name}"""
         - SFDataItem: The created SFDataItem object.
         """
         if icon_path is None:
-            icon_path = f":/plugins/qgis-snowflake-connector/ui/images/{type}.svg"
+            icon_path = os.path.join(_IMAGES_DIR, f"{type}.svg")
         item = SFDataItem(
             type=Qgis.BrowserItemType.Field,
             parent=self,
@@ -455,7 +459,7 @@ ORDER BY {column_name}"""
                         return False
 
                 context_information["primary_key"] = prompt_and_get_primary_key(
-                    context_information=context_information, data_type=self.geom_column
+                    context_information=context_information, data_type=self.geom_type
                 )
 
                 schema_data_item._running_tasks[self.path()] = True

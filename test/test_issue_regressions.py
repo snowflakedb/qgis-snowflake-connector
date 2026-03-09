@@ -76,6 +76,32 @@ class TestSQLSafety(unittest.TestCase):
         self.assertEqual(mod.quote_literal("foo"), "'foo'")
         self.assertEqual(mod.quote_literal("it's"), "'it''s'")
 
+    def test_quote_json_literal_for_parse_json_prefers_dollar_quotes(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "helpers.sql", ROOT / "helpers" / "sql.py"
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        payload = '{"name":"O\'Brien"}'
+        self.assertEqual(
+            mod.quote_json_literal_for_parse_json(payload),
+            f"$${payload}$$",
+        )
+
+    def test_quote_json_literal_for_parse_json_strict_raises_when_delimiter_present(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "helpers.sql", ROOT / "helpers" / "sql.py"
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        payload = '{"k":"contains $$ delimiter and it\'s ok"}'
+        with self.assertRaises(ValueError):
+            mod.quote_json_literal_for_parse_json(payload)
+
     def test_qualified_table_name(self):
         import importlib.util
         spec = importlib.util.spec_from_file_location(
@@ -102,7 +128,16 @@ class TestSQLSafety(unittest.TestCase):
         self.assertIn("from .helpers.sql import", content)
         self.assertIn("qualified_table_name(", content)
         self.assertIn("quote_literal(", content)
+        self.assertIn("PARSE_JSON(v.", content)
         self.assertNotIn("replace(\"'\", \"\\\\'\")", content)
+
+    def test_algorithm_variant_insert_uses_select_over_values_alias(self):
+        content = (ROOT / "qgis_snowflake_connector_algorithm.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("SELECT {','.join(select_projection)} FROM VALUES", content)
+        self.assertIn("AS v({','.join(value_aliases)})", content)
+        self.assertIn("PARSE_JSON(v.{alias})", content)
 
     def test_feature_iterator_uses_quote_identifier(self):
         content = (ROOT / "providers" / "sf_feature_iterator.py").read_text(
@@ -304,6 +339,110 @@ class TestStartupReliability(unittest.TestCase):
         func_body = content[idx_func:idx_next]
         self.assertIn("except Exception:", func_body)
         self.assertIn("return check_package_installed(package_name)", func_body)
+
+
+class TestEditabilityCapabilities(unittest.TestCase):
+    """Tests for GeoJSON editability / provider capability gating."""
+
+    def _get_provider_content(self):
+        return (ROOT / "providers" / "sf_vector_data_provider.py").read_text(
+            encoding="utf-8"
+        )
+
+    def test_context_information_sets_table_name(self):
+        """__init__ must add table_name to _context_information when _table_name is set."""
+        content = self._get_provider_content()
+        self.assertIn("if self._table_name:", content)
+        self.assertNotIn(
+            'if "table_name" in self._context_information:',
+            content,
+            "Dead conditional should be replaced with 'if self._table_name:'",
+        )
+
+    def test_capabilities_uses_geo_column_type_for_h3(self):
+        """H3 read-only gate must check _geo_column_type, not _geometry_type == 'H3'."""
+        content = self._get_provider_content()
+        self.assertNotIn(
+            '_geometry_type == "H3"',
+            content,
+            "capabilities() should not compare _geometry_type to 'H3'",
+        )
+        self.assertIn(
+            '_geo_column_type not in ("GEOGRAPHY", "GEOMETRY")',
+            content,
+        )
+
+    def test_capabilities_editable_for_geography_with_pk(self):
+        """Verify capabilities logic allows editing for GEOGRAPHY/GEOMETRY with PK."""
+        content = self._get_provider_content()
+        idx = content.index("def capabilities(self)")
+        next_def = content.index("\n    def ", idx + 1)
+        body = content[idx:next_def]
+        self.assertIn('self._primary_key == ""', body)
+        self.assertIn("self._sql_query is not None", body)
+        self.assertIn("AddFeatures", body)
+        self.assertIn("ChangeGeometries", body)
+
+    def test_change_geometry_values_propagates_failure(self):
+        """changeGeometryValues must propagate update_table_feature failure."""
+        content = self._get_provider_content()
+        idx = content.index("def changeGeometryValues(")
+        next_def = content.index("\n    def ", idx + 1)
+        body = content[idx:next_def]
+        self.assertIn("if not update_table_feature(context):", body)
+        self.assertIn("all_ok = False", body)
+        self.assertIn("return all_ok", body)
+
+    def test_update_table_feature_logs_on_failure(self):
+        """update_table_feature must log to QgsMessageLog on exception."""
+        content = (ROOT / "helpers" / "data_base.py").read_text(encoding="utf-8")
+        idx = content.index("def update_table_feature(")
+        body = content[idx:]
+        self.assertIn("QgsMessageLog.logMessage(", body)
+        self.assertIn("update_table_feature failed", body)
+
+    def _decode_uri(self, uri):
+        """Replicates the decodeUri regex from helpers/utils.py for CI testing."""
+        import re
+        supported_keys = [
+            "connection_name", "sql_query", "schema_name", "table_name",
+            "srid", "geom_column", "geometry_type", "geo_column_type",
+            "primary_key",
+        ]
+        matches = re.findall(
+            f"({'|'.join(supported_keys)})=(.*?) *?(?={'|'.join(supported_keys)}=|$)",
+            uri, flags=re.DOTALL,
+        )
+        return {key: value for key, value in matches}
+
+    def test_uri_parsing_primary_key_roundtrip(self):
+        """Verify decodeUri extracts primary_key correctly from browser-style URI."""
+        uri = (
+            "connection_name=myconn sql_query= "
+            "schema_name=PUBLIC "
+            "table_name=MYTABLE srid=4326 "
+            "geom_column=GEOM "
+            "geometry_type=Polygon "
+            "geo_column_type=GEOGRAPHY "
+            "primary_key=ID"
+        )
+        params = self._decode_uri(uri)
+        self.assertEqual(params.get("primary_key"), "ID")
+        self.assertEqual(params.get("sql_query"), "")
+
+    def test_uri_parsing_empty_primary_key(self):
+        """Verify decodeUri returns empty primary_key when none selected."""
+        uri = (
+            "connection_name=myconn sql_query= "
+            "schema_name=PUBLIC "
+            "table_name=MYTABLE srid=4326 "
+            "geom_column=GEOM "
+            "geometry_type=Polygon "
+            "geo_column_type=GEOGRAPHY "
+            "primary_key="
+        )
+        params = self._decode_uri(uri)
+        self.assertEqual(params.get("primary_key"), "")
 
 
 class TestQualityBaseline(unittest.TestCase):

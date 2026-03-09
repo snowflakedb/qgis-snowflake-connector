@@ -18,6 +18,18 @@ def quote_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
+def quote_json_literal_for_parse_json(value: str) -> str:
+    """Quote JSON text for PARSE_JSON input safely.
+
+    Prefer Snowflake dollar-quoting to avoid conflicts with apostrophes inside
+    JSON strings. Strict mode: if payload contains "$$", raise an error.
+    """
+    delimiter = "$$"
+    if delimiter not in value:
+        return f"{delimiter}{value}{delimiter}"
+    raise ValueError('JSON payload contains "$$" delimiter; cannot use strict $$ quoting')
+
+
 def qualified_table_name(database: str, schema: str, table: str) -> str:
     """Return a fully qualified and quoted Snowflake table reference."""
     return f"{quote_identifier(database)}.{quote_identifier(schema)}.{quote_identifier(table)}"

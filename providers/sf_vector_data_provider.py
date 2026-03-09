@@ -1,6 +1,7 @@
 import copy
 import typing
 from qgis.core import (
+    Qgis,
     QgsCoordinateReferenceSystem,
     QgsDataProvider,
     QgsFeature,
@@ -8,6 +9,7 @@ from qgis.core import (
     QgsFeatureRequest,
     QgsField,
     QgsFields,
+    QgsMessageLog,
     QgsRectangle,
     QgsVectorDataProvider,
     QgsWkbTypes,
@@ -70,7 +72,12 @@ class SFVectorDataProvider(QgsVectorDataProvider):
                 self._primary_key,
             ) = parse_uri(uri)
 
-        except Exception as _:
+        except Exception as e:
+            QgsMessageLog.logMessage(
+                f"Provider init failed: URI parse error: {e}",
+                "Snowflake Plugin",
+                Qgis.MessageLevel.Warning,
+            )
             self._is_valid = False
             return
 
@@ -85,7 +92,7 @@ class SFVectorDataProvider(QgsVectorDataProvider):
         }
         if self._schema_name:
             self._context_information["schema_name"] = self._schema_name
-        if "table_name" in self._context_information:
+        if self._table_name:
             self._context_information["table_name"] = self._table_name
         self._auth_information = get_authentification_information(
             self._settings, self._context_information["connection_name"]
@@ -139,9 +146,22 @@ class SFVectorDataProvider(QgsVectorDataProvider):
         # An empty string used as a primary key signifies the absence of a defined primary key.
         if (
             self._primary_key == ""
-            or self._geometry_type == "H3"
+            or self._geo_column_type not in ("GEOGRAPHY", "GEOMETRY")
             or (self._sql_query is not None and self._sql_query != "")
         ):
+            reasons = []
+            if self._primary_key == "":
+                reasons.append("no primary key")
+            if self._geo_column_type not in ("GEOGRAPHY", "GEOMETRY"):
+                reasons.append(f"column type '{self._geo_column_type}' is not editable")
+            if self._sql_query is not None and self._sql_query != "":
+                reasons.append("custom SQL query layer")
+            QgsMessageLog.logMessage(
+                f"Layer read-only: {', '.join(reasons)} "
+                f"(table={getattr(self, '_table_name', '?')})",
+                "Snowflake Plugin",
+                Qgis.MessageLevel.Info,
+            )
             return base_capabilities
 
         return (
@@ -417,6 +437,7 @@ class SFVectorDataProvider(QgsVectorDataProvider):
             if `geometry_map` is not a dictionary or is empty).
         """
         if isinstance(geometry_map, dict) and geometry_map:
+            all_ok = True
             for f_key, geometry in geometry_map.items():
                 geometry: QgsGeometry
                 feature: QgsFeature = self._features[f_key]
@@ -426,9 +447,10 @@ class SFVectorDataProvider(QgsVectorDataProvider):
                 context["primary_key_value"] = feature.attribute(self.primary_key())
                 context["primary_key_name"] = self.primary_key()
                 context["table_name"] = self._table_name
-                update_table_feature(context)
+                if not update_table_feature(context):
+                    all_ok = False
             self.reloadData()
-            return True
+            return all_ok
         return False
 
     def extent(self) -> QgsRectangle:

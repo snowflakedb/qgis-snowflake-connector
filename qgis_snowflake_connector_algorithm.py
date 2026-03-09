@@ -76,7 +76,11 @@ from .entities.sf_dynamic_connection_combo_box_widget import (
 from .providers.sf_data_source_provider import SFDataProvider
 
 from .helpers.utils import get_authentification_information, get_qsettings
-from .helpers.sql import quote_identifier, quote_literal, qualified_table_name
+from .helpers.sql import (
+    quote_identifier,
+    quote_literal,
+    qualified_table_name,
+)
 
 
 class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
@@ -230,8 +234,25 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
         # (sink, dest_id) = self.parameterAsSink(parameters, self.OUTPUT,
         #         context, source.fields(), source.wkbType(), source.sourceCrs())
 
-        # Compute the number of steps to display within the progress bar and
-        # get features from source
+        # Detect VARIANT/OBJECT/ARRAY columns in the target table so values
+        # can be wrapped in PARSE_JSON() during INSERT.
+        variant_columns = set()
+        try:
+            variant_query = (
+                "SELECT column_name FROM information_schema.columns "
+                f"WHERE table_catalog ILIKE {quote_literal(selected_database)} "
+                f"AND table_schema ILIKE {quote_literal(selected_schema)} "
+                f"AND table_name ILIKE {quote_literal(selected_table)} "
+                "AND data_type IN ('VARIANT', 'OBJECT', 'ARRAY')"
+            )
+            cur = self.sf_data_provider.execute_query(
+                variant_query, selected_connection
+            )
+            variant_columns = {row[0] for row in cur.fetchall()}
+            cur.close()
+        except Exception:
+            pass
+
         total = 100.0 / source.featureCount() if source.featureCount() else 0
         features = source.getFeatures()
 
@@ -246,14 +267,36 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
                 continue
             query_columns += f",{quote_identifier(field.name())}"
 
-        fq_table = qualified_table_name(selected_database, selected_schema, selected_table)
-        query_base = f'INSERT INTO {fq_table} ({query_columns}) VALUES '
+        fq_table = qualified_table_name(
+            selected_database, selected_schema, selected_table
+        )
+        # Use SELECT over VALUES so VARIANT/OBJECT/ARRAY columns can be
+        # converted via PARSE_JSON in the SELECT projection.
+        tuple_column_count = 1 + len(source.fields())
+        value_aliases = [f"c{i}" for i in range(1, tuple_column_count + 1)]
+        select_projection = [f"v.{value_aliases[0]}"]
+        tuple_position = 2
+        for field in source.fields():
+            alias = value_aliases[tuple_position - 1]
+            if field.name() in variant_columns:
+                select_projection.append(f"PARSE_JSON(v.{alias})")
+            else:
+                select_projection.append(f"v.{alias}")
+            tuple_position += 1
+
+        query_base = (
+            f'INSERT INTO {fq_table} ({query_columns}) '
+            f"SELECT {','.join(select_projection)} FROM VALUES "
+        )
+        query_values_alias = f" AS v({','.join(value_aliases)})"
         query = query_base
         first = True
         executed = False
         for current, feature in enumerate(features):
             if current != 0 and current % 5000 == 0:
-                cur = self.sf_data_provider.execute_query(query, selected_connection)
+                cur = self.sf_data_provider.execute_query(
+                    query + query_values_alias, selected_connection
+                )
                 cur.close()
                 query = query_base
                 first = True
@@ -272,59 +315,61 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
             else:
                 query += ","
 
-            query_values = f"({self.get_geometry_insert_sql(hex_string, use_geometry_type, source_srid)}"
+            query += f"('{hex_string}'"
 
             for field in source.fields():
-                query_values += ","
+                query += ","
 
                 if field.name().lower() == geom_column.lower():
-                    query_values += f"'{hex_string}'"
+                    query += f"'{hex_string}'"
                 else:
                     feat_index = feature.fieldNameIndex(field.name())
                     feat_val = feature.attribute(feat_index)
                     if is_snowflake_layer:
                         if feat_val is None:
-                            query_values += "NULL"
+                            query += "NULL"
                         elif field.subType() == QMetaType.Type.QString:
-                            query_values += quote_literal(str(feat_val))
+                            val = quote_literal(str(feat_val))
+                            query += val
                         elif field.subType() in [
                             QMetaType.Type.QDate,
                             QMetaType.Type.QDateTime,
                             QMetaType.Type.QTime,
                         ]:
-                            query_values += quote_literal(str(feat_val))
+                            query += quote_literal(str(feat_val))
                         else:
-                            query_values += f"{feat_val}"
+                            query += f"{feat_val}"
                     else:
                         if feat_val is None:
-                            query_values += "NULL"
+                            query += "NULL"
                         elif isinstance(feat_val, QVariant) and feat_val.isNull():
-                            query_values += "NULL"
+                            query += "NULL"
                         elif field.type() == QMetaType.Type.QString:
-                            query_values += quote_literal(str(feat_val))
+                            val = quote_literal(str(feat_val))
+                            query += val
                         elif field.type() == QMetaType.Type.QDate:
-                            query_values += quote_literal(
+                            query += quote_literal(
                                 feat_val.toString("yyyy-MM-dd")
                             )
                         elif field.type() == QMetaType.Type.QTime:
-                            query_values += quote_literal(
+                            query += quote_literal(
                                 feat_val.toString("hh:mm:ss")
                             )
                         elif field.type() == QMetaType.Type.QDateTime:
-                            query_values += quote_literal(
+                            query += quote_literal(
                                 feat_val.toString("yyyy-MM-dd hh:mm:ss")
                             )
                         else:
-                            query_values += f"{feat_val}"
-            query_values += ")"
-
-            query += query_values
+                            query += f"{feat_val}"
+            query += ")"
 
             # Update the progress bar
             feedback.setProgress(int(current * total))
 
         if not executed:
-            cur = self.sf_data_provider.execute_query(query, selected_connection)
+            cur = self.sf_data_provider.execute_query(
+                query + query_values_alias, selected_connection
+            )
             cur.close()
 
         # Return the results of the algorithm. In this case our only result is

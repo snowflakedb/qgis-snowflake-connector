@@ -6,7 +6,7 @@ from ..managers.sf_connection_manager import SFConnectionManager
 from ..helpers.utils import get_authentification_information, get_qsettings
 from ..helpers.sql import quote_identifier, quote_literal, qualified_table_name
 from qgis.PyQt.QtCore import QSettings
-from qgis.core import QgsFeature
+from qgis.core import QgsFeature, QgsMessageLog, Qgis
 from ..providers.sf_data_source_provider import SFDataProvider
 from ..entities.sf_feature_iterator import SFFeatureIterator
 import snowflake.connector
@@ -965,5 +965,10 @@ def update_table_feature(
 
         cur.close()
         return True
-    except Exception as _:
+    except Exception as e:
+        QgsMessageLog.logMessage(
+            f"update_table_feature failed: {e}",
+            "Snowflake Plugin",
+            Qgis.MessageLevel.Warning,
+        )
         return False

@@ -1,3 +1,5 @@
+import os
+
 from ..dialogs.sf_data_source_manager_widget import SFDataSourceManagerWidget
 from qgis.core import QgsProviderRegistry
 from qgis.gui import QgsAbstractDataSourceWidget, QgsSourceSelectProvider
@@ -5,6 +7,8 @@ from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QWidget
 import typing
+
+_IMAGES_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "ui", "images")
 
 
 class SFSourceSelectProvider(QgsSourceSelectProvider):
@@ -65,4 +69,4 @@ class SFSourceSelectProvider(QgsSourceSelectProvider):
         :return: The icon for the source select provider.
         :rtype: QIcon
         """
-        return QIcon(":/plugins/qgis-snowflake-connector/ui/images/qgis_sf_plus.png")
+        return QIcon(os.path.join(_IMAGES_DIR, "qgis_sf_plus.png"))
