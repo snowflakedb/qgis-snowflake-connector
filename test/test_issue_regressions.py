@@ -86,9 +86,12 @@ class TestSQLSafety(unittest.TestCase):
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
 
-        self.assertEqual(mod.quote_identifier("foo"), '"foo"')
+        self.assertEqual(mod.quote_identifier("foo"), 'foo')
+        self.assertEqual(mod.quote_identifier("FOO_BAR"), 'FOO_BAR')
         self.assertEqual(mod.quote_identifier('foo"bar'), '"foo""bar"')
+        self.assertEqual(mod.quote_identifier("col name"), '"col name"')
         self.assertEqual(mod.quote_identifier(""), '""')
+        self.assertEqual(mod.quote_identifier('"already_quoted"'), '"already_quoted"')
 
     def test_quote_literal_basic(self):
         import importlib.util
@@ -382,7 +385,6 @@ class TestStartupReliability(unittest.TestCase):
         content = (ROOT / "helpers" / "utils.py").read_text(encoding="utf-8")
         self.assertIn("def check_install_package(package_name) -> bool:", content)
         self.assertIn("def check_install_snowflake_connector_package() -> bool:", content)
-        self.assertIn("def check_install_h3_package() -> bool:", content)
 
     def test_check_install_package_has_exception_guard(self):
         content = (ROOT / "helpers" / "utils.py").read_text(encoding="utf-8")
@@ -536,6 +538,100 @@ class TestKeyPairAuth(unittest.TestCase):
         content = (ROOT / "helpers" / "utils.py").read_text(encoding="utf-8")
         self.assertIn('"private_key_file"', content)
         self.assertIn('"key_passphrase"', content)
+
+
+class TestH3TextNormalization(unittest.TestCase):
+    """Tests that H3 cells are normalized to TEXT (hex string) internally."""
+
+    def _get_iterator_content(self):
+        return (ROOT / "providers" / "sf_feature_iterator.py").read_text(
+            encoding="utf-8"
+        )
+
+    def _get_algorithm_content(self):
+        return (ROOT / "qgis_snowflake_connector_algorithm.py").read_text(
+            encoding="utf-8"
+        )
+
+    def test_no_python_h3_dependency(self):
+        """Python h3 package must not be imported."""
+        content = self._get_iterator_content()
+        self.assertNotIn("import h3", content)
+
+    def test_boundary_computed_server_side(self):
+        """H3 boundary conversion uses Snowflake H3_CELL_TO_BOUNDARY."""
+        content = self._get_iterator_content()
+        self.assertIn("H3_CELL_TO_BOUNDARY", content)
+
+    def test_number_h3_normalized_to_string(self):
+        """NUMBER H3 columns are normalized to TEXT via H3_INT_TO_STRING."""
+        content = self._get_iterator_content()
+        self.assertIn("H3_INT_TO_STRING", content)
+
+    def test_attribute_skip_preserves_h3(self):
+        """Attribute skip condition allows H3 values through."""
+        content = self._get_iterator_content()
+        self.assertIn('not in ("NUMBER", "TEXT")', content)
+
+    def test_export_creates_text_column_for_h3(self):
+        """CREATE TABLE always uses TEXT for H3 columns."""
+        content = self._get_algorithm_content()
+        idx = content.index("def get_create_table_query")
+        next_def = content.index("\n    def ", idx + 1)
+        body = content[idx:next_def]
+        self.assertIn('geom_data_type = "TEXT"', body)
+
+    def test_export_quotes_h3_values(self):
+        """H3 values in VALUES tuple are always quoted with quote_literal."""
+        content = self._get_algorithm_content()
+        self.assertIn("quote_literal(str(h3_val))", content)
+
+    def test_sql_query_task_uses_text_for_h3(self):
+        """SQL query task always sets geo_column_type to TEXT for H3."""
+        content = (ROOT / "tasks" / "sf_convert_sql_query_to_layer_task.py").read_text(
+            encoding="utf-8"
+        )
+        idx = content.index("geo_column_type_is_h3")
+        region = content[idx:idx + 200]
+        self.assertIn('"TEXT"', region)
+
+
+class TestPrimaryKeyValidation(unittest.TestCase):
+    """Tests that primary key selection validates for duplicate values."""
+
+    def _get_utils_content(self):
+        return (ROOT / "helpers" / "utils.py").read_text(encoding="utf-8")
+
+    def _get_database_content(self):
+        return (ROOT / "helpers" / "data_base.py").read_text(encoding="utf-8")
+
+    def test_check_column_has_duplicates_exists(self):
+        """data_base.py must have a check_column_has_duplicates function."""
+        content = self._get_database_content()
+        self.assertIn("def check_column_has_duplicates(", content)
+
+    def test_check_column_has_duplicates_uses_count_distinct(self):
+        """The duplicate check must compare COUNT(*) vs COUNT(DISTINCT col)."""
+        content = self._get_database_content()
+        idx = content.index("def check_column_has_duplicates(")
+        next_def = content.index("\ndef ", idx + 1)
+        body = content[idx:next_def]
+        self.assertIn("COUNT(*)", body)
+        self.assertIn("COUNT(DISTINCT", body)
+        self.assertIn("quote_identifier(column_name)", body)
+
+    def test_prompt_calls_duplicate_check(self):
+        """prompt_and_get_primary_key must call check_column_has_duplicates."""
+        content = self._get_utils_content()
+        idx = content.index("def prompt_and_get_primary_key(")
+        next_def = content.index("\ndef ", idx + 1) if "\ndef " in content[idx + 1:] else len(content)
+        body = content[idx:next_def]
+        self.assertIn("check_column_has_duplicates", body)
+
+    def test_prompt_warns_on_duplicates(self):
+        """prompt_and_get_primary_key must show a warning when duplicates exist."""
+        content = self._get_utils_content()
+        self.assertIn("Duplicate Values Detected", content)
 
 
 class TestQualityBaseline(unittest.TestCase):

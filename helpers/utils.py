@@ -354,11 +354,6 @@ def check_install_snowflake_connector_package() -> bool:
     return check_install_package("snowflake-connector-python")
 
 
-def check_install_h3_package() -> bool:
-    """Ensure h3 is available. Returns True on success."""
-    return check_install_package("h3")
-
-
 def uninstall_snowflake_connector_package() -> None:
     """
     Uninstalls the Snowflake Connector for Python package.
@@ -559,7 +554,7 @@ def prompt_and_get_primary_key(context_information: dict, data_type: str) -> str
         The name of the column selected as the primary key, or an empty
         string if no primary key is selected or the process is skipped.
     """
-    from ..helpers.data_base import get_table_columns
+    from ..helpers.data_base import get_table_columns, check_column_has_duplicates
     from ..helpers.messages import get_set_primary_key_message_box
 
     primary_key = ""
@@ -573,8 +568,34 @@ def prompt_and_get_primary_key(context_information: dict, data_type: str) -> str
             get_table_columns(context_information),
         )
 
-        primary_key = (
-            primary_key_selected if message_box_accept == QMessageBox.StandardButton.Ok else ""
-        )
+        if (
+            message_box_accept == QMessageBox.StandardButton.Ok
+            and primary_key_selected
+        ):
+            try:
+                has_dupes = check_column_has_duplicates(
+                    context_information, primary_key_selected
+                )
+            except Exception:
+                has_dupes = False
+
+            if has_dupes:
+                warn_result = QMessageBox.warning(
+                    None,
+                    "Duplicate Values Detected",
+                    (
+                        f'Column "{primary_key_selected}" contains duplicate '
+                        "values and may not work correctly as a primary key.\n\n"
+                        "Use it anyway?"
+                    ),
+                    QMessageBox.StandardButton.Yes
+                    | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if warn_result == QMessageBox.StandardButton.Yes:
+                    primary_key = primary_key_selected
+                # else: primary_key stays "" (no PK)
+            else:
+                primary_key = primary_key_selected
 
     return primary_key

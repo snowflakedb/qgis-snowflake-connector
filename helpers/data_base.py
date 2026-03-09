@@ -917,6 +917,34 @@ def get_table_columns(
     return result_rows
 
 
+def check_column_has_duplicates(
+    context_information: dict,
+    column_name: str,
+) -> bool:
+    """Check whether a column contains duplicate values.
+
+    Returns True if duplicates exist, False if all values are unique.
+    """
+    connection_manager: SFConnectionManager = SFConnectionManager.get_instance()
+    fq_table = (
+        f"{quote_identifier(context_information['database_name'])}."
+        f"{quote_identifier(context_information['schema_name'])}."
+        f"{quote_identifier(context_information['table_name'])}"
+    )
+    query = (
+        f"SELECT COUNT(*) - COUNT(DISTINCT {quote_identifier(column_name)}) "
+        f"FROM {fq_table}"
+    )
+    cur = connection_manager.execute_query(
+        connection_name=context_information["connection_name"],
+        query=query,
+        context_information=context_information,
+    )
+    row = cur.fetchone()
+    cur.close()
+    return row[0] > 0
+
+
 def update_table_feature(
     context_information: dict,
 ) -> bool:

@@ -62,7 +62,6 @@ def classFactory(iface):  # pylint: disable=invalid-name
     """
     from .helpers.utils import (
         check_install_snowflake_connector_package,
-        check_install_h3_package,
         check_package_installed,
     )
 
@@ -74,12 +73,6 @@ def classFactory(iface):  # pylint: disable=invalid-name
     except Exception as exc:
         missing.append(f"snowflake-connector-python ({exc})")
 
-    try:
-        if not check_install_h3_package():
-            missing.append("h3")
-    except Exception as exc:
-        missing.append(f"h3 ({exc})")
-
     if missing:
         from qgis.core import QgsMessageLog, Qgis
 
@@ -87,7 +80,7 @@ def classFactory(iface):  # pylint: disable=invalid-name
             "Snowflake Connector: required dependencies could not be installed: "
             + ", ".join(missing)
             + ".\nInstall them manually with:\n"
-            "  python3 -m pip install snowflake-connector-python h3\n"
+            "  python3 -m pip install snowflake-connector-python\n"
             "Then restart QGIS."
         )
         QgsMessageLog.logMessage(msg, "Snowflake Plugin", Qgis.MessageLevel.Critical)

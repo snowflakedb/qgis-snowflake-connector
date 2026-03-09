@@ -1,12 +1,21 @@
 """Centralized SQL quoting utilities for Snowflake identifier and literal safety."""
 
+import re
+
+_SIMPLE_IDENT = re.compile(r'^[A-Za-z_][A-Za-z0-9_$]*$')
+
 
 def quote_identifier(name: str) -> str:
-    """Quote a Snowflake identifier (database, schema, table, or column name).
+    """Quote a Snowflake identifier only when necessary.
 
-    Wraps in double quotes and escapes internal double quotes per Snowflake
-    identifier quoting rules.
+    Simple identifiers (letters, digits, underscores) are left unquoted so
+    Snowflake applies its default uppercasing.  Names that contain spaces,
+    special characters, or are already double-quoted are wrapped/preserved.
     """
+    if name.startswith('"') and name.endswith('"'):
+        return name
+    if _SIMPLE_IDENT.match(name):
+        return name
     return '"' + name.replace('"', '""') + '"'
 
 

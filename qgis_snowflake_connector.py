@@ -55,7 +55,6 @@ import threading
 from qgis.core import (
     Qgis,
     QgsMessageLog,
-    QgsProcessingAlgorithm,
     QgsApplication,
     QgsProviderRegistry,
 )
@@ -67,7 +66,6 @@ from .qgis_snowflake_connector_algorithm import QGISSnowflakeConnectorAlgorithm
 from .providers.sf_data_item_provider import SFDataItemProvider
 
 from .providers.sf_source_select_provider import SFSourceSelectProvider
-from .qgis_snowflake_connector_provider import QGISSnowflakeConnectorProvider
 from qgis.gui import QgsGui
 
 cmd_folder = os.path.split(inspect.getfile(inspect.currentframe()))[0]
@@ -102,9 +100,6 @@ class QGISSnowflakeConnectorPlugin(object):
         QgsApplication.dataItemProviderRegistry().addProvider(
             self.sf_data_item_provider
         )
-
-        self.provider = QGISSnowflakeConnectorProvider()
-        QgsApplication.processingRegistry().addProvider(self.provider)
 
         registry = QgsProviderRegistry.instance()
         sf_metadata_provider = SFMetadataProvider()
@@ -157,7 +152,6 @@ class QGISSnowflakeConnectorPlugin(object):
         ).start()
 
     def unload(self):
-        QgsApplication.processingRegistry().removeProvider(self.provider)
         self.postgis_native_provider.algorithms().remove(
             self.qgis_snowflake_connector_algorithm
         )

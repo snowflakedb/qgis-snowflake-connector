@@ -95,11 +95,11 @@ class SFSQLQueryDialog(QDialog, Ui_QgsQueryResultWidgetBase):
                 if task_should_run:
                     geo_column_name = self.mGeometryColumnComboBox.currentText()
                     self.context_information["geo_column_name"] = geo_column_name
-                    self.context_information["geo_column_type_is_h3"] = (
-                        self.mGeometryColumnComboBox.itemData(
-                            self.mGeometryColumnComboBox.currentIndex()
-                        )["is_h3"]
+                    item_data = self.mGeometryColumnComboBox.itemData(
+                        self.mGeometryColumnComboBox.currentIndex()
                     )
+                    self.context_information["geo_column_type_is_h3"] = item_data["is_h3"]
+                    self.context_information["h3_sf_col_type"] = item_data.get("col_type")
                     sf_convert_sql_query_to_layer_task = SFConvertSQLQueryToLayerTask(
                         query=query_without_semicolon,
                         layer_name=self.mLayerNameLineEdit.text(),
@@ -186,7 +186,7 @@ class SFSQLQueryDialog(QDialog, Ui_QgsQueryResultWidgetBase):
                     or h3_column_check[index]
                 ):
                     self.mGeometryColumnComboBox.addItem(
-                        col_name, {"is_h3": True if h3_column_check[index] else False}
+                        col_name, {"is_h3": True if h3_column_check[index] else False, "col_type": col_type}
                     )
             self.model.setHorizontalHeaderLabels(col_names)
 

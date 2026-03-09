@@ -3,7 +3,7 @@ from __future__ import (
     annotations,  # used to manage type annotation for method that return Self in Python < 3.11
 )
 
-from typing import Any, Callable, Union
+from typing import Any, Callable
 
 from qgis.PyQt.QtCore import QDate, QDateTime, QMetaType, QTime
 
@@ -19,10 +19,8 @@ from qgis.core import (
     QgsFeatureRequest,
     QgsGeometry,
     QgsMessageLog,
-    QgsPointXY,
     Qgis,
 )
-import h3.api.basic_int as h3
 from ..helpers.mappings import mapping_multi_single_to_geometry_type
 
 
@@ -203,8 +201,13 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                         where_clause += f" and {clause}"
 
             geom_query = f'ST_ASWKB({quoted_geom}), {quoted_geom}, '
-            if self._provider._geo_column_type in ["NUMBER", "TEXT"]:
-                geom_query = f'{quoted_geom}, {quoted_geom}, '
+            if self._provider._geo_column_type == "TEXT":
+                geom_query = f'ST_ASWKB(H3_CELL_TO_BOUNDARY({quoted_geom})), {quoted_geom}, '
+            elif self._provider._geo_column_type == "NUMBER":
+                geom_query = (
+                    f'ST_ASWKB(H3_CELL_TO_BOUNDARY({quoted_geom})), '
+                    f'H3_INT_TO_STRING({quoted_geom}), '
+                )
 
             self._request_no_geometry = (
                 self._request.flags() & QgsFeatureRequest.Flag.NoGeometry
@@ -246,23 +249,6 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                 context_information=self._provider._context_information,
             )
         self._index = 0
-
-    def __try_to_convert_hex_to_int(self, hex_cell: Union[int, str]) -> Union[int, str]:
-        """
-        Tries to convert a hexadecimal string to an integer.
-
-        Args:
-            hex_cell (Union[int, str]): The value to be converted, which can be an integer or a string.
-
-        Returns:
-            Union[int, str]: The converted integer if the input is a valid hexadecimal string,
-                                    otherwise returns the original input.
-        """
-        try:
-            hex_to_int = int(hex_cell, 16)
-            return hex_to_int
-        except Exception:
-            return hex_cell
 
     def fetchFeature(self, f: QgsFeature) -> bool:
         """fetch next feature, return true on success
@@ -324,17 +310,7 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
 
                 if not self._request_no_geometry:
                     geometry = QgsGeometry()
-                    if self._provider._geo_column_type in ["NUMBER", "TEXT"]:
-                        cell = next_result[self.index_geom_column]
-                        converted_cell = self.__try_to_convert_hex_to_int(cell)
-                        hexVertexCoords = h3.cell_to_boundary(converted_cell)
-                        geometry = QgsGeometry.fromPolygonXY(
-                            [
-                                [QgsPointXY(lon, lat) for lat, lon in hexVertexCoords],
-                            ]
-                        )
-                    else:
-                        geometry.fromWkb(next_result[self.index_geom_column])
+                    geometry.fromWkb(next_result[self.index_geom_column])
                     f.setGeometry(geometry)
                     self.geometryToDestinationCrs(f, self._transform)
 
@@ -364,7 +340,8 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                             try:
                                 if (
                                     field_name == self._provider._column_geom
-                                    and self._provider._geo_column_type != "NUMBER"
+                                    and self._provider._geo_column_type
+                                    not in ("NUMBER", "TEXT")
                                 ):
                                     continue
                                 column_value = next_result[
@@ -396,7 +373,8 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                         ):
                             if (
                                 field_name == self._provider._column_geom
-                                and self._provider._geo_column_type != "NUMBER"
+                                and self._provider._geo_column_type
+                                not in ("NUMBER", "TEXT")
                             ):
                                 continue
                             f.setAttribute(
