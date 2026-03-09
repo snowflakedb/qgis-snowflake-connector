@@ -7,8 +7,7 @@ from qgis.core import (
     QgsGeometry,
     QgsTask,
     QgsVectorLayer,
-    Qgis,
-)
+    Qgis, NULL)
 from qgis.PyQt.QtCore import QVariant
 from typing import Dict, Union
 
@@ -177,19 +176,19 @@ def set_feature_attributes_values(
         field_value = iterate_feature.attribute(field_id)
         if isinstance(field_value, QVariant):
             if field_value.isNull():
-                feature.setAttribute(field.name(), QVariant())
+                feature.setAttribute(field.name(), NULL)
                 continue
         if field_value is None:
-            feature.setAttribute(field.name(), QVariant())
+            feature.setAttribute(field.name(), NULL)
             continue
 
-        if field.type() == QVariant.String:
+        if field.type() == QMetaType.Type.QString:
             field_value = str(field_value)
-        if field.type() == QVariant.Int:
+        if field.type() == QMetaType.Type.Int:
             field_value = int(field_value)
-        if field.type() == QVariant.Double:
+        if field.type() == QMetaType.Type.Double:
             field_value = float(field_value)
-        if field.type() == QVariant.Bool:
+        if field.type() == QMetaType.Type.Bool:
             field_value = bool(field_value)
 
         feature.setAttribute(field.name(), field_value)
@@ -218,7 +217,7 @@ def add_features_attributes_to_layer(
         if layer_field.name() == geo_column_name:
             continue
         layer_fields.append(
-            QgsField(layer_field.name(), QVariant.String, subType=layer_field.subType())
+            QgsField(layer_field.name(), QMetaType.Type.QString, subType=layer_field.subType())
         )
 
     for layer_type in layer_dict:

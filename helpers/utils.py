@@ -140,7 +140,7 @@ def get_qsettings() -> QSettings:
         QSettings: The QSettings object for the Snowflake QGIS plugin.
     """
     return QSettings(
-        QSettings.IniFormat, QSettings.UserScope, "Snowflake", "SF_QGIS_PLUGIN"
+        QSettings.Format.IniFormat, QSettings.Scope.UserScope, "Snowflake", "SF_QGIS_PLUGIN"
     )
 
 
@@ -229,7 +229,7 @@ def on_handle_error(title: str, message: str) -> None:
     Returns:
         None
     """
-    QMessageBox.critical(None, title, message, QMessageBox.Ok)
+    QMessageBox.critical(None, title, message, QMessageBox.StandardButton.Ok)
 
 
 def on_handle_warning(title: str, message: str) -> None:
@@ -243,7 +243,7 @@ def on_handle_warning(title: str, message: str) -> None:
     Returns:
         None
     """
-    QMessageBox.warning(None, title, message, QMessageBox.Ok)
+    QMessageBox.warning(None, title, message, QMessageBox.StandardButton.Ok)
 
 
 def check_package_installed(package_name) -> bool:
@@ -265,6 +265,42 @@ def check_package_installed(package_name) -> bool:
         return False
 
 
+def get_python_executable_path() -> str:
+    """
+    Returns the path to the Python executable in a cross-platform manner.
+
+    Returns:
+        str: The path to the Python executable.
+    """
+    import sys
+    import os
+    import platform
+
+    if platform.system() == "Windows":
+        # On Windows, look for python.exe in the same directory as sys.executable
+        python_dir = os.path.dirname(sys.executable)
+        python_path = os.path.join(python_dir, "python.exe")
+        if os.path.exists(python_path):
+            return python_path
+        # Fallback to python3.exe
+        python3_path = os.path.join(python_dir, "python3.exe")
+        if os.path.exists(python3_path):
+            return python3_path
+    else:
+        # On Unix-like systems, look for python3 in bin directory
+        prefix_path = sys.exec_prefix
+        python3_path = os.path.join(prefix_path, "bin", "python3")
+        if os.path.exists(python3_path):
+            return python3_path
+        # Fallback to python in bin directory
+        python_path = os.path.join(prefix_path, "bin", "python")
+        if os.path.exists(python_path):
+            return python_path
+
+    # Final fallback: use sys.executable itself
+    return sys.executable
+
+
 def check_install_package(package_name) -> None:
     """
     Checks if a given package is installed, and if not, installs it along with the 'pyopenssl' package.
@@ -276,9 +312,7 @@ def check_install_package(package_name) -> None:
     """
     if not check_package_installed(package_name):
         import subprocess
-        import sys
-
-        python3_path = sys.executable
+        python3_path = get_python_executable_path()
         subprocess.call([python3_path, "-m", "pip", "install", "pip", "--upgrade"])
         subprocess.call(
             [
@@ -335,15 +369,8 @@ def uninstall_snowflake_connector_package() -> None:
         subprocess.CalledProcessError: If the uninstallation process fails.
     """
     import subprocess
-    import platform
-    import sys
 
-    if platform.system() == "Windows":
-        prefixPath = sys.exec_prefix
-        python3_path = os.path.join(prefixPath, "python3")
-    else:
-        prefixPath = sys.exec_prefix
-        python3_path = os.path.join(prefixPath, "bin", "python3")
+    python3_path = get_python_executable_path()
     subprocess.call(
         [
             python3_path,
@@ -537,7 +564,7 @@ def prompt_and_get_primary_key(context_information: dict, data_type: str) -> str
         )
 
         primary_key = (
-            primary_key_selected if message_box_accept == QMessageBox.Ok else ""
+            primary_key_selected if message_box_accept == QMessageBox.StandardButton.Ok else ""
         )
 
     return primary_key

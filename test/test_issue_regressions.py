@@ -9,7 +9,8 @@ class TestIssueRegressions(unittest.TestCase):
     def test_utils_uses_sys_executable_and_importlib_metadata(self):
         content = (ROOT / "helpers" / "utils.py").read_text(encoding="utf-8")
         self.assertIn("import importlib.metadata", content)
-        self.assertIn("python3_path = sys.executable", content)
+        self.assertIn("def get_python_executable_path()", content)
+        self.assertIn("python3_path = get_python_executable_path()", content)
         self.assertIn('"--upgrade"', content)
         self.assertIn('"cryptography"', content)
 

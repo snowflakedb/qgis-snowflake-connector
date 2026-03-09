@@ -1,4 +1,4 @@
-from ..ui.sf_data_source_manager_widget import SFDataSourceManagerWidget
+from ..dialogs.sf_data_source_manager_widget import SFDataSourceManagerWidget
 from qgis.core import QgsProviderRegistry
 from qgis.gui import QgsAbstractDataSourceWidget, QgsSourceSelectProvider
 from qgis.PyQt.QtCore import Qt

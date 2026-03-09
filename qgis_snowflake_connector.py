@@ -61,7 +61,6 @@ from .providers.sf_data_item_provider import SFDataItemProvider
 
 from .providers.sf_source_select_provider import SFSourceSelectProvider
 from .qgis_snowflake_connector_provider import QGISSnowflakeConnectorProvider
-from .resources_rc import *
 from qgis.gui import QgsGui
 
 cmd_folder = os.path.split(inspect.getfile(inspect.currentframe()))[0]

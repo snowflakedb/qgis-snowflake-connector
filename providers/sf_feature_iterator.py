@@ -5,10 +5,10 @@ from __future__ import (
 
 from typing import Any, Callable, Union
 
-from PyQt5.QtCore import QDate, QDateTime, QMetaType, QTime
+from qgis.PyQt.QtCore import QDate, QDateTime, QMetaType, QTime
 
 # PyQGIS
-from ..helpers.data_base import limit_size_for_type
+from ..helpers.limits import limit_size_for_type
 from ..providers.sf_feature_source import SFFeatureSource
 from qgis.core import (
     QgsAbstractFeatureIterator,
@@ -62,10 +62,10 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
 
             # Mapping between the field type and the conversion function
             attributes_conversion_functions: dict[QMetaType, Callable[[Any], Any]] = {
-                QMetaType.QDate: QDate,
-                QMetaType.QTime: QTime,
-                QMetaType.QDateTime: QDateTime,
-                QMetaType.Double: float,
+                QMetaType.Type.QDate: QDate,
+                QMetaType.Type.QTime: QTime,
+                QMetaType.Type.QDateTime: QDateTime,
+                QMetaType.Type.Double: float,
             }
 
             self._attributes_converters = {}

@@ -116,7 +116,7 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
             QgsProcessingParameterFeatureSource(
                 self.INPUT,
                 self.tr("Input layer"),
-                [QgsProcessing.TypeVectorAnyGeometry],
+                [QgsProcessing.SourceType.TypeVectorAnyGeometry],
             )
         )
 
@@ -283,13 +283,13 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
                     if is_snowflake_layer:
                         if feat_val is None:
                             query_values += "NULL"
-                        elif field.subType() == QVariant.String:
+                        elif field.subType() == QMetaType.Type.QString:
                             feat_val = feat_val.replace("'", "\\'")
                             query_values += f"'{feat_val}'"
                         elif field.subType() in [
-                            QVariant.Date,
-                            QVariant.DateTime,
-                            QVariant.Time,
+                            QMetaType.Type.QDate,
+                            QMetaType.Type.QDateTime,
+                            QMetaType.Type.QTime,
                         ]:
                             query_values += f"'{feat_val}'"
                         else:
@@ -299,14 +299,14 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
                             query_values += "NULL"
                         elif isinstance(feat_val, QVariant) and feat_val.isNull():
                             query_values += "NULL"
-                        elif field.type() == QVariant.String:
+                        elif field.type() == QMetaType.Type.QString:
                             feat_val = feat_val.replace("'", "\\'")
                             query_values += f"'{feat_val}'"
-                        elif field.type() == QVariant.Date:
+                        elif field.type() == QMetaType.Type.QDate:
                             query_values += f"'{feat_val.toString('yyyy-MM-dd')}'"
-                        elif field.type() == QVariant.Time:
+                        elif field.type() == QMetaType.Type.QTime:
                             query_values += f"'{feat_val.toString('hh:mm:ss')}'"
-                        elif field.type() == QVariant.DateTime:
+                        elif field.type() == QMetaType.Type.QDateTime:
                             query_values += (
                                 f"'{feat_val.toString('yyyy-MM-dd hh:mm:ss')}'"
                             )
@@ -342,19 +342,19 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
         Returns:
             str: The field type.
         """
-        if code_type == QVariant.String:
+        if code_type == QMetaType.Type.QString:
             return "TEXT"
-        if code_type == QVariant.Int:
+        if code_type == QMetaType.Type.Int:
             return "INTEGER"
-        if code_type == QVariant.Double:
+        if code_type == QMetaType.Type.Double:
             return "DOUBLE"
-        if code_type == QVariant.Date:
+        if code_type == QMetaType.Type.QDate:
             return "DATE"
-        if code_type == QVariant.Time:
+        if code_type == QMetaType.Type.QTime:
             return "TIME"
-        if code_type == QVariant.DateTime:
+        if code_type == QMetaType.Type.QDateTime:
             return "TIMESTAMP"
-        if code_type == QVariant.Bool:
+        if code_type == QMetaType.Type.Bool:
             return "BOOLEAN"
         return "TEXT"
 

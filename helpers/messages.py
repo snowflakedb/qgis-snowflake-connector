@@ -10,15 +10,15 @@ def get_proceed_cancel_message_box(title: str, text: str) -> int:
     message_box.setWindowTitle(title)
     message_box.setText(text)
 
-    proceed_button = message_box.addButton("Proceed", QtWidgets.QMessageBox.AcceptRole)
-    cancel_button = message_box.addButton("Cancel", QtWidgets.QMessageBox.RejectRole)
+    proceed_button = message_box.addButton("Proceed", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
+    cancel_button = message_box.addButton("Cancel", QtWidgets.QMessageBox.ButtonRole.RejectRole)
 
-    message_box.exec_()
+    message_box.exec()
 
     if message_box.clickedButton() == proceed_button:
-        return QtWidgets.QMessageBox.Ok
+        return QtWidgets.QMessageBox.StandardButton.Ok
     elif message_box.clickedButton() == cancel_button:
-        return QtWidgets.QMessageBox.Cancel
+        return QtWidgets.QMessageBox.StandardButton.Cancel
 
 
 def get_set_primary_key_message_box(
@@ -62,16 +62,16 @@ def get_set_primary_key_message_box(
     if grid_layout:
         grid_layout.addWidget(combo_box, 1, 1)
 
-    proceed_button = message_box.addButton("Proceed", QtWidgets.QMessageBox.AcceptRole)
-    skip_button = message_box.addButton("Skip", QtWidgets.QMessageBox.RejectRole)
+    proceed_button = message_box.addButton("Proceed", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
+    skip_button = message_box.addButton("Skip", QtWidgets.QMessageBox.ButtonRole.RejectRole)
 
-    message_box.exec_()
+    message_box.exec()
 
     clicked_button = None
     if message_box.clickedButton() == proceed_button:
-        clicked_button = QtWidgets.QMessageBox.Ok
+        clicked_button = QtWidgets.QMessageBox.StandardButton.Ok
     elif message_box.clickedButton() == skip_button:
-        clicked_button = QtWidgets.QMessageBox.Cancel
+        clicked_button = QtWidgets.QMessageBox.StandardButton.Cancel
 
     return clicked_button, combo_box.currentText()
 
@@ -83,4 +83,4 @@ def create_reporting_error_message_box_for_query(
     message = f"Please report this issue to the <a href='{link}'>QGIS repo</a>."
     f" Add query id to description: {query_uuid}"
     f"<br>{error_message}"
-    QMessageBox.critical(parent, title, message, QMessageBox.Ok)
+    QMessageBox.critical(parent, title, message, QMessageBox.StandardButton.Ok)
