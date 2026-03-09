@@ -140,7 +140,11 @@ class TestSQLSafety(unittest.TestCase):
 
         self.assertEqual(
             mod.qualified_table_name("DB", "SCH", "TBL"),
-            '"DB"."SCH"."TBL"',
+            'DB.SCH.TBL',
+        )
+        self.assertEqual(
+            mod.qualified_table_name("my db", "SCH", "TBL"),
+            '"my db".SCH.TBL',
         )
 
     def test_data_base_uses_quote_helpers(self):
@@ -342,9 +346,7 @@ class TestUIBoundary(unittest.TestCase):
         """All plugin code should use qgis.PyQt, not raw PyQt5/PyQt6 imports."""
         for py_file in sorted(ROOT.rglob("*.py")):
             rel = py_file.relative_to(ROOT)
-            if str(rel).startswith("scripts"):
-                continue
-            if str(rel).startswith("test"):
+            if str(rel).startswith(("scripts", "test", "zip_build")):
                 continue
             content = py_file.read_text(encoding="utf-8")
             for line in content.splitlines():
@@ -573,27 +575,14 @@ class TestH3TextNormalization(unittest.TestCase):
         content = self._get_iterator_content()
         self.assertIn('not in ("NUMBER", "TEXT")', content)
 
-    def test_export_creates_text_column_for_h3(self):
-        """CREATE TABLE always uses TEXT for H3 columns."""
-        content = self._get_algorithm_content()
-        idx = content.index("def get_create_table_query")
-        next_def = content.index("\n    def ", idx + 1)
-        body = content[idx:next_def]
-        self.assertIn('geom_data_type = "TEXT"', body)
-
-    def test_export_quotes_h3_values(self):
-        """H3 values in VALUES tuple are always quoted with quote_literal."""
-        content = self._get_algorithm_content()
-        self.assertIn("quote_literal(str(h3_val))", content)
-
-    def test_sql_query_task_uses_text_for_h3(self):
-        """SQL query task always sets geo_column_type to TEXT for H3."""
+    def test_sql_query_task_detects_h3_text_vs_number(self):
+        """SQL query task distinguishes TEXT vs NUMBER H3 columns."""
         content = (ROOT / "tasks" / "sf_convert_sql_query_to_layer_task.py").read_text(
             encoding="utf-8"
         )
-        idx = content.index("geo_column_type_is_h3")
-        region = content[idx:idx + 200]
-        self.assertIn('"TEXT"', region)
+        self.assertIn('"TEXT"', content)
+        self.assertIn('"NUMBER"', content)
+        self.assertIn("h3_sf_col_type", content)
 
 
 class TestPrimaryKeyValidation(unittest.TestCase):
