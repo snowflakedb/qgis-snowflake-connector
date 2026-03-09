@@ -256,13 +256,13 @@ def check_package_installed(package_name) -> bool:
     Returns:
         bool: True if the package is installed, False otherwise.
     """
-    import pkg_resources
+    import importlib.metadata
 
-    # Iterate over all installed distributions
-    for package in pkg_resources.working_set:
-        if package.key == package_name:
-            return True
-    return False
+    try:
+        importlib.metadata.distribution(package_name)
+        return True
+    except importlib.metadata.PackageNotFoundError:
+        return False
 
 
 def get_python_executable_path() -> str:
@@ -312,7 +312,6 @@ def check_install_package(package_name) -> None:
     """
     if not check_package_installed(package_name):
         import subprocess
-
         python3_path = get_python_executable_path()
         subprocess.call([python3_path, "-m", "pip", "install", "pip", "--upgrade"])
         subprocess.call(
@@ -326,6 +325,9 @@ def check_install_package(package_name) -> None:
         )
         subprocess.call(
             [python3_path, "-m", "pip", "install", "pyopenssl", "--upgrade"]
+        )
+        subprocess.call(
+            [python3_path, "-m", "pip", "install", "cryptography", "--upgrade"]
         )
 
 

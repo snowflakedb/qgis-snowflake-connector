@@ -391,6 +391,8 @@ class SFVectorDataProvider(QgsVectorDataProvider):
         """Reload data from the data source."""
         self._features = []
         self._features_loaded = False
+        self._feature_count = None
+        self._extent = None
 
     def changeGeometryValues(self, geometry_map: typing.Any) -> bool:
         """Updates the geometry of features in the underlying data source.

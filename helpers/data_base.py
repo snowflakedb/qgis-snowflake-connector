@@ -173,7 +173,7 @@ def get_column_iterator(
 
     query = f"""SELECT DISTINCT COLUMN_NAME, DATA_TYPE, NUMERIC_SCALE
 FROM INFORMATION_SCHEMA.COLUMNS
-WHERE TABLE_CATALOG = '{auth_information["database"]}'
+WHERE TABLE_CATALOG ILIKE '{auth_information["database"]}'
 AND TABLE_SCHEMA ILIKE '{schema_data_item.clean_name}'
 AND TABLE_NAME ILIKE '{table_data_item.clean_name}'
 ORDER BY COLUMN_NAME"""
@@ -199,8 +199,8 @@ def get_table_iterator(settings: QSettings, connection_name: str, schema_name: s
 
     query = f"""SELECT DISTINCT TABLE_NAME
 FROM INFORMATION_SCHEMA.TABLES
-WHERE table_catalog = '{auth_information["database"]}'
-AND TABLE_SCHEMA = '{schema_name}'
+WHERE table_catalog ILIKE '{auth_information["database"]}'
+AND TABLE_SCHEMA ILIKE '{schema_name}'
 ORDER BY TABLE_NAME"""
 
     sf_data_provider.load_data(query, connection_name)
@@ -259,7 +259,7 @@ def get_columns_cursor(
     query_select_columns = f"""
         SELECT DISTINCT COLUMN_NAME, DATA_TYPE
         FROM INFORMATION_SCHEMA.COLUMNS
-        WHERE TABLE_CATALOG = '{database_name}'
+        WHERE TABLE_CATALOG ILIKE '{database_name}'
         AND TABLE_SCHEMA ILIKE '{schema}'
         AND TABLE_NAME ILIKE '{table}'
         ORDER BY COLUMN_NAME
