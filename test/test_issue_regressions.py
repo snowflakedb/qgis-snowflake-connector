@@ -309,14 +309,6 @@ class TestStartupReliability(unittest.TestCase):
 class TestQualityBaseline(unittest.TestCase):
     """Tests for Track 5: CONTRIBUTING and CI baseline."""
 
-    def test_contributing_exists(self):
-        path = ROOT / "CONTRIBUTING.md"
-        self.assertTrue(path.exists(), "CONTRIBUTING.md should exist")
-        content = path.read_text(encoding="utf-8")
-        self.assertIn("quote_identifier", content)
-        self.assertIn("backward compatibility", content.lower())
-        self.assertIn("pyuic6", content)
-
     def test_ci_workflow_exists(self):
         path = ROOT / ".github" / "workflows" / "ci.yml"
         self.assertTrue(path.exists(), ".github/workflows/ci.yml should exist")

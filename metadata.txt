@@ -8,7 +8,7 @@ qgisMinimumVersion=3.34.1
 qgisMaximumVersion=4.99
 supportsQt6=True
 description=This package includes the Snowflake Connector for QGIS.
-version=1.0.4
+version=1.0.5
 author=Snowflake Inc.
 email=erick.cuberojimenez@snowflake.com
 
