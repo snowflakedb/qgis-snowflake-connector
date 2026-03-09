@@ -8,7 +8,7 @@ from qgis.core import (
     QgsTask,
     QgsVectorLayer,
     Qgis, NULL)
-from qgis.PyQt.QtCore import QVariant
+from qgis.PyQt.QtCore import QVariant, QMetaType
 from typing import Dict, Union
 
 

@@ -50,7 +50,7 @@ __revision__ = "$Format:%H$"
 
 import json
 import typing
-from qgis.PyQt.QtCore import QCoreApplication, QByteArray, QVariant
+from qgis.PyQt.QtCore import QCoreApplication, QByteArray, QVariant, QMetaType
 from qgis.core import (
     QgsProcessing,
     QgsProcessingAlgorithm,
