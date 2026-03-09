@@ -76,6 +76,7 @@ from .entities.sf_dynamic_connection_combo_box_widget import (
 from .providers.sf_data_source_provider import SFDataProvider
 
 from .helpers.utils import get_authentification_information, get_qsettings
+from .helpers.sql import quote_identifier, quote_literal, qualified_table_name
 
 
 class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
@@ -238,14 +239,15 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
             feedback.setProgress(100)
             return {"Rows Inserted": 0}
 
-        query_columns = f"{geom_column}"
+        query_columns = quote_identifier(geom_column)
 
         for field in source.fields():
             if field.name().lower() == geom_column.lower():
                 continue
-            query_columns += f",{field.name()}"
+            query_columns += f",{quote_identifier(field.name())}"
 
-        query_base = f'INSERT INTO "{selected_database}"."{selected_schema}"."{selected_table}" ({query_columns}) VALUES '
+        fq_table = qualified_table_name(selected_database, selected_schema, selected_table)
+        query_base = f'INSERT INTO {fq_table} ({query_columns}) VALUES '
         query = query_base
         first = True
         executed = False
@@ -284,14 +286,13 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
                         if feat_val is None:
                             query_values += "NULL"
                         elif field.subType() == QMetaType.Type.QString:
-                            feat_val = feat_val.replace("'", "\\'")
-                            query_values += f"'{feat_val}'"
+                            query_values += quote_literal(str(feat_val))
                         elif field.subType() in [
                             QMetaType.Type.QDate,
                             QMetaType.Type.QDateTime,
                             QMetaType.Type.QTime,
                         ]:
-                            query_values += f"'{feat_val}'"
+                            query_values += quote_literal(str(feat_val))
                         else:
                             query_values += f"{feat_val}"
                     else:
@@ -300,15 +301,18 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
                         elif isinstance(feat_val, QVariant) and feat_val.isNull():
                             query_values += "NULL"
                         elif field.type() == QMetaType.Type.QString:
-                            feat_val = feat_val.replace("'", "\\'")
-                            query_values += f"'{feat_val}'"
+                            query_values += quote_literal(str(feat_val))
                         elif field.type() == QMetaType.Type.QDate:
-                            query_values += f"'{feat_val.toString('yyyy-MM-dd')}'"
+                            query_values += quote_literal(
+                                feat_val.toString("yyyy-MM-dd")
+                            )
                         elif field.type() == QMetaType.Type.QTime:
-                            query_values += f"'{feat_val.toString('hh:mm:ss')}'"
+                            query_values += quote_literal(
+                                feat_val.toString("hh:mm:ss")
+                            )
                         elif field.type() == QMetaType.Type.QDateTime:
-                            query_values += (
-                                f"'{feat_val.toString('yyyy-MM-dd hh:mm:ss')}'"
+                            query_values += quote_literal(
+                                feat_val.toString("yyyy-MM-dd hh:mm:ss")
                             )
                         else:
                             query_values += f"{feat_val}"
@@ -459,9 +463,9 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
                 query_select_columns = f"""
                     SELECT DISTINCT COLUMN_NAME
                     FROM INFORMATION_SCHEMA.COLUMNS
-                    WHERE TABLE_CATALOG = '{selected_database}'
-                    AND TABLE_SCHEMA ILIKE '{selected_schema}'
-                    AND TABLE_NAME ILIKE '{selected_table}'
+                    WHERE TABLE_CATALOG ILIKE {quote_literal(selected_database)}
+                    AND TABLE_SCHEMA ILIKE {quote_literal(selected_schema)}
+                    AND TABLE_NAME ILIKE {quote_literal(selected_table)}
                 """
                 cur_select_columns = self.sf_data_provider.execute_query(
                     query_select_columns, selected_connection
@@ -516,7 +520,7 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
             str: A SQL query string to create the table with the specified columns and types.
         """
         geom_data_type = "GEOMETRY" if use_geometry_type else "GEOGRAPHY"
-        query_create_table_cols = f"{geom_column} {geom_data_type}"
+        query_create_table_cols = f"{quote_identifier(geom_column)} {geom_data_type}"
         for field in source.fields():
             if field.name().lower() == geom_column.lower():
                 continue
@@ -526,10 +530,11 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
                 field_to_use = field.type()
 
             query_create_table_cols += (
-                f",{field.name()} {self.get_field_type_from_code_type(field_to_use)}"
+                f",{quote_identifier(field.name())} {self.get_field_type_from_code_type(field_to_use)}"
             )
 
-        return f"""CREATE TABLE "{database_name}"."{schema_name}"."{table_name}"({query_create_table_cols})"""
+        fq_table = qualified_table_name(database_name, schema_name, table_name)
+        return f"CREATE TABLE {fq_table}({query_create_table_cols})"
 
     def get_geometry_insert_sql(
         self, hex_string: str, use_geometry_type: bool, source_srid: int

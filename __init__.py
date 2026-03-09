@@ -44,6 +44,15 @@ __date__ = "2024-08-07"
 __copyright__ = "(C) 2024 by Snowflake"
 
 
+class _StubPlugin:
+    """Minimal no-op plugin returned when required dependencies are missing."""
+    def initGui(self):
+        pass
+
+    def unload(self):
+        pass
+
+
 # noinspection PyPep8Naming
 def classFactory(iface):  # pylint: disable=invalid-name
     """Load QGISSnowflakeConnector class from file QGISSnowflakeConnector.
@@ -51,11 +60,46 @@ def classFactory(iface):  # pylint: disable=invalid-name
     :param iface: A QGIS interface instance.
     :type iface: QgsInterface
     """
-    from .helpers.utils import check_install_snowflake_connector_package, check_install_h3_package
+    from .helpers.utils import (
+        check_install_snowflake_connector_package,
+        check_install_h3_package,
+        check_package_installed,
+    )
 
-    check_install_snowflake_connector_package()
-    check_install_h3_package()
-    #
+    missing = []
+
+    try:
+        if not check_install_snowflake_connector_package():
+            missing.append("snowflake-connector-python")
+    except Exception as exc:
+        missing.append(f"snowflake-connector-python ({exc})")
+
+    try:
+        if not check_install_h3_package():
+            missing.append("h3")
+    except Exception as exc:
+        missing.append(f"h3 ({exc})")
+
+    if missing:
+        from qgis.core import QgsMessageLog, Qgis
+
+        msg = (
+            "Snowflake Connector: required dependencies could not be installed: "
+            + ", ".join(missing)
+            + ".\nInstall them manually with:\n"
+            "  python3 -m pip install snowflake-connector-python h3\n"
+            "Then restart QGIS."
+        )
+        QgsMessageLog.logMessage(msg, "Snowflake Plugin", Qgis.MessageLevel.Critical)
+        try:
+            iface.messageBar().pushCritical(
+                "Snowflake Connector",
+                "Required dependencies missing. See Log Messages for details.",
+            )
+        except Exception:
+            pass
+        return _StubPlugin()
+
     from .qgis_snowflake_connector import QGISSnowflakeConnectorPlugin
 
     return QGISSnowflakeConnectorPlugin()

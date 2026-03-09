@@ -29,6 +29,7 @@ from ..helpers.utils import get_authentification_information, get_qsettings
 from ..managers.sf_connection_manager import SFConnectionManager
 
 from ..helpers.wrapper import parse_uri
+from ..helpers.sql import quote_identifier, quote_literal
 from ..helpers.mappings import (
     SNOWFLAKE_METADATA_TYPE_CODE_DICT,
     mapping_snowflake_qgis_geometry,
@@ -96,7 +97,7 @@ class SFVectorDataProvider(QgsVectorDataProvider):
         if self._sql_query and not self._table_name:
             self._from_clause = f"({self._sql_query})"
         else:
-            self._from_clause = f'"{self._table_name}"'
+            self._from_clause = quote_identifier(self._table_name)
             self._is_limited_unordered = check_from_clause_exceeds_size(
                 from_clause=self._from_clause,
                 context_information=self._context_information,
@@ -218,7 +219,7 @@ class SFVectorDataProvider(QgsVectorDataProvider):
                 if not self._sql_query:
                     query = (
                         "SELECT column_name, data_type FROM information_schema.columns "
-                        f"WHERE table_name ILIKE '{self._table_name}' "
+                        f"WHERE table_name ILIKE {quote_literal(self._table_name)} "
                         "AND data_type NOT IN ('GEOMETRY', 'GEOGRAPHY')"
                         " ORDER BY column_name, data_type"
                     )
@@ -313,9 +314,10 @@ class SFVectorDataProvider(QgsVectorDataProvider):
         """
         column_name = self.fields().field(fieldIndex).name()
         results = set()
+        quoted_col = quote_identifier(column_name)
         query = (
-            f"SELECT DISTINCT {column_name} FROM {self._from_clause} "
-            f"ORDER BY {column_name}"
+            f"SELECT DISTINCT {quoted_col} FROM {self._from_clause} "
+            f"ORDER BY {quoted_col}"
         )
         if limit >= 0:
             query += f" LIMIT {limit}"
@@ -494,14 +496,15 @@ class SFGeoVectorDataProvider(SFVectorDataProvider):
             if not self._is_valid or not self._column_geom:
                 self._extent = QgsRectangle()
             else:
+                qgeom = quote_identifier(self._column_geom)
                 query = (
-                    f'SELECT MIN(ST_XMIN("{self._column_geom}")), '
-                    f'MIN(ST_YMIN("{self._column_geom}")), '
-                    f'MAX(ST_XMAX("{self._column_geom}")), '
-                    f'MAX(ST_YMAX("{self._column_geom}")) '
+                    f'SELECT MIN(ST_XMIN({qgeom})), '
+                    f'MIN(ST_YMIN({qgeom})), '
+                    f'MAX(ST_XMAX({qgeom})), '
+                    f'MAX(ST_YMAX({qgeom})) '
                     f"FROM {self._from_clause} "
-                    f'WHERE "{self._column_geom}" IS NOT NULL AND '
-                    f"ST_ASGEOJSON(\"{self._column_geom}\"):type ILIKE '{self._geometry_type}'"
+                    f'WHERE {qgeom} IS NOT NULL AND '
+                    f"ST_ASGEOJSON({qgeom}):type ILIKE '{self._geometry_type}'"
                 )
 
                 cur = self.connection_manager.execute_query(
@@ -528,7 +531,8 @@ class SFH3VectorDataProvider(SFVectorDataProvider):
         flags=QgsDataProvider.ReadFlags(),
     ):
         super().__init__(uri, providerOptions, flags)
-        query = f'SELECT H3_IS_VALID_CELL("{self._column_geom}") FROM {self._from_clause} WHERE "{self._column_geom}" IS NOT NULL LIMIT 1'
+        qgeom = quote_identifier(self._column_geom)
+        query = f'SELECT H3_IS_VALID_CELL({qgeom}) FROM {self._from_clause} WHERE {qgeom} IS NOT NULL LIMIT 1'
 
         cur = self.connection_manager.execute_query(
             connection_name=self._connection_name,
@@ -549,7 +553,7 @@ class SFH3VectorDataProvider(SFVectorDataProvider):
                     return self._feature_count
 
                 query = f"SELECT COUNT(*) FROM {self._from_clause}"
-                query += f' WHERE H3_IS_VALID_CELL("{self._column_geom}")'
+                query += f' WHERE H3_IS_VALID_CELL({quote_identifier(self._column_geom)})'
                 if self.subsetString():
                     query += f" AND {self.subsetString()}"
 
@@ -570,13 +574,14 @@ class SFH3VectorDataProvider(SFVectorDataProvider):
             if not self._is_valid or not self._column_geom:
                 self._extent = QgsRectangle()
             else:
+                qgeom = quote_identifier(self._column_geom)
                 query = (
-                    f'SELECT MIN(ST_XMIN(H3_CELL_TO_BOUNDARY("{self._column_geom}"))), '
-                    f'MIN(ST_YMIN(H3_CELL_TO_BOUNDARY("{self._column_geom}"))), '
-                    f'MAX(ST_XMAX(H3_CELL_TO_BOUNDARY("{self._column_geom}"))), '
-                    f'MAX(ST_YMAX(H3_CELL_TO_BOUNDARY("{self._column_geom}"))) '
+                    f'SELECT MIN(ST_XMIN(H3_CELL_TO_BOUNDARY({qgeom}))), '
+                    f'MIN(ST_YMIN(H3_CELL_TO_BOUNDARY({qgeom}))), '
+                    f'MAX(ST_XMAX(H3_CELL_TO_BOUNDARY({qgeom}))), '
+                    f'MAX(ST_YMAX(H3_CELL_TO_BOUNDARY({qgeom}))) '
                     f"FROM {self._from_clause} "
-                    f'WHERE H3_IS_VALID_CELL("{self._column_geom}")'
+                    f'WHERE H3_IS_VALID_CELL({qgeom})'
                 )
 
                 cur = self.connection_manager.execute_query(

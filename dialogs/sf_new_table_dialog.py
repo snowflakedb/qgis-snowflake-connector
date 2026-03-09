@@ -5,6 +5,7 @@ import typing
 
 from ..providers.sf_data_source_provider import SFDataProvider
 from ..helpers.utils import get_authentification_information, get_qsettings
+from ..helpers.sql import quote_identifier, quote_literal, qualified_table_name
 from ..ui.sf_new_table_dialog import Ui_QgsNewVectorTableDialogBase
 
 
@@ -47,17 +48,18 @@ class SFNewTableDialog(QDialog, Ui_QgsNewVectorTableDialogBase):
             sf_data_provider = SFDataProvider(auth_information)
             table_name = self.mTableName.text()
             schema_name = self.mSchemaCbo.currentText()
-            query = f"CREATE OR REPLACE TABLE {auth_information['database']}.{schema_name}.{table_name} ("
+            fq_table = qualified_table_name(auth_information['database'], schema_name, table_name)
+            query = f"CREATE OR REPLACE TABLE {fq_table} ("
             for row in range(self.model.rowCount()):
                 field_name = self.model.item(row, 0).text()
                 field_type = self.model.item(row, 1).text()
                 field_comment = self.model.item(row, 2).text()
-                query += f"{field_name} {field_type}"
+                query += f"{quote_identifier(field_name)} {field_type}"
                 if field_comment != "":
-                    query += f" COMMENT '{field_comment}'"
+                    query += f" COMMENT {quote_literal(field_comment)}"
                 query += ", "
 
-            query += f"{self.mGeomColumn.text()} {self.mGeomTypeCbo.currentText()})"
+            query += f"{quote_identifier(self.mGeomColumn.text())} {self.mGeomTypeCbo.currentText()})"
             sf_data_provider.load_data(query, self.connection_name)
             self.update_connections_signal.emit()
         except Exception as e:
@@ -141,7 +143,7 @@ class SFNewTableDialog(QDialog, Ui_QgsNewVectorTableDialogBase):
         query = f"""
                     SELECT DISTINCT TABLE_SCHEMA
                     FROM INFORMATION_SCHEMA.COLUMNS
-                    WHERE table_catalog ILIKE '{auth_information["database"]}'
+                    WHERE table_catalog ILIKE {quote_literal(auth_information["database"])}
                     ORDER BY TABLE_SCHEMA
                 """
 

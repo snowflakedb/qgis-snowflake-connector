@@ -4,6 +4,7 @@ import typing
 
 from ..providers.sf_data_source_provider import SFDataProvider
 from ..helpers.utils import get_authentification_information, get_qsettings
+from ..helpers.sql import quote_identifier
 from ..ui.sf_new_schema_dialog import Ui_Dialog
 
 
@@ -38,7 +39,7 @@ class SFNewSchemaDialog(QDialog, Ui_Dialog):
                 return
 
             query = (
-                f"CREATE OR REPLACE SCHEMA {auth_information['database']}.{schema_name}"
+                f"CREATE OR REPLACE SCHEMA {quote_identifier(auth_information['database'])}.{quote_identifier(schema_name)}"
             )
             sf_data_provider.load_data(query, self.connection_name)
             self.update_connections_signal.emit()

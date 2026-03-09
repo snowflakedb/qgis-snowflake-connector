@@ -9,6 +9,7 @@ from qgis.PyQt.QtCore import QDate, QDateTime, QMetaType, QTime
 
 # PyQGIS
 from ..helpers.limits import limit_size_for_type
+from ..helpers.sql import quote_identifier
 from ..providers.sf_feature_source import SFFeatureSource
 from qgis.core import (
     QgsAbstractFeatureIterator,
@@ -98,16 +99,16 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                     idx_required.append(self._provider.primary_key())
 
                 list_field_names = [
-                    self._provider.fields()[idx].name().replace('"', '""')
+                    self._provider.fields()[idx].name()
                     for idx in idx_required
                 ]
             else:
                 list_field_names = [
-                    field.name().replace('"', '""') for field in self._provider.fields()
+                    field.name() for field in self._provider.fields()
                 ]
 
             if len(list_field_names) > 0:
-                fields_name_for_query = '"' + '", "'.join(list_field_names) + '"'
+                fields_name_for_query = ", ".join(quote_identifier(n) for n in list_field_names)
             else:
                 fields_name_for_query = ""
 
@@ -136,7 +137,7 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                     )
                 else:
                     primary_key_name = list_field_names[self._provider.primary_key()]
-                    feature_clause = f"{primary_key_name} in ({list_feature_id_string})"
+                    feature_clause = f"{quote_identifier(primary_key_name)} in ({list_feature_id_string})"
 
                 where_clause_list.append(feature_clause)
 
@@ -172,21 +173,22 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                 where_clause_list.append(subset_clause)
 
             # Apply the geometry filter
+            quoted_geom = quote_identifier(geom_column)
             filter_geom_clause = ""
             if not filter_rect.isNull():
                 if self._provider._geometry_type == "GEOMETRY":
                     filter_geom_clause = (
-                        f'ST_INTERSECTS("{geom_column}", '
+                        f'ST_INTERSECTS({quoted_geom}, '
                         f"ST_GEOMETRYFROMWKT('{filter_rect.asWktPolygon()}'))"
                     )
                 if self._provider._geometry_type == "GEOGRAPHY":
                     filter_geom_clause = (
-                        f'ST_INTERSECTS("{geom_column}", '
+                        f'ST_INTERSECTS({quoted_geom}, '
                         f"ST_GEOGRAPHYFROMWKT('{filter_rect.asWktPolygon()}'))"
                     )
                 if self._provider._geometry_type in ["NUMBER", "TEXT"]:
                     filter_geom_clause = (
-                        f'ST_INTERSECTS(H3_CELL_TO_BOUNDARY("{geom_column}"), '
+                        f'ST_INTERSECTS(H3_CELL_TO_BOUNDARY({quoted_geom}), '
                         f"ST_GEOGRAPHYFROMWKT('{filter_rect.asWktPolygon()}'))"
                     )
                 if filter_geom_clause != "":
@@ -200,9 +202,9 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                     for clause in where_clause_list[1:]:
                         where_clause += f" and {clause}"
 
-            geom_query = f'ST_ASWKB("{geom_column}"), "{geom_column}", '
+            geom_query = f'ST_ASWKB({quoted_geom}), {quoted_geom}, '
             if self._provider._geo_column_type in ["NUMBER", "TEXT"]:
-                geom_query = f'"{geom_column}", "{geom_column}", '
+                geom_query = f'{quoted_geom}, {quoted_geom}, '
 
             self._request_no_geometry = (
                 self._request.flags() & QgsFeatureRequest.Flag.NoGeometry
@@ -219,12 +221,12 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                 self._provider._geometry_type
             )
 
-            filter_geo_type = f"ST_ASGEOJSON(\"{geom_column}\"):type::string IN ('{self._provider._geometry_type}'"
+            filter_geo_type = f"ST_ASGEOJSON({quoted_geom}):type::string IN ('{self._provider._geometry_type}'"
             if mapped_type is not None:
                 filter_geo_type += f", '{mapped_type}'"
             filter_geo_type += ")"
             if self._provider._geo_column_type in ["NUMBER", "TEXT"]:
-                filter_geo_type = f'H3_IS_VALID_CELL("{geom_column}")'
+                filter_geo_type = f'H3_IS_VALID_CELL({quoted_geom})'
 
             order_limit_clause = ""
             if self._provider._is_limited_unordered:

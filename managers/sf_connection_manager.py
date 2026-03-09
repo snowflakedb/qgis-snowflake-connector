@@ -3,6 +3,7 @@ import typing
 import snowflake.connector
 
 from ..helpers.utils import get_auth_information
+from ..helpers.sql import quote_identifier
 
 
 class SFConnectionManager:
@@ -173,7 +174,7 @@ class SFConnectionManager:
                     "schema_name" in context_information
                     and context_information["schema_name"] is not None
                 ):
-                    cursor.execute(f'USE SCHEMA "{context_information["schema_name"]}"')
+                    cursor.execute(f'USE SCHEMA {quote_identifier(context_information["schema_name"])}')
             cursor.execute(query)
             return cursor
         except Exception as e:
@@ -218,7 +219,7 @@ class SFConnectionManager:
                     "schema_name" in context_information
                     and context_information["schema_name"] is not None
                 ):
-                    cursor.execute(f'USE SCHEMA "{context_information["schema_name"]}"')
+                    cursor.execute(f'USE SCHEMA {quote_identifier(context_information["schema_name"])}')
 
             cursor.execute(query, params=params)
 
