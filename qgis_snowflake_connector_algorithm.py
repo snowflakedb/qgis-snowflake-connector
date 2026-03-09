@@ -152,6 +152,10 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
         """
         source = self.parameterAsSource(parameters, self.INPUT, context)
         geom_column = self.parameterAsString(parameters, self.GEOMETRY_COLUMN, context)
+        source_srid = source.sourceCrs().postgisSrid()
+        if source_srid is None or source_srid <= 0:
+            source_srid = 4326
+        use_geometry_type = source_srid != 4326
 
         from urllib.parse import parse_qs, urlparse
 
@@ -211,6 +215,7 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
                     database_name=selected_database,
                     schema_name=selected_schema,
                     table_name=selected_table,
+                    use_geometry_type=use_geometry_type,
                 )
 
                 create_table(
@@ -265,7 +270,7 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
             else:
                 query += ","
 
-            query_values = f"('{hex_string}'"
+            query_values = f"({self.get_geometry_insert_sql(hex_string, use_geometry_type, source_srid)}"
 
             for field in source.fields():
                 query_values += ","
@@ -439,6 +444,7 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
                         database_name=selected_database,
                         schema_name=selected_schema,
                         table_name=selected_table,
+                        use_geometry_type=source.sourceCrs().postgisSrid() != 4326,
                     )
 
                     create_table(
@@ -493,6 +499,7 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
         database_name: str,
         schema_name: str,
         table_name: str,
+        use_geometry_type: bool = False,
     ) -> str:
         """
         Generates a SQL query string to create a table in Snowflake with the specified columns and types.
@@ -508,7 +515,8 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
         Returns:
             str: A SQL query string to create the table with the specified columns and types.
         """
-        query_create_table_cols = f"{geom_column} GEOGRAPHY"
+        geom_data_type = "GEOMETRY" if use_geometry_type else "GEOGRAPHY"
+        query_create_table_cols = f"{geom_column} {geom_data_type}"
         for field in source.fields():
             if field.name().lower() == geom_column.lower():
                 continue
@@ -522,3 +530,15 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
             )
 
         return f"""CREATE TABLE "{database_name}"."{schema_name}"."{table_name}"({query_create_table_cols})"""
+
+    def get_geometry_insert_sql(
+        self, hex_string: str, use_geometry_type: bool, source_srid: int
+    ) -> str:
+        if hex_string == "":
+            return "NULL"
+        if use_geometry_type:
+            return (
+                f"ST_SETSRID(ST_GEOMETRYFROMWKB(TO_BINARY('{hex_string}', 'HEX')),"
+                f" {source_srid})"
+            )
+        return f"ST_GEOGFROMWKB(TO_BINARY('{hex_string}', 'HEX'))"

@@ -151,7 +151,8 @@ class SFDataProvider(QgsDataProvider):
                         type = QVariant.Double
                 if type in [QVariant.DateTime, QVariant.Date, QVariant.Time]:
                     type = QVariant.String
-                qgsField = QgsField(col[0], type, str(type), subType=subType)
+                qgsField = QgsField(col[0], type, str(type))
+                qgsField.setSubType(subType)
                 fields.append(qgsField)
 
             # Create a QgsFeatureSource

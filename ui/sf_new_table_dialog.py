@@ -156,7 +156,7 @@ class SFNewTableDialog(QDialog, FORM_CLASS_SFCS):
         query = f"""
                     SELECT DISTINCT TABLE_SCHEMA
                     FROM INFORMATION_SCHEMA.COLUMNS
-                    WHERE table_catalog = '{auth_information["database"]}'
+                    WHERE table_catalog ILIKE '{auth_information["database"]}'
                     ORDER BY TABLE_SCHEMA
                 """
 

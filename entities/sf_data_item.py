@@ -357,15 +357,15 @@ class SFDataItem(QgsDataItem):
         elif self.item_type == "schema":
             column_name = "TABLE_NAME"
             children_item_type = "table"
-            schema_filter = f"AND TABLE_SCHEMA = '{self.clean_name}'"
+            schema_filter = f"AND TABLE_SCHEMA ILIKE '{self.clean_name}'"
         elif self.item_type == "table":
-            schema_filter = f"AND TABLE_SCHEMA = '{self.parent().clean_name}'"
-            table_filter = f"AND TABLE_NAME = '{self.clean_name}'"
+            schema_filter = f"AND TABLE_SCHEMA ILIKE '{self.parent().clean_name}'"
+            table_filter = f"AND TABLE_NAME ILIKE '{self.clean_name}'"
             column_name = "COLUMN_NAME"
             children_item_type = "column"
         query = f"""SELECT DISTINCT {column_name}
 FROM INFORMATION_SCHEMA.COLUMNS
-WHERE table_catalog = '{auth_information["database"]}'
+WHERE table_catalog ILIKE '{auth_information["database"]}'
 {schema_filter}
 {table_filter}
 AND DATA_TYPE in ('GEOGRAPHY', 'GEOMETRY', 'NUMBER', 'TEXT')
