@@ -623,6 +623,148 @@ class TestPrimaryKeyValidation(unittest.TestCase):
         self.assertIn("Duplicate Values Detected", content)
 
 
+class TestEditingOperations(unittest.TestCase):
+    """Tests that all declared editing capabilities have implementations."""
+
+    def _get_provider_content(self):
+        return (ROOT / "providers" / "sf_vector_data_provider.py").read_text(
+            encoding="utf-8"
+        )
+
+    def _get_database_content(self):
+        return (ROOT / "helpers" / "data_base.py").read_text(encoding="utf-8")
+
+    def test_change_attribute_values_implemented(self):
+        """changeAttributeValues must be implemented in the provider."""
+        content = self._get_provider_content()
+        self.assertIn("def changeAttributeValues(self", content)
+
+    def test_add_features_implemented(self):
+        """addFeatures must be implemented in the provider."""
+        content = self._get_provider_content()
+        self.assertIn("def addFeatures(self", content)
+
+    def test_delete_features_implemented(self):
+        """deleteFeatures must be implemented in the provider."""
+        content = self._get_provider_content()
+        self.assertIn("def deleteFeatures(self", content)
+
+    def test_add_attributes_implemented(self):
+        """addAttributes must be implemented with ALTER TABLE ADD COLUMN."""
+        content = self._get_provider_content()
+        self.assertIn("def addAttributes(self", content)
+        db_content = self._get_database_content()
+        self.assertIn("def alter_table_add_columns(", db_content)
+        self.assertIn("ALTER TABLE", db_content)
+        self.assertIn("ADD COLUMN", db_content)
+
+    def test_delete_attributes_implemented(self):
+        """deleteAttributes must be implemented with ALTER TABLE DROP COLUMN."""
+        content = self._get_provider_content()
+        self.assertIn("def deleteAttributes(self", content)
+        db_content = self._get_database_content()
+        self.assertIn("def alter_table_drop_columns(", db_content)
+        self.assertIn("DROP COLUMN", db_content)
+
+    def _get_func_body(self, content, func_name):
+        idx = content.index(f"def {func_name}(")
+        next_def = content.find("\ndef ", idx + 1)
+        return content[idx:next_def] if next_def != -1 else content[idx:]
+
+    def test_update_table_attributes_helper_exists(self):
+        """data_base.py must have update_table_attributes helper."""
+        content = self._get_database_content()
+        body = self._get_func_body(content, "update_table_attributes")
+        self.assertIn("UPDATE", body)
+        self.assertIn("SET", body)
+        self.assertIn("WHERE", body)
+
+    def test_insert_table_feature_helper_exists(self):
+        """data_base.py must have insert_table_feature helper."""
+        content = self._get_database_content()
+        body = self._get_func_body(content, "insert_table_feature")
+        self.assertIn("INSERT INTO", body)
+        self.assertIn("VALUES", body)
+
+    def test_delete_table_features_helper_exists(self):
+        """data_base.py must have delete_table_features helper."""
+        content = self._get_database_content()
+        body = self._get_func_body(content, "delete_table_features")
+        self.assertIn("DELETE FROM", body)
+        self.assertIn("IN (", body)
+
+    def test_provider_imports_all_helpers(self):
+        """Provider must import all editing helpers."""
+        content = self._get_provider_content()
+        for helper in [
+            "update_table_attributes",
+            "insert_table_feature",
+            "delete_table_features",
+            "alter_table_add_columns",
+            "alter_table_drop_columns",
+        ]:
+            self.assertIn(helper, content)
+
+    def test_context_information_includes_database_name(self):
+        """_context_information must include database_name for FQ table refs."""
+        content = self._get_provider_content()
+        self.assertIn('database_name', content)
+        self.assertIn('_auth_information', content)
+
+    def test_qgis_to_snowflake_type_mapping(self):
+        """Provider must have _QGIS_TO_SF_TYPE mapping for addAttributes."""
+        content = self._get_provider_content()
+        self.assertIn("_QGIS_TO_SF_TYPE", content)
+        for sf_type in ["TEXT", "INTEGER", "DOUBLE", "DATE", "BOOLEAN"]:
+            self.assertIn(f'"{sf_type}"', content)
+
+    def test_all_helpers_log_errors(self):
+        """All DML helpers must log errors via QgsMessageLog."""
+        content = self._get_database_content()
+        for func in [
+            "update_table_attributes",
+            "insert_table_feature",
+            "delete_table_features",
+            "alter_table_add_columns",
+            "alter_table_drop_columns",
+        ]:
+            idx = content.index(f"def {func}(")
+            next_def_pos = content.find("\ndef ", idx + 1)
+            body = content[idx:next_def_pos] if next_def_pos != -1 else content[idx:]
+            self.assertIn("QgsMessageLog.logMessage", body,
+                          f"{func} must log errors")
+
+    def test_editing_methods_call_reload_or_update_cache(self):
+        """Editing methods must either reload or update the in-memory cache."""
+        content = self._get_provider_content()
+        for method in ["addFeatures", "deleteFeatures"]:
+            idx = content.index(f"def {method}(self")
+            next_def = content.index("\n    def ", idx + 1)
+            body = content[idx:next_def]
+            self.assertIn("reloadData()", body,
+                          f"{method} must call reloadData()")
+        idx = content.index("def changeAttributeValues(self")
+        next_def = content.index("\n    def ", idx + 1)
+        body = content[idx:next_def]
+        self.assertIn("update_table_attributes", body,
+                      "changeAttributeValues must persist to Snowflake")
+        self.assertIn("QgsFeature(feature)", body,
+                      "changeAttributeValues must clone features for thread safety")
+
+    def test_editing_methods_propagate_errors_via_push_error(self):
+        """All editing methods must call pushError() to surface Snowflake errors."""
+        content = self._get_provider_content()
+        for method in [
+            "changeAttributeValues", "addFeatures", "deleteFeatures",
+            "addAttributes", "deleteAttributes",
+        ]:
+            idx = content.index(f"def {method}(self")
+            next_def = content.find("\n    def ", idx + 1)
+            body = content[idx:next_def] if next_def != -1 else content[idx:]
+            self.assertIn("self.pushError(", body,
+                          f"{method} must call pushError() to propagate Snowflake errors")
+
+
 class TestQualityBaseline(unittest.TestCase):
     """Tests for Track 5: CONTRIBUTING and CI baseline."""
 

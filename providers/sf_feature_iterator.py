@@ -329,8 +329,10 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                         for idx, attr_idx in enumerate(
                             self._request.subsetOfAttributes()
                         ):
-                            attribute = self._attributes_converters[idx](
-                                next_result[idx]
+                            raw = next_result[idx]
+                            attribute = (
+                                None if raw is None
+                                else self._attributes_converters[idx](raw)
                             )
                             f.setAttribute(attr_idx, attribute)
                     else:
@@ -347,8 +349,9 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                                 column_value = next_result[
                                     desc_result.index(field_name)
                                 ]
-                                converted_attribute = self._attributes_converters[indx](
-                                    column_value
+                                converted_attribute = (
+                                    None if column_value is None
+                                    else self._attributes_converters[indx](column_value)
                                 )
                                 f.setAttribute(indx, converted_attribute)
                             except Exception as e:

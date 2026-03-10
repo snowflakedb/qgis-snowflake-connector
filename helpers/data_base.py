@@ -950,26 +950,12 @@ def update_table_feature(
 ) -> bool:
     """Updates a specific feature's geometry in a Snowflake table.
 
-    This function constructs and executes an SQL UPDATE statement to modify the
-    geometry of a row identified by its primary key in a specified table.
-    It uses a connection manager to handle the database interaction.
-
     Args:
-        context_information: A dictionary containing the necessary information
-            for the update operation. Expected keys are:
-            - 'table_name' (str): The name of the table to update.
-            - 'column_geom' (str): The name of the geometry column to be updated.
-            - 'primary_key_name' (str): The name of the primary key column used
-              in the WHERE clause.
-            - 'geometry_wkt' (str): The Well-Known Text (WKT) representation of
-              the new geometry.
-            - 'primary_key_value' (any): The value of the primary key for the
-              feature to be updated.
-            - 'connection_name' (str): The name of the Snowflake connection to use.
+        context_information: Dict with keys: table_name, column_geom,
+            primary_key_name, geometry_wkt, primary_key_value, connection_name.
 
     Returns:
-        bool: True if the update operation was successful and the cursor was
-              closed, False if an exception occurred during the process.
+        True on success, False on error.
     """
     try:
         connection_manager: SFConnectionManager = SFConnectionManager.get_instance()
@@ -1000,3 +986,149 @@ def update_table_feature(
             Qgis.MessageLevel.Warning,
         )
         return False
+
+
+def update_table_attributes(
+    context_information: dict,
+    set_clauses: typing.List[str],
+    params: tuple,
+) -> typing.Optional[str]:
+    """Updates attribute columns for a single row identified by primary key.
+
+    Returns None on success, or an error message string on failure.
+    """
+    try:
+        connection_manager: SFConnectionManager = SFConnectionManager.get_instance()
+        sql = (
+            f"UPDATE {quote_identifier(context_information['table_name'])} "
+            f"SET {', '.join(set_clauses)} "
+            f"WHERE {quote_identifier(context_information['primary_key_name'])} = %s"
+        )
+
+        cur = connection_manager.execute_query_with_params(
+            connection_name=context_information["connection_name"],
+            query=sql,
+            params=params,
+            context_information=context_information,
+        )
+        cur.close()
+        return None
+    except Exception as e:
+        msg = f"UPDATE failed: {e}"
+        QgsMessageLog.logMessage(msg, "Snowflake Plugin", Qgis.MessageLevel.Warning)
+        return msg
+
+
+def insert_table_feature(
+    context_information: dict,
+    column_names: typing.List[str],
+    params: tuple,
+) -> typing.Optional[str]:
+    """Inserts a single row into a Snowflake table.
+
+    Returns None on success, or an error message string on failure.
+    """
+    try:
+        connection_manager: SFConnectionManager = SFConnectionManager.get_instance()
+        cols = ", ".join(quote_identifier(c) for c in column_names)
+        placeholders = ", ".join(["%s"] * len(column_names))
+        sql = (
+            f"INSERT INTO {quote_identifier(context_information['table_name'])} "
+            f"({cols}) VALUES ({placeholders})"
+        )
+
+        cur = connection_manager.execute_query_with_params(
+            connection_name=context_information["connection_name"],
+            query=sql,
+            params=params,
+            context_information=context_information,
+        )
+        cur.close()
+        return None
+    except Exception as e:
+        msg = f"INSERT failed: {e}"
+        QgsMessageLog.logMessage(msg, "Snowflake Plugin", Qgis.MessageLevel.Warning)
+        return msg
+
+
+def delete_table_features(
+    context_information: dict,
+    pk_values: typing.List,
+) -> typing.Optional[str]:
+    """Deletes rows from a Snowflake table by primary key values.
+
+    Returns None on success, or an error message string on failure.
+    """
+    try:
+        connection_manager: SFConnectionManager = SFConnectionManager.get_instance()
+        placeholders = ", ".join(["%s"] * len(pk_values))
+        sql = (
+            f"DELETE FROM {quote_identifier(context_information['table_name'])} "
+            f"WHERE {quote_identifier(context_information['primary_key_name'])} "
+            f"IN ({placeholders})"
+        )
+
+        cur = connection_manager.execute_query_with_params(
+            connection_name=context_information["connection_name"],
+            query=sql,
+            params=tuple(pk_values),
+            context_information=context_information,
+        )
+        cur.close()
+        return None
+    except Exception as e:
+        msg = f"DELETE failed: {e}"
+        QgsMessageLog.logMessage(msg, "Snowflake Plugin", Qgis.MessageLevel.Warning)
+        return msg
+
+
+def alter_table_add_columns(
+    context_information: dict,
+    columns: typing.List[typing.Tuple[str, str]],
+) -> typing.Optional[str]:
+    """Adds columns to a Snowflake table via ALTER TABLE.
+
+    Returns None on success, or an error message string on failure.
+    """
+    try:
+        connection_manager: SFConnectionManager = SFConnectionManager.get_instance()
+        table = quote_identifier(context_information["table_name"])
+        for col_name, col_type in columns:
+            sql = f"ALTER TABLE {table} ADD COLUMN {quote_identifier(col_name)} {col_type}"
+            cur = connection_manager.execute_query(
+                connection_name=context_information["connection_name"],
+                query=sql,
+                context_information=context_information,
+            )
+            cur.close()
+        return None
+    except Exception as e:
+        msg = f"ADD COLUMN failed: {e}"
+        QgsMessageLog.logMessage(msg, "Snowflake Plugin", Qgis.MessageLevel.Warning)
+        return msg
+
+
+def alter_table_drop_columns(
+    context_information: dict,
+    column_names: typing.List[str],
+) -> typing.Optional[str]:
+    """Drops columns from a Snowflake table via ALTER TABLE.
+
+    Returns None on success, or an error message string on failure.
+    """
+    try:
+        connection_manager: SFConnectionManager = SFConnectionManager.get_instance()
+        table = quote_identifier(context_information["table_name"])
+        for col_name in column_names:
+            sql = f"ALTER TABLE {table} DROP COLUMN {quote_identifier(col_name)}"
+            cur = connection_manager.execute_query(
+                connection_name=context_information["connection_name"],
+                query=sql,
+                context_information=context_information,
+            )
+            cur.close()
+        return None
+    except Exception as e:
+        msg = f"DROP COLUMN failed: {e}"
+        QgsMessageLog.logMessage(msg, "Snowflake Plugin", Qgis.MessageLevel.Warning)
+        return msg
