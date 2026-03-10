@@ -1,6 +1,7 @@
 import copy
 import typing
 from qgis.core import (
+    Qgis,
     QgsCoordinateReferenceSystem,
     QgsDataProvider,
     QgsFeature,
@@ -8,18 +9,24 @@ from qgis.core import (
     QgsFeatureRequest,
     QgsField,
     QgsFields,
+    QgsMessageLog,
     QgsRectangle,
     QgsVectorDataProvider,
     QgsWkbTypes,
     QgsGeometry,
 )
-from qgis.PyQt.QtCore import QMetaType
+from qgis.PyQt.QtCore import QMetaType, QVariant
 
 from .sf_feature_iterator import SFFeatureIterator
 
 from ..helpers.data_base import (
+    alter_table_add_columns,
+    alter_table_drop_columns,
     check_from_clause_exceeds_size,
+    delete_table_features,
+    insert_table_feature,
     limit_size_for_type,
+    update_table_attributes,
     update_table_feature,
 )
 
@@ -29,6 +36,7 @@ from ..helpers.utils import get_authentification_information, get_qsettings
 from ..managers.sf_connection_manager import SFConnectionManager
 
 from ..helpers.wrapper import parse_uri
+from ..helpers.sql import quote_identifier, quote_literal
 from ..helpers.mappings import (
     SNOWFLAKE_METADATA_TYPE_CODE_DICT,
     mapping_snowflake_qgis_geometry,
@@ -69,7 +77,12 @@ class SFVectorDataProvider(QgsVectorDataProvider):
                 self._primary_key,
             ) = parse_uri(uri)
 
-        except Exception as _:
+        except Exception as e:
+            QgsMessageLog.logMessage(
+                f"Provider init failed: URI parse error: {e}",
+                "Snowflake Plugin",
+                Qgis.MessageLevel.Warning,
+            )
             self._is_valid = False
             return
 
@@ -84,11 +97,13 @@ class SFVectorDataProvider(QgsVectorDataProvider):
         }
         if self._schema_name:
             self._context_information["schema_name"] = self._schema_name
-        if "table_name" in self._context_information:
+        if self._table_name:
             self._context_information["table_name"] = self._table_name
         self._auth_information = get_authentification_information(
             self._settings, self._context_information["connection_name"]
         )
+        if self._auth_information.get("database"):
+            self._context_information["database_name"] = self._auth_information["database"]
 
         self.connect_database()
         self._is_limited_unordered = False
@@ -96,7 +111,7 @@ class SFVectorDataProvider(QgsVectorDataProvider):
         if self._sql_query and not self._table_name:
             self._from_clause = f"({self._sql_query})"
         else:
-            self._from_clause = f'"{self._table_name}"'
+            self._from_clause = quote_identifier(self._table_name)
             self._is_limited_unordered = check_from_clause_exceeds_size(
                 from_clause=self._from_clause,
                 context_information=self._context_information,
@@ -104,6 +119,16 @@ class SFVectorDataProvider(QgsVectorDataProvider):
             )
 
         self.get_geometry_column()
+
+        self.setNativeTypes([
+            QgsVectorDataProvider.NativeType("Text", "TEXT", QMetaType.Type.QString),
+            QgsVectorDataProvider.NativeType("Integer", "INTEGER", QMetaType.Type.Int),
+            QgsVectorDataProvider.NativeType("Decimal", "DOUBLE", QMetaType.Type.Double),
+            QgsVectorDataProvider.NativeType("Boolean", "BOOLEAN", QMetaType.Type.Bool),
+            QgsVectorDataProvider.NativeType("Date", "DATE", QMetaType.Type.QDate),
+            QgsVectorDataProvider.NativeType("Time", "TIME", QMetaType.Type.QTime),
+            QgsVectorDataProvider.NativeType("Date & Time", "TIMESTAMP", QMetaType.Type.QDateTime),
+        ])
 
         self._provider_options = providerOptions
         self._flags = flags
@@ -138,9 +163,22 @@ class SFVectorDataProvider(QgsVectorDataProvider):
         # An empty string used as a primary key signifies the absence of a defined primary key.
         if (
             self._primary_key == ""
-            or self._geometry_type == "H3"
+            or self._geo_column_type not in ("GEOGRAPHY", "GEOMETRY")
             or (self._sql_query is not None and self._sql_query != "")
         ):
+            reasons = []
+            if self._primary_key == "":
+                reasons.append("no primary key")
+            if self._geo_column_type not in ("GEOGRAPHY", "GEOMETRY"):
+                reasons.append(f"column type '{self._geo_column_type}' is not editable")
+            if self._sql_query is not None and self._sql_query != "":
+                reasons.append("custom SQL query layer")
+            QgsMessageLog.logMessage(
+                f"Layer read-only: {', '.join(reasons)} "
+                f"(table={getattr(self, '_table_name', '?')})",
+                "Snowflake Plugin",
+                Qgis.MessageLevel.Info,
+            )
             return base_capabilities
 
         return (
@@ -197,7 +235,7 @@ class SFVectorDataProvider(QgsVectorDataProvider):
     def updateExtents(self) -> None:
         """Update extent"""
         if self._extent is not None:
-            self._extent.setMinimal()
+            self._extent.setNull()
 
     def get_geometry_column(self) -> str:
         """Returns the name of the geometry column"""
@@ -216,11 +254,18 @@ class SFVectorDataProvider(QgsVectorDataProvider):
             self._fields = QgsFields()
             if self._is_valid:
                 if not self._sql_query:
+                    schema_filter = ""
+                    if self._schema_name:
+                        schema_filter = (
+                            f" AND table_schema ILIKE"
+                            f" {quote_literal(self._schema_name)}"
+                        )
                     query = (
                         "SELECT column_name, data_type FROM information_schema.columns "
-                        f"WHERE table_name ILIKE '{self._table_name}' "
-                        "AND data_type NOT IN ('GEOMETRY', 'GEOGRAPHY')"
-                        " ORDER BY column_name, data_type"
+                        f"WHERE table_name ILIKE {quote_literal(self._table_name)}"
+                        f"{schema_filter}"
+                        " AND data_type NOT IN ('GEOMETRY', 'GEOGRAPHY')"
+                        " ORDER BY ordinal_position"
                     )
 
                     cur = self.connection_manager.execute_query(
@@ -313,9 +358,10 @@ class SFVectorDataProvider(QgsVectorDataProvider):
         """
         column_name = self.fields().field(fieldIndex).name()
         results = set()
+        quoted_col = quote_identifier(column_name)
         query = (
-            f"SELECT DISTINCT {column_name} FROM {self._from_clause} "
-            f"ORDER BY {column_name}"
+            f"SELECT DISTINCT {quoted_col} FROM {self._from_clause} "
+            f"ORDER BY {quoted_col}"
         )
         if limit >= 0:
             query += f" LIMIT {limit}"
@@ -391,28 +437,25 @@ class SFVectorDataProvider(QgsVectorDataProvider):
         """Reload data from the data source."""
         self._features = []
         self._features_loaded = False
+        self._feature_count = None
+        self._extent = None
+        self._fields = None
+        self.connect_database()
+
+    # -- QGIS QMetaType -> Snowflake DDL type mapping for addAttributes ------
+    _QGIS_TO_SF_TYPE = {
+        QMetaType.Type.QString: "TEXT",
+        QMetaType.Type.Int: "INTEGER",
+        QMetaType.Type.Double: "DOUBLE",
+        QMetaType.Type.QDate: "DATE",
+        QMetaType.Type.QTime: "TIME",
+        QMetaType.Type.QDateTime: "TIMESTAMP",
+        QMetaType.Type.Bool: "BOOLEAN",
+    }
 
     def changeGeometryValues(self, geometry_map: typing.Any) -> bool:
-        """Updates the geometry of features in the underlying data source.
-
-        This method iterates through a dictionary mapping feature identifiers to
-        new QgsGeometry objects. For each feature, it constructs a context
-        containing the new geometry (in WKT format), table name, primary key,
-        and geometry column name, then calls an external function
-        `update_table_feature` to persist the change. After all updates,
-        it reloads the data.
-
-        Args:
-            geometry_map: A dictionary where keys are feature identifiers
-            (matching keys in `self._features`) and values are
-            `QgsGeometry` objects representing the new geometries.
-
-        Returns:
-            True if `geometry_map` is a non-empty dictionary and the update
-            process is initiated for all features. False otherwise (e.g.,
-            if `geometry_map` is not a dictionary or is empty).
-        """
         if isinstance(geometry_map, dict) and geometry_map:
+            all_ok = True
             for f_key, geometry in geometry_map.items():
                 geometry: QgsGeometry
                 feature: QgsFeature = self._features[f_key]
@@ -422,10 +465,148 @@ class SFVectorDataProvider(QgsVectorDataProvider):
                 context["primary_key_value"] = feature.attribute(self.primary_key())
                 context["primary_key_name"] = self.primary_key()
                 context["table_name"] = self._table_name
-                update_table_feature(context)
+                if not update_table_feature(context):
+                    all_ok = False
             self.reloadData()
-            return True
+            return all_ok
         return False
+
+    @staticmethod
+    def _unwrap_value(val):
+        """Convert QVariant / NULL sentinel to plain Python type for Snowflake."""
+        if isinstance(val, QVariant):
+            return None if val.isNull() else val.value()
+        return val
+
+    def changeAttributeValues(self, attr_map: typing.Dict[int, typing.Dict[int, typing.Any]]) -> bool:
+        if not isinstance(attr_map, dict) or not attr_map:
+            return False
+        try:
+            all_ok = True
+            fields = self.fields()
+            pk_name = self.primary_key()
+            for fid, field_map in attr_map.items():
+                if fid < 0 or fid >= len(self._features):
+                    all_ok = False
+                    continue
+                feature: QgsFeature = self._features[fid]
+                set_clauses = []
+                values = []
+                for field_idx, new_value in field_map.items():
+                    col_name = fields.field(field_idx).name()
+                    set_clauses.append(f"{quote_identifier(col_name)} = %s")
+                    values.append(self._unwrap_value(new_value))
+                pk_value = self._unwrap_value(feature.attribute(pk_name))
+                values.append(pk_value)
+                context = copy.deepcopy(self._context_information)
+                context["primary_key_name"] = pk_name
+                context["table_name"] = self._table_name
+                err = update_table_attributes(context, set_clauses, tuple(values))
+                if err:
+                    self.pushError(err)
+                    all_ok = False
+                else:
+                    updated = QgsFeature(feature)
+                    for field_idx, new_value in field_map.items():
+                        updated.setAttribute(field_idx, self._unwrap_value(new_value))
+                    self._features[fid] = updated
+            return all_ok
+        except Exception as e:
+            self.pushError(f"changeAttributeValues: {e}")
+            return False
+
+    def addFeatures(self, flist: typing.List[QgsFeature], flags=None) -> typing.Tuple[bool, typing.List[QgsFeature]]:
+        if not flist:
+            return False, []
+        try:
+            fields = self.fields()
+            all_ok = True
+            for feat in flist:
+                col_names = [self._column_geom]
+                values = [feat.geometry().asWkt() if feat.hasGeometry() else None]
+                for i in range(fields.count()):
+                    col_names.append(fields.field(i).name())
+                    values.append(self._unwrap_value(feat.attribute(i)))
+                context = copy.deepcopy(self._context_information)
+                context["table_name"] = self._table_name
+                err = insert_table_feature(context, col_names, tuple(values))
+                if err:
+                    self.pushError(err)
+                    all_ok = False
+            self.reloadData()
+            return all_ok, flist
+        except Exception as e:
+            self.pushError(f"addFeatures: {e}")
+            return False, []
+
+    def deleteFeatures(self, fids: typing.List[int]) -> bool:
+        if not fids:
+            return False
+        try:
+            pk_values = []
+            for fid in fids:
+                feature: QgsFeature = self._features[fid]
+                pk_values.append(self._unwrap_value(feature.attribute(self.primary_key())))
+            context = copy.deepcopy(self._context_information)
+            context["primary_key_name"] = self.primary_key()
+            context["table_name"] = self._table_name
+            err = delete_table_features(context, pk_values)
+            self.reloadData()
+            if err:
+                self.pushError(err)
+                return False
+            return True
+        except Exception as e:
+            self.pushError(f"deleteFeatures: {e}")
+            return False
+
+    def addAttributes(self, attrs: typing.List[QgsField]) -> bool:
+        if not attrs:
+            return False
+        columns = []
+        for field in attrs:
+            sf_type = self._QGIS_TO_SF_TYPE.get(field.type(), "TEXT")
+            columns.append((field.name(), sf_type))
+        context = copy.deepcopy(self._context_information)
+        context["table_name"] = self._table_name
+        err = alter_table_add_columns(context, columns)
+        if err:
+            self.pushError(err)
+            return False
+        if self._fields:
+            for field in attrs:
+                self._fields.append(QgsField(field))
+        for feat in self._features:
+            cur_attrs = feat.attributes()
+            cur_attrs.extend([None] * len(columns))
+            feat.setAttributes(cur_attrs)
+        return True
+
+    def deleteAttributes(self, attrs: typing.List[int]) -> bool:
+        if not attrs:
+            return False
+        fields = self.fields()
+        col_names = [fields.field(idx).name() for idx in attrs]
+        context = copy.deepcopy(self._context_information)
+        context["table_name"] = self._table_name
+        err = alter_table_drop_columns(context, col_names)
+        if err:
+            self.pushError(err)
+            return False
+        if self._fields:
+            new_fields = QgsFields()
+            for i in range(self._fields.count()):
+                if i not in attrs:
+                    new_fields.append(self._fields.field(i))
+            self._fields = new_fields
+        indices_to_drop = sorted(attrs, reverse=True)
+        for feat in self._features:
+            cur_attrs = feat.attributes()
+            for idx in indices_to_drop:
+                if idx < len(cur_attrs):
+                    del cur_attrs[idx]
+            feat.setAttributes(cur_attrs)
+        return True
 
     def extent(self) -> QgsRectangle:
         """Returns the extent of the layer.
@@ -492,14 +673,15 @@ class SFGeoVectorDataProvider(SFVectorDataProvider):
             if not self._is_valid or not self._column_geom:
                 self._extent = QgsRectangle()
             else:
+                qgeom = quote_identifier(self._column_geom)
                 query = (
-                    f'SELECT MIN(ST_XMIN("{self._column_geom}")), '
-                    f'MIN(ST_YMIN("{self._column_geom}")), '
-                    f'MAX(ST_XMAX("{self._column_geom}")), '
-                    f'MAX(ST_YMAX("{self._column_geom}")) '
+                    f'SELECT MIN(ST_XMIN({qgeom})), '
+                    f'MIN(ST_YMIN({qgeom})), '
+                    f'MAX(ST_XMAX({qgeom})), '
+                    f'MAX(ST_YMAX({qgeom})) '
                     f"FROM {self._from_clause} "
-                    f'WHERE "{self._column_geom}" IS NOT NULL AND '
-                    f"ST_ASGEOJSON(\"{self._column_geom}\"):type ILIKE '{self._geometry_type}'"
+                    f'WHERE {qgeom} IS NOT NULL AND '
+                    f"ST_ASGEOJSON({qgeom}):type ILIKE '{self._geometry_type}'"
                 )
 
                 cur = self.connection_manager.execute_query(
@@ -526,7 +708,8 @@ class SFH3VectorDataProvider(SFVectorDataProvider):
         flags=QgsDataProvider.ReadFlags(),
     ):
         super().__init__(uri, providerOptions, flags)
-        query = f'SELECT H3_IS_VALID_CELL("{self._column_geom}") FROM {self._from_clause} WHERE "{self._column_geom}" IS NOT NULL LIMIT 1'
+        qgeom = quote_identifier(self._column_geom)
+        query = f'SELECT H3_IS_VALID_CELL({qgeom}) FROM {self._from_clause} WHERE {qgeom} IS NOT NULL LIMIT 1'
 
         cur = self.connection_manager.execute_query(
             connection_name=self._connection_name,
@@ -547,7 +730,7 @@ class SFH3VectorDataProvider(SFVectorDataProvider):
                     return self._feature_count
 
                 query = f"SELECT COUNT(*) FROM {self._from_clause}"
-                query += f' WHERE H3_IS_VALID_CELL("{self._column_geom}")'
+                query += f' WHERE H3_IS_VALID_CELL({quote_identifier(self._column_geom)})'
                 if self.subsetString():
                     query += f" AND {self.subsetString()}"
 
@@ -568,13 +751,14 @@ class SFH3VectorDataProvider(SFVectorDataProvider):
             if not self._is_valid or not self._column_geom:
                 self._extent = QgsRectangle()
             else:
+                qgeom = quote_identifier(self._column_geom)
                 query = (
-                    f'SELECT MIN(ST_XMIN(H3_CELL_TO_BOUNDARY("{self._column_geom}"))), '
-                    f'MIN(ST_YMIN(H3_CELL_TO_BOUNDARY("{self._column_geom}"))), '
-                    f'MAX(ST_XMAX(H3_CELL_TO_BOUNDARY("{self._column_geom}"))), '
-                    f'MAX(ST_YMAX(H3_CELL_TO_BOUNDARY("{self._column_geom}"))) '
+                    f'SELECT MIN(ST_XMIN(H3_CELL_TO_BOUNDARY({qgeom}))), '
+                    f'MIN(ST_YMIN(H3_CELL_TO_BOUNDARY({qgeom}))), '
+                    f'MAX(ST_XMAX(H3_CELL_TO_BOUNDARY({qgeom}))), '
+                    f'MAX(ST_YMAX(H3_CELL_TO_BOUNDARY({qgeom}))) '
                     f"FROM {self._from_clause} "
-                    f'WHERE H3_IS_VALID_CELL("{self._column_geom}")'
+                    f'WHERE H3_IS_VALID_CELL({qgeom})'
                 )
 
                 cur = self.connection_manager.execute_query(

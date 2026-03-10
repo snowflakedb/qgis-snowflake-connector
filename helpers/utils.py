@@ -124,6 +124,12 @@ def get_authentification_information(settings: QSettings, connection_name: str) 
         )
         auth_info["username"] = encrypted_credentials["username"]
         auth_info["password"] = encrypted_credentials["password"]
+    auth_info["private_key_file"] = settings.value(
+        "private_key_file", defaultValue=""
+    )
+    auth_info["key_passphrase"] = settings.value(
+        "key_passphrase", defaultValue=""
+    )
     role = settings.value("role", defaultValue="")
     if role != "":
         auth_info["role"] = role
@@ -140,7 +146,7 @@ def get_qsettings() -> QSettings:
         QSettings: The QSettings object for the Snowflake QGIS plugin.
     """
     return QSettings(
-        QSettings.IniFormat, QSettings.UserScope, "Snowflake", "SF_QGIS_PLUGIN"
+        QSettings.Format.IniFormat, QSettings.Scope.UserScope, "Snowflake", "SF_QGIS_PLUGIN"
     )
 
 
@@ -211,6 +217,13 @@ def set_connection_settings(connection_settings: dict) -> None:
         settings.setValue("role", connection_settings["role"])
     if connection_settings["connection_type"] == "Default Authentication":
         settings.setValue("password", connection_settings["password"])
+    if connection_settings["connection_type"] == "Key Pair":
+        settings.setValue(
+            "private_key_file", connection_settings.get("private_key_file", "")
+        )
+        settings.setValue(
+            "key_passphrase", connection_settings.get("key_passphrase", "")
+        )
     settings.setValue("password_encrypted", connection_settings["password_encrypted"])
     if "config_id" in connection_settings:
         settings.setValue("config_id", connection_settings["config_id"])
@@ -229,7 +242,7 @@ def on_handle_error(title: str, message: str) -> None:
     Returns:
         None
     """
-    QMessageBox.critical(None, title, message, QMessageBox.Ok)
+    QMessageBox.critical(None, title, message, QMessageBox.StandardButton.Ok)
 
 
 def on_handle_warning(title: str, message: str) -> None:
@@ -243,7 +256,7 @@ def on_handle_warning(title: str, message: str) -> None:
     Returns:
         None
     """
-    QMessageBox.warning(None, title, message, QMessageBox.Ok)
+    QMessageBox.warning(None, title, message, QMessageBox.StandardButton.Ok)
 
 
 def check_package_installed(package_name) -> bool:
@@ -256,37 +269,65 @@ def check_package_installed(package_name) -> bool:
     Returns:
         bool: True if the package is installed, False otherwise.
     """
-    import pkg_resources
+    import importlib.metadata
 
-    # Iterate over all installed distributions
-    for package in pkg_resources.working_set:
-        if package.key == package_name:
-            return True
-    return False
+    try:
+        importlib.metadata.distribution(package_name)
+        return True
+    except importlib.metadata.PackageNotFoundError:
+        return False
 
 
-def check_install_package(package_name) -> None:
+def get_python_executable_path() -> str:
     """
-    Checks if a given package is installed, and if not, installs it along with the 'pyopenssl' package.
+    Returns the path to the Python executable in a cross-platform manner.
 
-    This function determines the appropriate Python executable path based on the operating system and uses it to run pip commands for installing the required packages.
-
-    Raises:
-        subprocess.CalledProcessError: If the pip installation commands fail.
+    Returns:
+        str: The path to the Python executable.
     """
-    if not check_package_installed(package_name):
-        import subprocess
-        import platform
-        import sys
-        import os
+    import sys
+    import os
+    import platform
 
-        if platform.system() == "Windows":
-            prefixPath = sys.exec_prefix
-            python3_path = os.path.join(prefixPath, "python3")
-        else:
-            prefixPath = sys.exec_prefix
-            python3_path = os.path.join(prefixPath, "bin", "python3")
-        subprocess.call([python3_path, "-m", "pip", "install", "pip", "—upgrade"])
+    if platform.system() == "Windows":
+        # On Windows, look for python.exe in the same directory as sys.executable
+        python_dir = os.path.dirname(sys.executable)
+        python_path = os.path.join(python_dir, "python.exe")
+        if os.path.exists(python_path):
+            return python_path
+        # Fallback to python3.exe
+        python3_path = os.path.join(python_dir, "python3.exe")
+        if os.path.exists(python3_path):
+            return python3_path
+    else:
+        # On Unix-like systems, look for python3 in bin directory
+        prefix_path = sys.exec_prefix
+        python3_path = os.path.join(prefix_path, "bin", "python3")
+        if os.path.exists(python3_path):
+            return python3_path
+        # Fallback to python in bin directory
+        python_path = os.path.join(prefix_path, "bin", "python")
+        if os.path.exists(python_path):
+            return python_path
+
+    # Final fallback: use sys.executable itself
+    return sys.executable
+
+
+def check_install_package(package_name) -> bool:
+    """Checks if a package is installed; if not, attempts to install it.
+
+    Returns True if the package is available after the call (already
+    installed or successfully installed).  Returns False if installation
+    was attempted but the package is still unavailable.
+    """
+    if check_package_installed(package_name):
+        return True
+
+    import subprocess
+    python3_path = get_python_executable_path()
+    try:
+        subprocess.call([python3_path, "-m", "pip", "install", "pip", "--upgrade"])
         subprocess.call(
             [
                 python3_path,
@@ -299,30 +340,18 @@ def check_install_package(package_name) -> None:
         subprocess.call(
             [python3_path, "-m", "pip", "install", "pyopenssl", "--upgrade"]
         )
+        subprocess.call(
+            [python3_path, "-m", "pip", "install", "cryptography", "--upgrade"]
+        )
+    except Exception:
+        pass
+
+    return check_package_installed(package_name)
 
 
-def check_install_snowflake_connector_package() -> None:
-    """
-    Checks if the 'snowflake-connector-python' package is installed, and if not, installs it along with the 'pyopenssl' package.
-
-    This function determines the appropriate Python executable path based on the operating system and uses it to run pip commands for installing the required packages.
-
-    Raises:
-        subprocess.CalledProcessError: If the pip installation commands fail.
-    """
-    check_install_package("snowflake-connector-python")
-
-
-def check_install_h3_package() -> None:
-    """
-    Checks if the 'h3' package is installed, and if not, installs it along with the 'pyopenssl' package.
-
-    This function determines the appropriate Python executable path based on the operating system and uses it to run pip commands for installing the required packages.
-
-    Raises:
-        subprocess.CalledProcessError: If the pip installation commands fail.
-    """
-    check_install_package("h3")
+def check_install_snowflake_connector_package() -> bool:
+    """Ensure snowflake-connector-python is available. Returns True on success."""
+    return check_install_package("snowflake-connector-python")
 
 
 def uninstall_snowflake_connector_package() -> None:
@@ -339,15 +368,8 @@ def uninstall_snowflake_connector_package() -> None:
         subprocess.CalledProcessError: If the uninstallation process fails.
     """
     import subprocess
-    import platform
-    import sys
 
-    if platform.system() == "Windows":
-        prefixPath = sys.exec_prefix
-        python3_path = os.path.join(prefixPath, "python3")
-    else:
-        prefixPath = sys.exec_prefix
-        python3_path = os.path.join(prefixPath, "bin", "python3")
+    python3_path = get_python_executable_path()
     subprocess.call(
         [
             python3_path,
@@ -402,6 +424,12 @@ def get_auth_information(connection_name: str) -> dict:
         )
         auth_info["username"] = encrypted_credentials["username"]
         auth_info["password"] = encrypted_credentials["password"]
+    auth_info["private_key_file"] = settings.value(
+        "private_key_file", defaultValue=""
+    )
+    auth_info["key_passphrase"] = settings.value(
+        "key_passphrase", defaultValue=""
+    )
     role = settings.value("role", defaultValue="")
     if role != "":
         auth_info["role"] = role
@@ -526,7 +554,7 @@ def prompt_and_get_primary_key(context_information: dict, data_type: str) -> str
         The name of the column selected as the primary key, or an empty
         string if no primary key is selected or the process is skipped.
     """
-    from ..helpers.data_base import get_table_columns
+    from ..helpers.data_base import get_table_columns, check_column_has_duplicates
     from ..helpers.messages import get_set_primary_key_message_box
 
     primary_key = ""
@@ -540,8 +568,34 @@ def prompt_and_get_primary_key(context_information: dict, data_type: str) -> str
             get_table_columns(context_information),
         )
 
-        primary_key = (
-            primary_key_selected if message_box_accept == QMessageBox.Ok else ""
-        )
+        if (
+            message_box_accept == QMessageBox.StandardButton.Ok
+            and primary_key_selected
+        ):
+            try:
+                has_dupes = check_column_has_duplicates(
+                    context_information, primary_key_selected
+                )
+            except Exception:
+                has_dupes = False
+
+            if has_dupes:
+                warn_result = QMessageBox.warning(
+                    None,
+                    "Duplicate Values Detected",
+                    (
+                        f'Column "{primary_key_selected}" contains duplicate '
+                        "values and may not work correctly as a primary key.\n\n"
+                        "Use it anyway?"
+                    ),
+                    QMessageBox.StandardButton.Yes
+                    | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if warn_result == QMessageBox.StandardButton.Yes:
+                    primary_key = primary_key_selected
+                # else: primary_key stays "" (no PK)
+            else:
+                primary_key = primary_key_selected
 
     return primary_key

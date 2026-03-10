@@ -3,12 +3,13 @@ from __future__ import (
     annotations,  # used to manage type annotation for method that return Self in Python < 3.11
 )
 
-from typing import Any, Callable, Union
+from typing import Any, Callable
 
-from PyQt5.QtCore import QDate, QDateTime, QMetaType, QTime
+from qgis.PyQt.QtCore import QDate, QDateTime, QMetaType, QTime
 
 # PyQGIS
-from ..helpers.data_base import limit_size_for_type
+from ..helpers.limits import limit_size_for_type
+from ..helpers.sql import quote_identifier
 from ..providers.sf_feature_source import SFFeatureSource
 from qgis.core import (
     QgsAbstractFeatureIterator,
@@ -18,10 +19,8 @@ from qgis.core import (
     QgsFeatureRequest,
     QgsGeometry,
     QgsMessageLog,
-    QgsPointXY,
     Qgis,
 )
-import h3.api.basic_int as h3
 from ..helpers.mappings import mapping_multi_single_to_geometry_type
 
 
@@ -62,10 +61,10 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
 
             # Mapping between the field type and the conversion function
             attributes_conversion_functions: dict[QMetaType, Callable[[Any], Any]] = {
-                QMetaType.QDate: QDate,
-                QMetaType.QTime: QTime,
-                QMetaType.QDateTime: QDateTime,
-                QMetaType.Double: float,
+                QMetaType.Type.QDate: QDate,
+                QMetaType.Type.QTime: QTime,
+                QMetaType.Type.QDateTime: QDateTime,
+                QMetaType.Type.Double: float,
             }
 
             self._attributes_converters = {}
@@ -98,16 +97,16 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                     idx_required.append(self._provider.primary_key())
 
                 list_field_names = [
-                    self._provider.fields()[idx].name().replace('"', '""')
+                    self._provider.fields()[idx].name()
                     for idx in idx_required
                 ]
             else:
                 list_field_names = [
-                    field.name().replace('"', '""') for field in self._provider.fields()
+                    field.name() for field in self._provider.fields()
                 ]
 
             if len(list_field_names) > 0:
-                fields_name_for_query = '"' + '", "'.join(list_field_names) + '"'
+                fields_name_for_query = ", ".join(quote_identifier(n) for n in list_field_names)
             else:
                 fields_name_for_query = ""
 
@@ -136,7 +135,7 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                     )
                 else:
                     primary_key_name = list_field_names[self._provider.primary_key()]
-                    feature_clause = f"{primary_key_name} in ({list_feature_id_string})"
+                    feature_clause = f"{quote_identifier(primary_key_name)} in ({list_feature_id_string})"
 
                 where_clause_list.append(feature_clause)
 
@@ -172,21 +171,22 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                 where_clause_list.append(subset_clause)
 
             # Apply the geometry filter
+            quoted_geom = quote_identifier(geom_column)
             filter_geom_clause = ""
             if not filter_rect.isNull():
                 if self._provider._geometry_type == "GEOMETRY":
                     filter_geom_clause = (
-                        f'ST_INTERSECTS("{geom_column}", '
+                        f'ST_INTERSECTS({quoted_geom}, '
                         f"ST_GEOMETRYFROMWKT('{filter_rect.asWktPolygon()}'))"
                     )
                 if self._provider._geometry_type == "GEOGRAPHY":
                     filter_geom_clause = (
-                        f'ST_INTERSECTS("{geom_column}", '
+                        f'ST_INTERSECTS({quoted_geom}, '
                         f"ST_GEOGRAPHYFROMWKT('{filter_rect.asWktPolygon()}'))"
                     )
                 if self._provider._geometry_type in ["NUMBER", "TEXT"]:
                     filter_geom_clause = (
-                        f'ST_INTERSECTS(H3_CELL_TO_BOUNDARY("{geom_column}"), '
+                        f'ST_INTERSECTS(H3_CELL_TO_BOUNDARY({quoted_geom}), '
                         f"ST_GEOGRAPHYFROMWKT('{filter_rect.asWktPolygon()}'))"
                     )
                 if filter_geom_clause != "":
@@ -200,9 +200,14 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                     for clause in where_clause_list[1:]:
                         where_clause += f" and {clause}"
 
-            geom_query = f'ST_ASWKB("{geom_column}"), "{geom_column}", '
-            if self._provider._geo_column_type in ["NUMBER", "TEXT"]:
-                geom_query = f'"{geom_column}", "{geom_column}", '
+            geom_query = f'ST_ASWKB({quoted_geom}), {quoted_geom}, '
+            if self._provider._geo_column_type == "TEXT":
+                geom_query = f'ST_ASWKB(H3_CELL_TO_BOUNDARY({quoted_geom})), {quoted_geom}, '
+            elif self._provider._geo_column_type == "NUMBER":
+                geom_query = (
+                    f'ST_ASWKB(H3_CELL_TO_BOUNDARY({quoted_geom})), '
+                    f'H3_INT_TO_STRING({quoted_geom}), '
+                )
 
             self._request_no_geometry = (
                 self._request.flags() & QgsFeatureRequest.Flag.NoGeometry
@@ -219,12 +224,12 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                 self._provider._geometry_type
             )
 
-            filter_geo_type = f"ST_ASGEOJSON(\"{geom_column}\"):type::string IN ('{self._provider._geometry_type}'"
+            filter_geo_type = f"ST_ASGEOJSON({quoted_geom}):type::string IN ('{self._provider._geometry_type}'"
             if mapped_type is not None:
                 filter_geo_type += f", '{mapped_type}'"
             filter_geo_type += ")"
             if self._provider._geo_column_type in ["NUMBER", "TEXT"]:
-                filter_geo_type = f'H3_IS_VALID_CELL("{geom_column}")'
+                filter_geo_type = f'H3_IS_VALID_CELL({quoted_geom})'
 
             order_limit_clause = ""
             if self._provider._is_limited_unordered:
@@ -244,23 +249,6 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                 context_information=self._provider._context_information,
             )
         self._index = 0
-
-    def __try_to_convert_hex_to_int(self, hex_cell: Union[int, str]) -> Union[int, str]:
-        """
-        Tries to convert a hexadecimal string to an integer.
-
-        Args:
-            hex_cell (Union[int, str]): The value to be converted, which can be an integer or a string.
-
-        Returns:
-            Union[int, str]: The converted integer if the input is a valid hexadecimal string,
-                                    otherwise returns the original input.
-        """
-        try:
-            hex_to_int = int(hex_cell, 16)
-            return hex_to_int
-        except Exception:
-            return hex_cell
 
     def fetchFeature(self, f: QgsFeature) -> bool:
         """fetch next feature, return true on success
@@ -322,17 +310,7 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
 
                 if not self._request_no_geometry:
                     geometry = QgsGeometry()
-                    if self._provider._geo_column_type in ["NUMBER", "TEXT"]:
-                        cell = next_result[self.index_geom_column]
-                        converted_cell = self.__try_to_convert_hex_to_int(cell)
-                        hexVertexCoords = h3.cell_to_boundary(converted_cell)
-                        geometry = QgsGeometry.fromPolygonXY(
-                            [
-                                [QgsPointXY(lon, lat) for lat, lon in hexVertexCoords],
-                            ]
-                        )
-                    else:
-                        geometry.fromWkb(next_result[self.index_geom_column])
+                    geometry.fromWkb(next_result[self.index_geom_column])
                     f.setGeometry(geometry)
                     self.geometryToDestinationCrs(f, self._transform)
 
@@ -351,8 +329,10 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                         for idx, attr_idx in enumerate(
                             self._request.subsetOfAttributes()
                         ):
-                            attribute = self._attributes_converters[idx](
-                                next_result[idx]
+                            raw = next_result[idx]
+                            attribute = (
+                                None if raw is None
+                                else self._attributes_converters[idx](raw)
                             )
                             f.setAttribute(attr_idx, attribute)
                     else:
@@ -362,19 +342,23 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                             try:
                                 if (
                                     field_name == self._provider._column_geom
-                                    and self._provider._geo_column_type != "NUMBER"
+                                    and self._provider._geo_column_type
+                                    not in ("NUMBER", "TEXT")
                                 ):
                                     continue
                                 column_value = next_result[
                                     desc_result.index(field_name)
                                 ]
-                                converted_attribute = self._attributes_converters[indx](
-                                    column_value
+                                converted_attribute = (
+                                    None if column_value is None
+                                    else self._attributes_converters[indx](column_value)
                                 )
                                 f.setAttribute(indx, converted_attribute)
                             except Exception as e:
-                                print(
-                                    f"Feature Iterator Error - Conversion issue: {str(e)}"
+                                QgsMessageLog.logMessage(
+                                    f"Feature Iterator Error - Conversion issue: {str(e)}",
+                                    "Snowflake Plugin",
+                                    Qgis.MessageLevel.Warning,
                                 )
 
                 else:
@@ -392,7 +376,8 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                         ):
                             if (
                                 field_name == self._provider._column_geom
-                                and self._provider._geo_column_type != "NUMBER"
+                                and self._provider._geo_column_type
+                                not in ("NUMBER", "TEXT")
                             ):
                                 continue
                             f.setAttribute(

@@ -22,20 +22,24 @@ from ..helpers.utils import (
     on_handle_warning,
     remove_connection,
 )
+from ..helpers.sql import quote_literal
 from ..tasks.sf_convert_column_to_layer_task import SFConvertColumnToLayerTask
-from ..ui.sf_connection_string_dialog import SFConnectionStringDialog
-from PyQt5.QtCore import pyqtSignal
+from ..dialogs.sf_connection_string_dialog import SFConnectionStringDialog
+from qgis.PyQt.QtCore import pyqtSignal
 from qgis.core import (
     QgsDataItem,
     Qgis,
     QgsApplication,
     QgsErrorItem,
     QgsProject,
-    QgsVectorLayer,
+    QgsVectorLayer
 )
 from qgis.PyQt.QtGui import QIcon
-from qgis.PyQt.QtWidgets import QMessageBox, QAction, QWidget, QTabWidget, QComboBox
+from qgis.PyQt.QtWidgets import QMessageBox, QAction, QWidget, QTabWidget, QComboBox, QDialog
+import os
 import typing
+
+_IMAGES_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "ui", "images")
 
 
 class SFDataItem(QgsDataItem):
@@ -291,7 +295,7 @@ class SFDataItem(QgsDataItem):
                 type="field",
                 connection_name=self.connection_name,
                 clean_name=feat.attribute(0),
-                icon_path=f":/plugins/qgis-snowflake-connector/ui/images/fields/{self.get_field_type_svg_name(feat.attribute(1), feat.attribute(2), is_geo_column)}.svg",
+                icon_path=os.path.join(_IMAGES_DIR, "fields", f"{self.get_field_type_svg_name(feat.attribute(1), feat.attribute(2), is_geo_column)}.svg"),
             )
             children.append(item)
         feature_iterator.close()
@@ -357,18 +361,23 @@ class SFDataItem(QgsDataItem):
         elif self.item_type == "schema":
             column_name = "TABLE_NAME"
             children_item_type = "table"
-            schema_filter = f"AND TABLE_SCHEMA = '{self.clean_name}'"
+            schema_filter = f"AND TABLE_SCHEMA ILIKE {quote_literal(self.clean_name)}"
         elif self.item_type == "table":
-            schema_filter = f"AND TABLE_SCHEMA = '{self.parent().clean_name}'"
-            table_filter = f"AND TABLE_NAME = '{self.clean_name}'"
+            schema_filter = f"AND TABLE_SCHEMA ILIKE {quote_literal(self.parent().clean_name)}"
+            table_filter = f"AND TABLE_NAME ILIKE {quote_literal(self.clean_name)}"
             column_name = "COLUMN_NAME"
             children_item_type = "column"
+        geo_type_filter = ""
+        if self.item_type == "table":
+            geo_type_filter = (
+                "AND DATA_TYPE in ('GEOGRAPHY', 'GEOMETRY', 'NUMBER', 'TEXT')"
+            )
         query = f"""SELECT DISTINCT {column_name}
 FROM INFORMATION_SCHEMA.COLUMNS
-WHERE table_catalog = '{auth_information["database"]}'
+WHERE table_catalog ILIKE {quote_literal(auth_information["database"])}
 {schema_filter}
 {table_filter}
-AND DATA_TYPE in ('GEOGRAPHY', 'GEOMETRY', 'NUMBER', 'TEXT')
+{geo_type_filter}
 ORDER BY {column_name}"""
 
         return auth_information, column_name, children_item_type, query
@@ -395,7 +404,7 @@ ORDER BY {column_name}"""
         - SFDataItem: The created SFDataItem object.
         """
         if icon_path is None:
-            icon_path = f":/plugins/qgis-snowflake-connector/ui/images/{type}.svg"
+            icon_path = os.path.join(_IMAGES_DIR, f"{type}.svg")
         item = SFDataItem(
             type=Qgis.BrowserItemType.Field,
             parent=self,
@@ -419,6 +428,8 @@ ORDER BY {column_name}"""
             bool: True if the double click event is handled successfully, False otherwise.
         """
         try:
+            if self.item_type == "table" and not self.geom_column:
+                return False
             schema_data_item = self.parent()
             if (
                 self.item_type == "table"
@@ -451,11 +462,11 @@ ORDER BY {column_name}"""
                             "will be loaded."
                         ),
                     )
-                    if response == QMessageBox.Cancel:
+                    if response == QMessageBox.StandardButton.Cancel:
                         return False
 
                 context_information["primary_key"] = prompt_and_get_primary_key(
-                    context_information=context_information, data_type=self.geom_column
+                    context_information=context_information, data_type=self.geom_type
                 )
 
                 schema_data_item._running_tasks[self.path()] = True
@@ -570,7 +581,7 @@ ORDER BY {column_name}"""
         The dialog allows the user to enter the SQL query to be executed on the Snowflake database.
         After the user enters the SQL query and confirms, the query is executed and the connections are handled accordingly.
         """
-        from ..ui.sf_sql_query_dialog import SFSQLQueryDialog
+        from ..dialogs.sf_sql_query_dialog import SFSQLQueryDialog
 
         path_splitted = self.path().split("/")
         context_information = {
@@ -589,7 +600,7 @@ ORDER BY {column_name}"""
         sf_sql_query_dialog.update_connections_signal.connect(
             self.on_update_connections_handle
         )
-        sf_sql_query_dialog.exec_()
+        sf_sql_query_dialog.exec()
 
     def on_new_schema_action_triggered(self) -> None:
         """
@@ -597,13 +608,13 @@ ORDER BY {column_name}"""
         The dialog allows the user to enter the necessary information for creating a new schema in the Snowflake database.
         After the user enters the schema details and confirms, the schema is created and the connections are handled accordingly.
         """
-        from ..ui.sf_new_schema_dialog import SFNewSchemaDialog
+        from ..dialogs.sf_new_schema_dialog import SFNewSchemaDialog
 
         sf_connection_string_dialog = SFNewSchemaDialog(self.connection_name, None)
         sf_connection_string_dialog.update_connections_signal.connect(
             self.on_update_connections_handle
         )
-        sf_connection_string_dialog.exec_()
+        sf_connection_string_dialog.exec()
 
     def on_new_table_action_triggered(self) -> None:
         """
@@ -611,7 +622,7 @@ ORDER BY {column_name}"""
         The dialog allows the user to enter the necessary information for creating a new table in the Snowflake database.
         After the user enters the table details and confirms, the table is created and the connections are handled accordingly.
         """
-        from ..ui.sf_new_table_dialog import SFNewTableDialog
+        from ..dialogs.sf_new_table_dialog import SFNewTableDialog
 
         sf_connection_string_dialog = SFNewTableDialog(
             self.clean_name, self.connection_name, None
@@ -619,7 +630,7 @@ ORDER BY {column_name}"""
         sf_connection_string_dialog.update_connections_signal.connect(
             self.on_update_connections_handle
         )
-        sf_connection_string_dialog.exec_()
+        sf_connection_string_dialog.exec()
 
     def on_new_connection_action_triggered(self) -> None:
         """
@@ -627,11 +638,11 @@ ORDER BY {column_name}"""
         The dialog allows the user to enter the necessary information for establishing a connection to a Snowflake database.
         After the user enters the connection details and confirms, the connection string is updated and the connections are handled accordingly.
         """
-        sf_connection_string_dialog = SFConnectionStringDialog(None)
+        sf_connection_string_dialog = SFConnectionStringDialog(parent=None)
         sf_connection_string_dialog.update_connections_signal.connect(
             self.on_update_connections_handle
         )
-        sf_connection_string_dialog.exec_()
+        sf_connection_string_dialog.exec()
 
     def on_edit_connection_action_triggered(self) -> None:
         """
@@ -704,7 +715,7 @@ ORDER BY {column_name}"""
         sf_connection_string_dialog_window.update_connections_signal.connect(
             self.on_update_connections_handle
         )
-        sf_connection_string_dialog_window.exec_()
+        sf_connection_string_dialog_window.exec()
 
     def on_update_connections_handle(self) -> None:
         """

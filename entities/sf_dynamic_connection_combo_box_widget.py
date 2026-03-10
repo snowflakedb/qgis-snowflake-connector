@@ -1,12 +1,5 @@
 import json
-from PyQt5.QtWidgets import (
-    QVBoxLayout,
-    QLabel,
-    QComboBox,
-    QWidget,
-    QMessageBox,
-)
-
+from qgis.PyQt.QtWidgets import QVBoxLayout, QLabel, QComboBox, QWidget, QMessageBox
 from ..helpers.data_base import get_schema_iterator, get_table_iterator
 
 from ..helpers.utils import (

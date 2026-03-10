@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev, "fix/**", "feature/**"]
+  pull_request:
+    branches: [main, dev]
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Lint with flake8 (syntax and import errors only)
+        run: |
+          pip install flake8
+          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics \
+            --exclude=ui/,scripts/,.git,__pycache__
+
+      - name: Compile check (all .py files)
+        run: |
+          python - <<'PY'
+          import py_compile
+          from pathlib import Path
+
+          root = Path(".")
+          for path in root.rglob("*.py"):
+              if ".git" in path.parts:
+                  continue
+              py_compile.compile(str(path), doraise=True)
+          print("Compile check passed")
+          PY
+
+      - name: Run pure-Python tests (regressions)
+        run: python test/test_issue_regressions.py -v
+
+      - name: Run repository precheck tests
+        run: python test/test_precheck_repo.py -v

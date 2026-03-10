@@ -1,4 +1,5 @@
 import typing
+from ..enums.snowflake_metadata_type import SnowflakeMetadataType
 from ..helpers.data_base import (
     get_geo_column_type_from_query,
     get_srid_from_sql_query_geo_column,
@@ -28,6 +29,7 @@ class SFConvertSQLQueryToLayerTask(QgsTask):
             )
             self.geo_column_name = context_information["geo_column_name"]
             self.geo_column_type_is_h3 = context_information["geo_column_type_is_h3"]
+            self.h3_sf_col_type = context_information.get("h3_sf_col_type")
             self.primary_key = (
                 context_information["primary_key"]
                 if "primary_key" in context_information
@@ -54,14 +56,16 @@ class SFConvertSQLQueryToLayerTask(QgsTask):
             bool: True if the task is executed successfully, False otherwise.
         """
         try:
-            geo_column_type = (
-                "NUMBER"
-                if self.geo_column_type_is_h3
-                else get_geo_column_type_from_query(
+            if self.geo_column_type_is_h3:
+                geo_column_type = (
+                    "TEXT" if self.h3_sf_col_type == SnowflakeMetadataType.TEXT.value
+                    else "NUMBER"
+                )
+            else:
+                geo_column_type = get_geo_column_type_from_query(
                     query=self.query,
                     context_information=self.context_information,
                 )
-            )
             srid = (
                 get_srid_from_sql_query_geo_column(
                     query=self.query,

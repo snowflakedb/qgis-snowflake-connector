@@ -50,7 +50,7 @@ __revision__ = "$Format:%H$"
 
 import json
 import typing
-from qgis.PyQt.QtCore import QCoreApplication, QByteArray, QVariant
+from qgis.PyQt.QtCore import QCoreApplication, QByteArray, QVariant, QMetaType
 from qgis.core import (
     QgsProcessing,
     QgsProcessingAlgorithm,
@@ -76,6 +76,11 @@ from .entities.sf_dynamic_connection_combo_box_widget import (
 from .providers.sf_data_source_provider import SFDataProvider
 
 from .helpers.utils import get_authentification_information, get_qsettings
+from .helpers.sql import (
+    quote_identifier,
+    quote_literal,
+    qualified_table_name,
+)
 
 
 class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
@@ -116,7 +121,7 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
             QgsProcessingParameterFeatureSource(
                 self.INPUT,
                 self.tr("Input layer"),
-                [QgsProcessing.TypeVectorAnyGeometry],
+                [QgsProcessing.SourceType.TypeVectorAnyGeometry],
             )
         )
 
@@ -152,6 +157,10 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
         """
         source = self.parameterAsSource(parameters, self.INPUT, context)
         geom_column = self.parameterAsString(parameters, self.GEOMETRY_COLUMN, context)
+        source_srid = source.sourceCrs().postgisSrid()
+        if source_srid is None or source_srid <= 0:
+            source_srid = 4326
+        use_geometry_type = source_srid != 4326
 
         from urllib.parse import parse_qs, urlparse
 
@@ -211,6 +220,7 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
                     database_name=selected_database,
                     schema_name=selected_schema,
                     table_name=selected_table,
+                    use_geometry_type=use_geometry_type,
                 )
 
                 create_table(
@@ -224,8 +234,25 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
         # (sink, dest_id) = self.parameterAsSink(parameters, self.OUTPUT,
         #         context, source.fields(), source.wkbType(), source.sourceCrs())
 
-        # Compute the number of steps to display within the progress bar and
-        # get features from source
+        # Detect VARIANT/OBJECT/ARRAY columns in the target table so values
+        # can be wrapped in PARSE_JSON() during INSERT.
+        variant_columns = set()
+        try:
+            variant_query = (
+                "SELECT column_name FROM information_schema.columns "
+                f"WHERE table_catalog ILIKE {quote_literal(selected_database)} "
+                f"AND table_schema ILIKE {quote_literal(selected_schema)} "
+                f"AND table_name ILIKE {quote_literal(selected_table)} "
+                "AND data_type IN ('VARIANT', 'OBJECT', 'ARRAY')"
+            )
+            cur = self.sf_data_provider.execute_query(
+                variant_query, selected_connection
+            )
+            variant_columns = {row[0] for row in cur.fetchall()}
+            cur.close()
+        except Exception:
+            pass
+
         total = 100.0 / source.featureCount() if source.featureCount() else 0
         features = source.getFeatures()
 
@@ -233,20 +260,51 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
             feedback.setProgress(100)
             return {"Rows Inserted": 0}
 
-        query_columns = f"{geom_column}"
+        query_columns = quote_identifier(geom_column)
 
         for field in source.fields():
             if field.name().lower() == geom_column.lower():
                 continue
-            query_columns += f",{field.name()}"
+            query_columns += f",{quote_identifier(field.name())}"
 
-        query_base = f'INSERT INTO "{selected_database}"."{selected_schema}"."{selected_table}" ({query_columns}) VALUES '
+        fq_table = qualified_table_name(
+            selected_database, selected_schema, selected_table
+        )
+        # Use SELECT over VALUES so VARIANT/OBJECT/ARRAY columns can be
+        # converted via PARSE_JSON in the SELECT projection.
+        tuple_column_count = 1 + len(source.fields())
+        value_aliases = [f"c{i}" for i in range(1, tuple_column_count + 1)]
+        geom_alias = value_aliases[0]
+        if use_geometry_type:
+            geom_proj = (
+                f"ST_SETSRID(ST_GEOMETRYFROMWKB(TO_BINARY(v.{geom_alias},"
+                f" 'HEX')), {source_srid})"
+            )
+        else:
+            geom_proj = f"ST_GEOGFROMWKB(TO_BINARY(v.{geom_alias}, 'HEX'))"
+        select_projection = [geom_proj]
+        tuple_position = 2
+        for field in source.fields():
+            alias = value_aliases[tuple_position - 1]
+            if field.name() in variant_columns:
+                select_projection.append(f"PARSE_JSON(v.{alias})")
+            else:
+                select_projection.append(f"v.{alias}")
+            tuple_position += 1
+
+        query_base = (
+            f'INSERT INTO {fq_table} ({query_columns}) '
+            f"SELECT {','.join(select_projection)} FROM VALUES "
+        )
+        query_values_alias = f" AS v({','.join(value_aliases)})"
         query = query_base
         first = True
         executed = False
         for current, feature in enumerate(features):
             if current != 0 and current % 5000 == 0:
-                cur = self.sf_data_provider.execute_query(query, selected_connection)
+                cur = self.sf_data_provider.execute_query(
+                    query + query_values_alias, selected_connection
+                )
                 cur.close()
                 query = query_base
                 first = True
@@ -265,57 +323,67 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
             else:
                 query += ","
 
-            query_values = f"('{hex_string}'"
+            if hex_string == "":
+                query += "(NULL"
+            else:
+                query += f"('{hex_string}'"
 
             for field in source.fields():
-                query_values += ","
+                query += ","
 
                 if field.name().lower() == geom_column.lower():
-                    query_values += f"'{hex_string}'"
+                    if hex_string == "":
+                        query += "NULL"
+                    else:
+                        query += f"'{hex_string}'"
                 else:
                     feat_index = feature.fieldNameIndex(field.name())
                     feat_val = feature.attribute(feat_index)
                     if is_snowflake_layer:
                         if feat_val is None:
-                            query_values += "NULL"
-                        elif field.subType() == QVariant.String:
-                            feat_val = feat_val.replace("'", "\\'")
-                            query_values += f"'{feat_val}'"
+                            query += "NULL"
+                        elif field.subType() == QMetaType.Type.QString:
+                            val = quote_literal(str(feat_val))
+                            query += val
                         elif field.subType() in [
-                            QVariant.Date,
-                            QVariant.DateTime,
-                            QVariant.Time,
+                            QMetaType.Type.QDate,
+                            QMetaType.Type.QDateTime,
+                            QMetaType.Type.QTime,
                         ]:
-                            query_values += f"'{feat_val}'"
+                            query += quote_literal(str(feat_val))
                         else:
-                            query_values += f"{feat_val}"
+                            query += f"{feat_val}"
                     else:
                         if feat_val is None:
-                            query_values += "NULL"
+                            query += "NULL"
                         elif isinstance(feat_val, QVariant) and feat_val.isNull():
-                            query_values += "NULL"
-                        elif field.type() == QVariant.String:
-                            feat_val = feat_val.replace("'", "\\'")
-                            query_values += f"'{feat_val}'"
-                        elif field.type() == QVariant.Date:
-                            query_values += f"'{feat_val.toString('yyyy-MM-dd')}'"
-                        elif field.type() == QVariant.Time:
-                            query_values += f"'{feat_val.toString('hh:mm:ss')}'"
-                        elif field.type() == QVariant.DateTime:
-                            query_values += (
-                                f"'{feat_val.toString('yyyy-MM-dd hh:mm:ss')}'"
+                            query += "NULL"
+                        elif field.type() == QMetaType.Type.QString:
+                            val = quote_literal(str(feat_val))
+                            query += val
+                        elif field.type() == QMetaType.Type.QDate:
+                            query += quote_literal(
+                                feat_val.toString("yyyy-MM-dd")
+                            )
+                        elif field.type() == QMetaType.Type.QTime:
+                            query += quote_literal(
+                                feat_val.toString("hh:mm:ss")
+                            )
+                        elif field.type() == QMetaType.Type.QDateTime:
+                            query += quote_literal(
+                                feat_val.toString("yyyy-MM-dd hh:mm:ss")
                             )
                         else:
-                            query_values += f"{feat_val}"
-            query_values += ")"
-
-            query += query_values
+                            query += f"{feat_val}"
+            query += ")"
 
             # Update the progress bar
             feedback.setProgress(int(current * total))
 
         if not executed:
-            cur = self.sf_data_provider.execute_query(query, selected_connection)
+            cur = self.sf_data_provider.execute_query(
+                query + query_values_alias, selected_connection
+            )
             cur.close()
 
         # Return the results of the algorithm. In this case our only result is
@@ -337,19 +405,19 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
         Returns:
             str: The field type.
         """
-        if code_type == QVariant.String:
+        if code_type == QMetaType.Type.QString:
             return "TEXT"
-        if code_type == QVariant.Int:
+        if code_type == QMetaType.Type.Int:
             return "INTEGER"
-        if code_type == QVariant.Double:
+        if code_type == QMetaType.Type.Double:
             return "DOUBLE"
-        if code_type == QVariant.Date:
+        if code_type == QMetaType.Type.QDate:
             return "DATE"
-        if code_type == QVariant.Time:
+        if code_type == QMetaType.Type.QTime:
             return "TIME"
-        if code_type == QVariant.DateTime:
+        if code_type == QMetaType.Type.QDateTime:
             return "TIMESTAMP"
-        if code_type == QVariant.Bool:
+        if code_type == QMetaType.Type.Bool:
             return "BOOLEAN"
         return "TEXT"
 
@@ -439,6 +507,7 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
                         database_name=selected_database,
                         schema_name=selected_schema,
                         table_name=selected_table,
+                        use_geometry_type=source.sourceCrs().postgisSrid() != 4326,
                     )
 
                     create_table(
@@ -453,9 +522,9 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
                 query_select_columns = f"""
                     SELECT DISTINCT COLUMN_NAME
                     FROM INFORMATION_SCHEMA.COLUMNS
-                    WHERE TABLE_CATALOG = '{selected_database}'
-                    AND TABLE_SCHEMA ILIKE '{selected_schema}'
-                    AND TABLE_NAME ILIKE '{selected_table}'
+                    WHERE TABLE_CATALOG ILIKE {quote_literal(selected_database)}
+                    AND TABLE_SCHEMA ILIKE {quote_literal(selected_schema)}
+                    AND TABLE_NAME ILIKE {quote_literal(selected_table)}
                 """
                 cur_select_columns = self.sf_data_provider.execute_query(
                     query_select_columns, selected_connection
@@ -493,6 +562,7 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
         database_name: str,
         schema_name: str,
         table_name: str,
+        use_geometry_type: bool = False,
     ) -> str:
         """
         Generates a SQL query string to create a table in Snowflake with the specified columns and types.
@@ -508,7 +578,8 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
         Returns:
             str: A SQL query string to create the table with the specified columns and types.
         """
-        query_create_table_cols = f"{geom_column} GEOGRAPHY"
+        geom_data_type = "GEOMETRY" if use_geometry_type else "GEOGRAPHY"
+        query_create_table_cols = f"{quote_identifier(geom_column)} {geom_data_type}"
         for field in source.fields():
             if field.name().lower() == geom_column.lower():
                 continue
@@ -518,7 +589,20 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
                 field_to_use = field.type()
 
             query_create_table_cols += (
-                f",{field.name()} {self.get_field_type_from_code_type(field_to_use)}"
+                f",{quote_identifier(field.name())} {self.get_field_type_from_code_type(field_to_use)}"
             )
 
-        return f"""CREATE TABLE "{database_name}"."{schema_name}"."{table_name}"({query_create_table_cols})"""
+        fq_table = qualified_table_name(database_name, schema_name, table_name)
+        return f"CREATE TABLE {fq_table}({query_create_table_cols})"
+
+    def get_geometry_insert_sql(
+        self, hex_string: str, use_geometry_type: bool, source_srid: int
+    ) -> str:
+        if hex_string == "":
+            return "NULL"
+        if use_geometry_type:
+            return (
+                f"ST_SETSRID(ST_GEOMETRYFROMWKB(TO_BINARY('{hex_string}', 'HEX')),"
+                f" {source_srid})"
+            )
+        return f"ST_GEOGFROMWKB(TO_BINARY('{hex_string}', 'HEX'))"

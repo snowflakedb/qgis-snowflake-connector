@@ -1,5 +1,9 @@
+import os
+
 from qgis.core import QgsDataItem, QgsDataItemProvider, Qgis
 from ..helpers.utils import get_qsettings
+
+_IMAGES_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "ui", "images")
 
 
 class SFDataItemProvider(QgsDataItemProvider):
@@ -41,7 +45,7 @@ class SFDataItemProvider(QgsDataItemProvider):
                     path="/Snowflake",
                     provider_key=self._dataProviderKey,
                     item_type="root",
-                    icon_path=":/plugins/qgis-snowflake-connector/ui/images/qgis_sf.png",
+                    icon_path=os.path.join(_IMAGES_DIR, "qgis_sf.png"),
                     clean_name=self._name,
                 )
                 return root_data_item

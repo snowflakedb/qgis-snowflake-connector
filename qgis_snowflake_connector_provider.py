@@ -47,9 +47,13 @@ __copyright__ = "(C) 2024 by Snowflake"
 
 __revision__ = "$Format:%H$"
 
+import os
+
 from qgis.core import QgsProcessingProvider
 from .qgis_snowflake_connector_algorithm import QGISSnowflakeConnectorAlgorithm
 from qgis.PyQt.QtGui import QIcon
+
+_IMAGES_DIR = os.path.join(os.path.dirname(__file__), "ui", "images")
 
 
 class QGISSnowflakeConnectorProvider(QgsProcessingProvider):
@@ -96,7 +100,7 @@ class QGISSnowflakeConnectorProvider(QgsProcessingProvider):
         Should return a QIcon which is used for your provider inside
         the Processing toolbox.
         """
-        return QIcon(":/plugins/qgis-snowflake-connector/ui/images/qgis_logo.svg")
+        return QIcon(os.path.join(_IMAGES_DIR, "qgis_logo.svg"))
 
     def longName(self):
         """

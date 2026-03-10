@@ -4,8 +4,9 @@ from ..enums.snowflake_metadata_type import SnowflakeMetadataType
 
 from ..managers.sf_connection_manager import SFConnectionManager
 from ..helpers.utils import get_authentification_information, get_qsettings
+from ..helpers.sql import quote_identifier, quote_literal, qualified_table_name
 from qgis.PyQt.QtCore import QSettings
-from qgis.core import QgsFeature
+from qgis.core import QgsFeature, QgsMessageLog, Qgis
 from ..providers.sf_data_source_provider import SFDataProvider
 from ..entities.sf_feature_iterator import SFFeatureIterator
 import snowflake.connector
@@ -32,7 +33,7 @@ def get_schema_iterator(settings: QSettings, connection_name: str) -> SFFeatureI
 
     query = f"""SELECT DISTINCT SCHEMA_NAME
 FROM INFORMATION_SCHEMA.SCHEMATA
-WHERE CATALOG_NAME = '{auth_information["database"]}'
+WHERE CATALOG_NAME ILIKE {quote_literal(auth_information["database"])}
 ORDER BY SCHEMA_NAME"""
 
     sf_data_provider.load_data(query, connection_name)
@@ -71,8 +72,8 @@ def filter_geo_columns(
             and "h3" in feat.attribute("COMMENT").lower()
         ):
             h3_columns.append(feat)
-            table = f'"{feat.attribute("TABLE_CATALOG")}"."{feat.attribute("TABLE_SCHEMA")}"."{feat.attribute("TABLE_NAME")}"'
-            column = f'{table}."{feat.attribute("COLUMN_NAME")}"'
+            table = qualified_table_name(feat.attribute("TABLE_CATALOG"), feat.attribute("TABLE_SCHEMA"), feat.attribute("TABLE_NAME"))
+            column = f'{table}.{quote_identifier(feat.attribute("COLUMN_NAME"))}'
             number_queries.append(f"""
                 (SELECT H3_IS_VALID_CELL({column})
                 FROM {table}
@@ -108,8 +109,8 @@ def get_table_geo_columns(
     sf_data_provider = SFDataProvider(auth_information)
     schema_selected_query = f"""SELECT DISTINCT TABLE_NAME, COLUMN_NAME, DATA_TYPE, TABLE_CATALOG, TABLE_SCHEMA, COMMENT
 FROM INFORMATION_SCHEMA.COLUMNS
-WHERE TABLE_CATALOG ILIKE '{sf_data_provider.connection_params["database"]}'
-AND TABLE_SCHEMA ILIKE '{table_name}'
+WHERE TABLE_CATALOG ILIKE {quote_literal(sf_data_provider.connection_params["database"])}
+AND TABLE_SCHEMA ILIKE {quote_literal(table_name)}
 ORDER BY TABLE_NAME, COLUMN_NAME"""
 
     sf_data_provider.load_data(schema_selected_query, connection_name)
@@ -139,7 +140,7 @@ def get_geo_columns(
     """
     schema_selected_query = f"""SELECT DISTINCT TABLE_NAME, COLUMN_NAME, DATA_TYPE, TABLE_CATALOG, TABLE_SCHEMA, COMMENT
 FROM INFORMATION_SCHEMA.COLUMNS
-WHERE TABLE_CATALOG ILIKE '{sf_data_provider.connection_params["database"]}'
+WHERE TABLE_CATALOG ILIKE {quote_literal(sf_data_provider.connection_params["database"])}
 AND DATA_TYPE IN ('GEOGRAPHY', 'GEOMETRY', 'NUMBER', 'TEXT')
 ORDER BY TABLE_NAME, COLUMN_NAME"""
 
@@ -173,9 +174,9 @@ def get_column_iterator(
 
     query = f"""SELECT DISTINCT COLUMN_NAME, DATA_TYPE, NUMERIC_SCALE
 FROM INFORMATION_SCHEMA.COLUMNS
-WHERE TABLE_CATALOG = '{auth_information["database"]}'
-AND TABLE_SCHEMA ILIKE '{schema_data_item.clean_name}'
-AND TABLE_NAME ILIKE '{table_data_item.clean_name}'
+WHERE TABLE_CATALOG ILIKE {quote_literal(auth_information["database"])}
+AND TABLE_SCHEMA ILIKE {quote_literal(schema_data_item.clean_name)}
+AND TABLE_NAME ILIKE {quote_literal(table_data_item.clean_name)}
 ORDER BY COLUMN_NAME"""
 
     sf_data_provider.load_data(query, connection_name)
@@ -199,8 +200,8 @@ def get_table_iterator(settings: QSettings, connection_name: str, schema_name: s
 
     query = f"""SELECT DISTINCT TABLE_NAME
 FROM INFORMATION_SCHEMA.TABLES
-WHERE table_catalog = '{auth_information["database"]}'
-AND TABLE_SCHEMA = '{schema_name}'
+WHERE table_catalog ILIKE {quote_literal(auth_information["database"])}
+AND TABLE_SCHEMA ILIKE {quote_literal(schema_name)}
 ORDER BY TABLE_NAME"""
 
     sf_data_provider.load_data(query, connection_name)
@@ -259,9 +260,9 @@ def get_columns_cursor(
     query_select_columns = f"""
         SELECT DISTINCT COLUMN_NAME, DATA_TYPE
         FROM INFORMATION_SCHEMA.COLUMNS
-        WHERE TABLE_CATALOG = '{database_name}'
-        AND TABLE_SCHEMA ILIKE '{schema}'
-        AND TABLE_NAME ILIKE '{table}'
+        WHERE TABLE_CATALOG ILIKE {quote_literal(database_name)}
+        AND TABLE_SCHEMA ILIKE {quote_literal(schema)}
+        AND TABLE_NAME ILIKE {quote_literal(table)}
         ORDER BY COLUMN_NAME
     """
     return sf_data_provider.execute_query(
@@ -359,8 +360,8 @@ def get_count_schemas(
     """
     query_search_public_schema = f"""SELECT DISTINCT SCHEMA_NAME
 FROM INFORMATION_SCHEMA.SCHEMATA
-WHERE CATALOG_NAME ilike '{data_base_name}'
-and SCHEMA_NAME ilike '{schema_name}'"""
+WHERE CATALOG_NAME ILIKE {quote_literal(data_base_name)}
+AND SCHEMA_NAME ILIKE {quote_literal(schema_name)}"""
     return __get_cur_count(settings, connection_name, query_search_public_schema)
 
 
@@ -376,7 +377,7 @@ def create_schema(settings: QSettings, connection_name: str, schema_name: str):
     Returns:
         None
     """
-    query_create_public_schema = f"""CREATE SCHEMA {schema_name}"""
+    query_create_public_schema = f"CREATE SCHEMA {quote_identifier(schema_name)}"
     cur = __execute_query(
         settings=settings,
         connection_name=connection_name,
@@ -403,9 +404,9 @@ def get_count_tables(
     settings = get_qsettings()
     query_search_table = f"""SELECT DISTINCT TABLE_NAME
 FROM INFORMATION_SCHEMA.TABLES
-WHERE TABLE_CATALOG ilike '{database_name}'
-and TABLE_SCHEMA ilike '{schema_name}'
-and TABLE_NAME ilike '{table_name}'"""
+WHERE TABLE_CATALOG ILIKE {quote_literal(database_name)}
+AND TABLE_SCHEMA ILIKE {quote_literal(schema_name)}
+AND TABLE_NAME ILIKE {quote_literal(table_name)}"""
 
     return __get_cur_count(settings, connection_name, query_search_table)
 
@@ -440,8 +441,8 @@ def get_srid_from_table_geo_column(
     """
     connection_manager: SFConnectionManager = SFConnectionManager.get_instance()
     query_srid = (
-        f'SELECT ANY_VALUE(ST_SRID("{geo_column_name}")) '
-        f'FROM "{table_name}" where "{geo_column_name}" IS NOT NULL'
+        f'SELECT ANY_VALUE(ST_SRID({quote_identifier(geo_column_name)})) '
+        f'FROM {quote_identifier(table_name)} WHERE {quote_identifier(geo_column_name)} IS NOT NULL'
     )
     cur = connection_manager.execute_query(
         connection_name=context_information["connection_name"],
@@ -498,12 +499,12 @@ def get_geo_column_type(
     """
     connection_manager: SFConnectionManager = SFConnectionManager.get_instance()
     query_geo_column_type = (
-        f"SELECT DISTINCT DATA_TYPE "
-        f"FROM INFORMATION_SCHEMA.COLUMNS "
-        f"WHERE TABLE_CATALOG ILIKE '{context_information['database_name']}' "
-        f"AND TABLE_SCHEMA ILIKE '{context_information['schema_name']}' "
-        f"AND TABLE_NAME ILIKE '{context_information['table_name']}' "
-        f"AND COLUMN_NAME ILIKE '{geo_column_name}' "
+        "SELECT DISTINCT DATA_TYPE "
+        "FROM INFORMATION_SCHEMA.COLUMNS "
+        f"WHERE TABLE_CATALOG ILIKE {quote_literal(context_information['database_name'])} "
+        f"AND TABLE_SCHEMA ILIKE {quote_literal(context_information['schema_name'])} "
+        f"AND TABLE_NAME ILIKE {quote_literal(context_information['table_name'])} "
+        f"AND COLUMN_NAME ILIKE {quote_literal(geo_column_name)} "
     )
     cur = connection_manager.execute_query(
         connection_name=context_information["connection_name"],
@@ -515,36 +516,7 @@ def get_geo_column_type(
     return result_row[0] if result_row else None
 
 
-def limit_size_for_type(
-    column_type: str,
-) -> int:
-    """
-    The limit number of rows to be fetched from a table. Currently 50k by default, and 500k for H3 columns
-
-    Args:
-        column_type (str): The type of the column
-
-    Returns:
-        int: The size limit.
-    """
-    if column_type in ["NUMBER", "TEXT", "H3GEO"]:
-        return 500000  # 500k
-    return 50000  # 50k
-
-
-def limit_size_for_table(
-    context_information: dict,
-) -> int:
-    """
-    The limit number of rows to be fetched from a table. Currently based on type
-
-    Args:
-        context_information (dict): A dictionary containing context information, including the column type.
-
-    Returns:
-        int: The size limit.
-    """
-    return limit_size_for_type(context_information["geom_type"])
+from .limits import limit_size_for_type, limit_size_for_table
 
 
 def check_table_exceeds_size(
@@ -564,7 +536,7 @@ def check_table_exceeds_size(
 
     limit_size = limit_size_for_table(context_information=context_information)
     return check_from_clause_exceeds_size(
-        from_clause=f'"{context_information["table_name"]}"',
+        from_clause=quote_identifier(context_information["table_name"]),
         context_information=context_information,
         limit_size=limit_size,
     )
@@ -602,8 +574,8 @@ def get_srid_from_sql_query_geo_column(
 ) -> int:
     connection_manager: SFConnectionManager = SFConnectionManager.get_instance()
     query_srid = (
-        f'SELECT ANY_VALUE(ST_SRID("{context_information["geo_column_name"]}")) '
-        f'FROM ({query}) WHERE "{context_information["geo_column_name"]}" IS NOT NULL'
+        f'SELECT ANY_VALUE(ST_SRID({quote_identifier(context_information["geo_column_name"])})) '
+        f'FROM ({query}) WHERE {quote_identifier(context_information["geo_column_name"])} IS NOT NULL'
     )
     cur = connection_manager.execute_query(
         connection_name=context_information["connection_name"],
@@ -644,8 +616,8 @@ def get_geo_types_from_geo_json_column(
     """
     connection_manager: SFConnectionManager = SFConnectionManager.get_instance()
     query_geo_type = (
-        f'SELECT DISTINCT ST_ASGEOJSON("{column}"):type::string '
-        f'FROM {from_clause} WHERE "{column}" IS NOT NULL'
+        f'SELECT DISTINCT ST_ASGEOJSON({quote_identifier(column)}):type::string '
+        f'FROM {from_clause} WHERE {quote_identifier(column)} IS NOT NULL'
     )
     cur = connection_manager.execute_query(
         connection_name=context_information["connection_name"],
@@ -782,29 +754,30 @@ def get_limit_sql_query(
     query_columns = ""
     h3_query_any_value_columns = []
     for desc in cur_description:
-        col_name = desc[0].replace('"', '""')
+        col_name = desc[0]
+        quoted_col = quote_identifier(col_name)
         col_type = desc[1]
         if query_columns != "":
             query_columns += ", "
 
         h3_query_any_value_column_value = {
             "column_value": "FALSE",
-            "col_alias": f'"{col_name}"',
+            "col_alias": quoted_col,
         }
         if col_type in (
             SnowflakeMetadataType.GEOGRAPHY.value,
             SnowflakeMetadataType.GEOMETRY.value,
         ):
-            query_columns += f'ST_ASWKT("{col_name}") AS "{col_name}"'
+            query_columns += f'ST_ASWKT({quoted_col}) AS {quoted_col}'
         else:
-            query_columns += f'"{col_name}"'
+            query_columns += quoted_col
             if col_type in [
                 SnowflakeMetadataType.FIXED.value,
                 SnowflakeMetadataType.TEXT.value,
             ]:
                 h3_query_any_value_column_value = {
-                    "column_value": f'ANY_VALUE(H3_IS_VALID_CELL("{col_name}"))',
-                    "col_alias": f'"{col_name}"',
+                    "column_value": f'ANY_VALUE(H3_IS_VALID_CELL({quoted_col}))',
+                    "col_alias": quoted_col,
                 }
         h3_query_any_value_columns.append(h3_query_any_value_column_value)
 
@@ -926,9 +899,9 @@ def get_table_columns(
     query_table_columns = (
         "SELECT COLUMN_NAME "
         "FROM INFORMATION_SCHEMA.COLUMNS "
-        f"WHERE TABLE_CATALOG ILIKE '{context_information['database_name']}' "
-        f"AND TABLE_SCHEMA ILIKE '{context_information['schema_name']}' "
-        f"AND TABLE_NAME ILIKE '{context_information['table_name']}' "
+        f"WHERE TABLE_CATALOG ILIKE {quote_literal(context_information['database_name'])} "
+        f"AND TABLE_SCHEMA ILIKE {quote_literal(context_information['schema_name'])} "
+        f"AND TABLE_NAME ILIKE {quote_literal(context_information['table_name'])} "
         "AND DATA_TYPE NOT IN ('GEOGRAPHY', 'GEOMETRY') "
         "ORDER BY COLUMN_NAME"
     )
@@ -944,38 +917,52 @@ def get_table_columns(
     return result_rows
 
 
+def check_column_has_duplicates(
+    context_information: dict,
+    column_name: str,
+) -> bool:
+    """Check whether a column contains duplicate values.
+
+    Returns True if duplicates exist, False if all values are unique.
+    """
+    connection_manager: SFConnectionManager = SFConnectionManager.get_instance()
+    fq_table = (
+        f"{quote_identifier(context_information['database_name'])}."
+        f"{quote_identifier(context_information['schema_name'])}."
+        f"{quote_identifier(context_information['table_name'])}"
+    )
+    query = (
+        f"SELECT COUNT(*) - COUNT(DISTINCT {quote_identifier(column_name)}) "
+        f"FROM {fq_table}"
+    )
+    cur = connection_manager.execute_query(
+        connection_name=context_information["connection_name"],
+        query=query,
+        context_information=context_information,
+    )
+    row = cur.fetchone()
+    cur.close()
+    return row[0] > 0
+
+
 def update_table_feature(
     context_information: dict,
 ) -> bool:
     """Updates a specific feature's geometry in a Snowflake table.
 
-    This function constructs and executes an SQL UPDATE statement to modify the
-    geometry of a row identified by its primary key in a specified table.
-    It uses a connection manager to handle the database interaction.
-
     Args:
-        context_information: A dictionary containing the necessary information
-            for the update operation. Expected keys are:
-            - 'table_name' (str): The name of the table to update.
-            - 'column_geom' (str): The name of the geometry column to be updated.
-            - 'primary_key_name' (str): The name of the primary key column used
-              in the WHERE clause.
-            - 'geometry_wkt' (str): The Well-Known Text (WKT) representation of
-              the new geometry.
-            - 'primary_key_value' (any): The value of the primary key for the
-              feature to be updated.
-            - 'connection_name' (str): The name of the Snowflake connection to use.
+        context_information: Dict with keys: table_name, column_geom,
+            primary_key_name, geometry_wkt, primary_key_value, connection_name.
 
     Returns:
-        bool: True if the update operation was successful and the cursor was
-              closed, False if an exception occurred during the process.
+        True on success, False on error.
     """
     try:
         connection_manager: SFConnectionManager = SFConnectionManager.get_instance()
         update_sql = (
-            f"UPDATE {context_information['table_name']} "
-            f"SET {context_information['column_geom']} = %s "
-            f"WHERE {context_information['primary_key_name']} = %s"
+            f"UPDATE {quote_identifier(context_information['table_name'])} "
+            f"SET {quote_identifier(context_information['column_geom'])} = %s "
+            f"WHERE {quote_identifier(context_information['primary_key_name'])} = %s"
         )
 
         params = (
@@ -992,5 +979,156 @@ def update_table_feature(
 
         cur.close()
         return True
-    except Exception as _:
+    except Exception as e:
+        QgsMessageLog.logMessage(
+            f"update_table_feature failed: {e}",
+            "Snowflake Plugin",
+            Qgis.MessageLevel.Warning,
+        )
         return False
+
+
+def update_table_attributes(
+    context_information: dict,
+    set_clauses: typing.List[str],
+    params: tuple,
+) -> typing.Optional[str]:
+    """Updates attribute columns for a single row identified by primary key.
+
+    Returns None on success, or an error message string on failure.
+    """
+    try:
+        connection_manager: SFConnectionManager = SFConnectionManager.get_instance()
+        sql = (
+            f"UPDATE {quote_identifier(context_information['table_name'])} "
+            f"SET {', '.join(set_clauses)} "
+            f"WHERE {quote_identifier(context_information['primary_key_name'])} = %s"
+        )
+
+        cur = connection_manager.execute_query_with_params(
+            connection_name=context_information["connection_name"],
+            query=sql,
+            params=params,
+            context_information=context_information,
+        )
+        cur.close()
+        return None
+    except Exception as e:
+        msg = f"UPDATE failed: {e}"
+        QgsMessageLog.logMessage(msg, "Snowflake Plugin", Qgis.MessageLevel.Warning)
+        return msg
+
+
+def insert_table_feature(
+    context_information: dict,
+    column_names: typing.List[str],
+    params: tuple,
+) -> typing.Optional[str]:
+    """Inserts a single row into a Snowflake table.
+
+    Returns None on success, or an error message string on failure.
+    """
+    try:
+        connection_manager: SFConnectionManager = SFConnectionManager.get_instance()
+        cols = ", ".join(quote_identifier(c) for c in column_names)
+        placeholders = ", ".join(["%s"] * len(column_names))
+        sql = (
+            f"INSERT INTO {quote_identifier(context_information['table_name'])} "
+            f"({cols}) VALUES ({placeholders})"
+        )
+
+        cur = connection_manager.execute_query_with_params(
+            connection_name=context_information["connection_name"],
+            query=sql,
+            params=params,
+            context_information=context_information,
+        )
+        cur.close()
+        return None
+    except Exception as e:
+        msg = f"INSERT failed: {e}"
+        QgsMessageLog.logMessage(msg, "Snowflake Plugin", Qgis.MessageLevel.Warning)
+        return msg
+
+
+def delete_table_features(
+    context_information: dict,
+    pk_values: typing.List,
+) -> typing.Optional[str]:
+    """Deletes rows from a Snowflake table by primary key values.
+
+    Returns None on success, or an error message string on failure.
+    """
+    try:
+        connection_manager: SFConnectionManager = SFConnectionManager.get_instance()
+        placeholders = ", ".join(["%s"] * len(pk_values))
+        sql = (
+            f"DELETE FROM {quote_identifier(context_information['table_name'])} "
+            f"WHERE {quote_identifier(context_information['primary_key_name'])} "
+            f"IN ({placeholders})"
+        )
+
+        cur = connection_manager.execute_query_with_params(
+            connection_name=context_information["connection_name"],
+            query=sql,
+            params=tuple(pk_values),
+            context_information=context_information,
+        )
+        cur.close()
+        return None
+    except Exception as e:
+        msg = f"DELETE failed: {e}"
+        QgsMessageLog.logMessage(msg, "Snowflake Plugin", Qgis.MessageLevel.Warning)
+        return msg
+
+
+def alter_table_add_columns(
+    context_information: dict,
+    columns: typing.List[typing.Tuple[str, str]],
+) -> typing.Optional[str]:
+    """Adds columns to a Snowflake table via ALTER TABLE.
+
+    Returns None on success, or an error message string on failure.
+    """
+    try:
+        connection_manager: SFConnectionManager = SFConnectionManager.get_instance()
+        table = quote_identifier(context_information["table_name"])
+        for col_name, col_type in columns:
+            sql = f"ALTER TABLE {table} ADD COLUMN {quote_identifier(col_name)} {col_type}"
+            cur = connection_manager.execute_query(
+                connection_name=context_information["connection_name"],
+                query=sql,
+                context_information=context_information,
+            )
+            cur.close()
+        return None
+    except Exception as e:
+        msg = f"ADD COLUMN failed: {e}"
+        QgsMessageLog.logMessage(msg, "Snowflake Plugin", Qgis.MessageLevel.Warning)
+        return msg
+
+
+def alter_table_drop_columns(
+    context_information: dict,
+    column_names: typing.List[str],
+) -> typing.Optional[str]:
+    """Drops columns from a Snowflake table via ALTER TABLE.
+
+    Returns None on success, or an error message string on failure.
+    """
+    try:
+        connection_manager: SFConnectionManager = SFConnectionManager.get_instance()
+        table = quote_identifier(context_information["table_name"])
+        for col_name in column_names:
+            sql = f"ALTER TABLE {table} DROP COLUMN {quote_identifier(col_name)}"
+            cur = connection_manager.execute_query(
+                connection_name=context_information["connection_name"],
+                query=sql,
+                context_information=context_information,
+            )
+            cur.close()
+        return None
+    except Exception as e:
+        msg = f"DROP COLUMN failed: {e}"
+        QgsMessageLog.logMessage(msg, "Snowflake Plugin", Qgis.MessageLevel.Warning)
+        return msg

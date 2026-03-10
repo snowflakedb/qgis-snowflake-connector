@@ -3,6 +3,7 @@ import typing
 import snowflake.connector
 
 from ..helpers.utils import get_auth_information
+from ..helpers.sql import quote_identifier
 
 
 class SFConnectionManager:
@@ -73,6 +74,13 @@ class SFConnectionManager:
                 conn_params["password"] = connection_params["password"]
             elif connection_params["connection_type"] == "Single sign-on (SSO)":
                 conn_params["authenticator"] = "externalbrowser"
+            elif connection_params["connection_type"] == "Key Pair":
+                key_file = connection_params.get("private_key_file", "")
+                passphrase = connection_params.get("key_passphrase", "")
+                if key_file:
+                    conn_params["private_key_file"] = key_file
+                    if passphrase:
+                        conn_params["private_key_file_pwd"] = passphrase
             if "role" in connection_params:
                 conn_params["role"] = connection_params["role"]
 
@@ -173,7 +181,7 @@ class SFConnectionManager:
                     "schema_name" in context_information
                     and context_information["schema_name"] is not None
                 ):
-                    cursor.execute(f'USE SCHEMA "{context_information["schema_name"]}"')
+                    cursor.execute(f'USE SCHEMA {quote_identifier(context_information["schema_name"])}')
             cursor.execute(query)
             return cursor
         except Exception as e:
@@ -218,7 +226,7 @@ class SFConnectionManager:
                     "schema_name" in context_information
                     and context_information["schema_name"] is not None
                 ):
-                    cursor.execute(f'USE SCHEMA "{context_information["schema_name"]}"')
+                    cursor.execute(f'USE SCHEMA {quote_identifier(context_information["schema_name"])}')
 
             cursor.execute(query, params=params)
 
