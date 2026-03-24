@@ -79,6 +79,7 @@ class H3IndexAlgorithm(QgsProcessingAlgorithm):
         ))
 
     def processAlgorithm(self, parameters, context, feedback):
+        from ..helpers.utils import get_auth_information
         from ..managers.sf_connection_manager import SFConnectionManager
         from ..helpers.sql import quote_identifier
 
@@ -89,8 +90,9 @@ class H3IndexAlgorithm(QgsProcessingAlgorithm):
         resolution = self.parameterAsInt(parameters, self.RESOLUTION, context)
         output = self.parameterAsString(parameters, self.OUTPUT_TABLE, context)
 
+        auth = get_auth_information(connection_name)
         mgr = SFConnectionManager.get_instance()
-        mgr.connect(connection_name)
+        mgr.connect(connection_name, auth)
 
         qs = quote_identifier(schema)
         qt = quote_identifier(table)

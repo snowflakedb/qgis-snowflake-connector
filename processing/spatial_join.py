@@ -93,6 +93,7 @@ class SpatialJoinAlgorithm(QgsProcessingAlgorithm):
         ))
 
     def processAlgorithm(self, parameters, context, feedback):
+        from ..helpers.utils import get_auth_information
         from ..managers.sf_connection_manager import SFConnectionManager
         from ..helpers.sql import quote_identifier
 
@@ -107,8 +108,9 @@ class SpatialJoinAlgorithm(QgsProcessingAlgorithm):
 
         predicate = PREDICATES[pred_idx]
 
+        auth = get_auth_information(connection_name)
         mgr = SFConnectionManager.get_instance()
-        mgr.connect(connection_name)
+        mgr.connect(connection_name, auth)
 
         qs = quote_identifier(schema)
         ql = quote_identifier(left)

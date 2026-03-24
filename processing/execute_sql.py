@@ -59,13 +59,15 @@ class ExecuteSQLAlgorithm(QgsProcessingAlgorithm):
         ))
 
     def processAlgorithm(self, parameters, context, feedback):
+        from ..helpers.utils import get_auth_information
         from ..managers.sf_connection_manager import SFConnectionManager
 
         connection_name = self.parameterAsString(parameters, self.CONNECTION, context)
         sql = self.parameterAsString(parameters, self.SQL, context)
 
+        auth = get_auth_information(connection_name)
         mgr = SFConnectionManager.get_instance()
-        mgr.connect(connection_name)
+        mgr.connect(connection_name, auth)
 
         feedback.pushInfo(f"Executing SQL on '{connection_name}'...")
         try:

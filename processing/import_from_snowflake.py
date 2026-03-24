@@ -99,7 +99,7 @@ class ImportFromSnowflakeAlgorithm(QgsProcessingAlgorithm):
 
         auth = get_auth_information(connection_name)
         mgr = SFConnectionManager.get_instance()
-        mgr.connect(connection_name)
+        mgr.connect(connection_name, auth)
 
         fq_table = f"{quote_identifier(schema)}.{quote_identifier(table)}"
 
