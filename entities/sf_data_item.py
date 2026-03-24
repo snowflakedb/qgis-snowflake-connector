@@ -253,7 +253,6 @@ class SFDataItem(QgsDataItem):
                 clean_name="",
                 geom_type="",
             )
-            group_item.setCapabilities(QgsDataItem.Capability.NoCapabilities)
             children.append(group_item)
             
             # Add individual non-geo tables as children of the group
