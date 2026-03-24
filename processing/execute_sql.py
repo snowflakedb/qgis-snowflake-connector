@@ -71,8 +71,8 @@ class ExecuteSQLAlgorithm(QgsProcessingAlgorithm):
 
         feedback.pushInfo(f"Executing SQL on '{connection_name}'...")
         try:
-            result = mgr.execute_query(sql)
-            row_count = len(result) if result else 0
+            cursor = mgr.execute_query(connection_name, sql)
+            row_count = cursor.rowcount if cursor else 0
             summary = f"Query executed successfully. Rows returned: {row_count}"
             feedback.pushInfo(summary)
         except Exception as e:

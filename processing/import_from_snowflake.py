@@ -109,7 +109,8 @@ class ImportFromSnowflakeAlgorithm(QgsProcessingAlgorithm):
             f"WHERE TABLE_SCHEMA ILIKE '{schema}' AND TABLE_NAME ILIKE '{table}' "
             f"ORDER BY ORDINAL_POSITION"
         )
-        col_rows = mgr.execute_query(col_query, {"schema_name": schema})
+        col_cursor = mgr.execute_query(connection_name, col_query, {"schema_name": schema})
+        col_rows = col_cursor.fetchall() if col_cursor else []
 
         fields = QgsFields()
         type_map = {
@@ -150,7 +151,8 @@ class ImportFromSnowflakeAlgorithm(QgsProcessingAlgorithm):
             sql += f" LIMIT {limit}"
 
         feedback.pushInfo(f"Executing: {sql}")
-        rows = mgr.execute_query(sql, {"schema_name": schema})
+        row_cursor = mgr.execute_query(connection_name, sql, {"schema_name": schema})
+        rows = row_cursor.fetchall() if row_cursor else []
 
         total = len(rows)
         for i, row in enumerate(rows):

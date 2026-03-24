@@ -109,12 +109,14 @@ class BufferTableAlgorithm(QgsProcessingAlgorithm):
         feedback.pushInfo(f"Running buffer: {sql}")
 
         try:
-            mgr.execute_query(sql, {"schema_name": schema})
-            count_result = mgr.execute_query(
+            mgr.execute_query(connection_name, sql, {"schema_name": schema})
+            count_cursor = mgr.execute_query(
+                connection_name,
                 f"SELECT COUNT(*) FROM {qs}.{qo}",
                 {"schema_name": schema},
             )
-            row_count = count_result[0][0] if count_result else 0
+            count_result = count_cursor.fetchone() if count_cursor else None
+            row_count = count_result[0] if count_result else 0
             summary = f"Buffer complete. Output table {output} has {row_count} rows."
             feedback.pushInfo(summary)
         except Exception as e:
