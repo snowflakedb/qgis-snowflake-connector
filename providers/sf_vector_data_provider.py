@@ -24,6 +24,7 @@ from ..helpers.data_base import (
     alter_table_drop_columns,
     check_from_clause_exceeds_size,
     delete_table_features,
+    get_next_primary_key_value,
     insert_table_feature,
     limit_size_for_type,
     update_table_attributes,
@@ -298,14 +299,29 @@ class SFVectorDataProvider(QgsVectorDataProvider):
                                 data[0],
                                 SNOWFLAKE_METADATA_TYPE_CODE_DICT.get(
                                     data[1],
-                                    SNOWFLAKE_METADATA_TYPE_CODE_DICT[2][
-                                        "qvariant_type"
-                                    ],
+                                    SNOWFLAKE_METADATA_TYPE_CODE_DICT[2],
                                 ).get("qvariant_type"),
                             )
                             self._fields.append(qgs_field)
 
         return self._fields
+
+    def defaultValue(self, fieldIndex, context=None):
+        """Auto-generate the next sequential value for numeric primary key columns."""
+        fields = self.fields()
+        if fieldIndex < 0 or fieldIndex >= fields.count():
+            return QVariant()
+        field = fields.field(fieldIndex)
+        if field.name() != self._primary_key:
+            return QVariant()
+        if field.type() not in (QMetaType.Type.Int, QMetaType.Type.Double, QMetaType.Type.LongLong):
+            return QVariant()
+        next_val = get_next_primary_key_value(
+            self._context_information, self._table_name, self._primary_key,
+        )
+        if next_val is not None:
+            return next_val
+        return QVariant()
 
     def dataSourceUri(self, expandAuthConfig=False):
         """Returns the data source specification: database path and
@@ -439,7 +455,6 @@ class SFVectorDataProvider(QgsVectorDataProvider):
         self._features_loaded = False
         self._feature_count = None
         self._extent = None
-        self._fields = None
         self.connect_database()
 
     # -- QGIS QMetaType -> Snowflake DDL type mapping for addAttributes ------
@@ -505,11 +520,8 @@ class SFVectorDataProvider(QgsVectorDataProvider):
                 if err:
                     self.pushError(err)
                     all_ok = False
-                else:
-                    updated = QgsFeature(feature)
-                    for field_idx, new_value in field_map.items():
-                        updated.setAttribute(field_idx, self._unwrap_value(new_value))
-                    self._features[fid] = updated
+            if all_ok:
+                self.reloadData()
             return all_ok
         except Exception as e:
             self.pushError(f"changeAttributeValues: {e}")

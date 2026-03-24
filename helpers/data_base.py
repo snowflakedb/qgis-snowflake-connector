@@ -1132,3 +1132,32 @@ def alter_table_drop_columns(
         msg = f"DROP COLUMN failed: {e}"
         QgsMessageLog.logMessage(msg, "Snowflake Plugin", Qgis.MessageLevel.Warning)
         return msg
+
+
+def get_next_primary_key_value(
+    context_information: dict,
+    table_name: str,
+    pk_column: str,
+) -> typing.Optional[int]:
+    """Returns MAX(pk_column) + 1 for auto-increment, or 1 if table is empty."""
+    try:
+        connection_manager: SFConnectionManager = SFConnectionManager.get_instance()
+        sql = (
+            f"SELECT COALESCE(MAX({quote_identifier(pk_column)}), 0) + 1 "
+            f"FROM {quote_identifier(table_name)}"
+        )
+        cur = connection_manager.execute_query(
+            connection_name=context_information["connection_name"],
+            query=sql,
+            context_information=context_information,
+        )
+        row = cur.fetchone()
+        cur.close()
+        return int(row[0]) if row else 1
+    except Exception as e:
+        QgsMessageLog.logMessage(
+            f"get_next_primary_key_value failed: {e}",
+            "Snowflake Plugin",
+            Qgis.MessageLevel.Warning,
+        )
+        return None

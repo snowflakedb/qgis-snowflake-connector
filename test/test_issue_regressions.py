@@ -205,8 +205,8 @@ class TestSQLSafety(unittest.TestCase):
 class TestProviderLifecycle(unittest.TestCase):
     """Tests for Track 3: provider cache correctness and geometry handling."""
 
-    def test_reload_data_resets_all_caches(self):
-        """reloadData() must clear features list, loaded flag, count, extent, and fields."""
+    def test_reload_data_resets_feature_caches(self):
+        """reloadData() must clear features, count, extent but preserve _fields."""
         content = (ROOT / "providers" / "sf_vector_data_provider.py").read_text(
             encoding="utf-8"
         )
@@ -217,7 +217,8 @@ class TestProviderLifecycle(unittest.TestCase):
         self.assertIn("self._features_loaded = False", body)
         self.assertIn("self._feature_count = None", body)
         self.assertIn("self._extent = None", body)
-        self.assertIn("self._fields = None", body)
+        self.assertNotIn("self._fields = None", body,
+                         "reloadData must NOT reset _fields to preserve column order")
         self.assertIn("self.connect_database()", body)
 
     def test_fields_query_filters_by_schema(self):
@@ -735,9 +736,9 @@ class TestEditingOperations(unittest.TestCase):
                           f"{func} must log errors")
 
     def test_editing_methods_call_reload_or_update_cache(self):
-        """Editing methods must either reload or update the in-memory cache."""
+        """Editing methods must call reloadData() to refresh the cache."""
         content = self._get_provider_content()
-        for method in ["addFeatures", "deleteFeatures"]:
+        for method in ["addFeatures", "deleteFeatures", "changeAttributeValues"]:
             idx = content.index(f"def {method}(self")
             next_def = content.index("\n    def ", idx + 1)
             body = content[idx:next_def]
@@ -748,8 +749,6 @@ class TestEditingOperations(unittest.TestCase):
         body = content[idx:next_def]
         self.assertIn("update_table_attributes", body,
                       "changeAttributeValues must persist to Snowflake")
-        self.assertIn("QgsFeature(feature)", body,
-                      "changeAttributeValues must clone features for thread safety")
 
     def test_editing_methods_propagate_errors_via_push_error(self):
         """All editing methods must call pushError() to surface Snowflake errors."""
@@ -763,6 +762,91 @@ class TestEditingOperations(unittest.TestCase):
             body = content[idx:next_def] if next_def != -1 else content[idx:]
             self.assertIn("self.pushError(", body,
                           f"{method} must call pushError() to propagate Snowflake errors")
+
+
+    def test_reload_data_preserves_fields(self):
+        """reloadData() must NOT reset _fields to avoid column order scrambling."""
+        content = self._get_provider_content()
+        idx = content.index("def reloadData(self)")
+        next_def = content.index("\n    def ", idx + 1)
+        body = content[idx:next_def]
+        self.assertNotIn("self._fields = None", body,
+                         "reloadData() must not reset _fields")
+
+    def test_default_value_implemented_for_primary_key(self):
+        """Provider must implement defaultValue() for auto-increment PK."""
+        content = self._get_provider_content()
+        self.assertIn("def defaultValue(self", content)
+        idx = content.index("def defaultValue(self")
+        next_def = content.index("\n    def ", idx + 1)
+        body = content[idx:next_def]
+        self.assertIn("_primary_key", body,
+                      "defaultValue must check primary key column")
+        self.assertIn("get_next_primary_key_value", body,
+                      "defaultValue must query next PK value from Snowflake")
+
+    def test_get_next_primary_key_value_helper_exists(self):
+        """data_base.py must have get_next_primary_key_value helper."""
+        content = self._get_database_content()
+        self.assertIn("def get_next_primary_key_value(", content)
+        idx = content.index("def get_next_primary_key_value(")
+        next_def = content.find("\ndef ", idx + 1)
+        body = content[idx:next_def] if next_def != -1 else content[idx:]
+        self.assertIn("MAX(", body)
+        self.assertIn("COALESCE", body)
+
+
+class TestGitHubIssuesFixes(unittest.TestCase):
+    """Tests for remaining GitHub issues fixes."""
+
+    def test_get_python_executable_path_never_returns_qgis(self):
+        """get_python_executable_path must validate and never return QGIS app."""
+        content = (ROOT / "helpers" / "utils.py").read_text(encoding="utf-8")
+        # Safety helpers must exist
+        self.assertIn("def _looks_like_python(", content)
+        self.assertIn("def _safe_pip_call(", content)
+        self.assertIn("def _in_process_pip(", content)
+        # get_python_executable_path must use the guard and raise on failure
+        if "def get_python_executable_path() -> str:" in content:
+            idx = content.index("def get_python_executable_path() -> str:")
+        else:
+            idx = content.index("def get_python_executable_path():")
+        next_def = content.find("\ndef ", idx + 1)
+        body = content[idx:next_def] if next_def != -1 else content[idx:]
+        self.assertIn("_looks_like_python", body)
+        self.assertIn("RuntimeError", body)
+        self.assertIn("sysconfig", body)
+        # check_install_package must have both strategies
+        ci_idx = content.index("def check_install_package(")
+        ci_end = content.find("\ndef ", ci_idx + 1)
+        ci_body = content[ci_idx:ci_end] if ci_end != -1 else content[ci_idx:]
+        self.assertIn("_safe_pip_call", ci_body)
+        self.assertIn("_in_process_pip", ci_body)
+
+    def test_sql_branch_qgsfield_type_default_fixed(self):
+        """SQL-query branch QgsField construction should use correct default."""
+        content = (ROOT / "providers" / "sf_vector_data_provider.py").read_text(encoding="utf-8")
+        # The buggy pattern was: SNOWFLAKE_METADATA_TYPE_CODE_DICT[2]["qvariant_type"] as default
+        # Fixed pattern: SNOWFLAKE_METADATA_TYPE_CODE_DICT[2] as default (the full dict)
+        # Check that the fixed pattern exists
+        self.assertIn("SNOWFLAKE_METADATA_TYPE_CODE_DICT.get", content)
+        # Ensure we're not using the buggy nested default
+        buggy_pattern = 'SNOWFLAKE_METADATA_TYPE_CODE_DICT[2]["qvariant_type"]'
+        self.assertNotIn(buggy_pattern, content,
+                         "SQL branch should not use buggy nested default for unknown type codes")
+
+    def test_non_geo_tables_support_added(self):
+        """Browser should support showing non-geometry tables."""
+        content = (ROOT / "entities" / "sf_data_item.py").read_text(encoding="utf-8")
+        self.assertIn("get_table_iterator", content)
+        self.assertIn("table_no_geom", content)
+        self.assertIn("Tables (no geometry)", content)
+
+    def test_empty_schema_feedback_added(self):
+        """Schema with no tables should show QgsErrorItem feedback."""
+        content = (ROOT / "entities" / "sf_data_item.py").read_text(encoding="utf-8")
+        self.assertIn("No accessible tables found", content)
+        self.assertIn("QgsErrorItem", content)
 
 
 class TestQualityBaseline(unittest.TestCase):

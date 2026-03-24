@@ -278,40 +278,146 @@ def check_package_installed(package_name) -> bool:
         return False
 
 
+def _looks_like_python(path) -> bool:
+    """Return True only if *path* exists and its basename contains 'python'."""
+    import os
+    if not path or not os.path.isfile(path):
+        return False
+    return "python" in os.path.basename(path).lower()
+
+
 def get_python_executable_path() -> str:
     """
-    Returns the path to the Python executable in a cross-platform manner.
+    Returns the path to a Python interpreter safe to invoke via subprocess.
+
+    On Mac QGIS, sys.executable points to the QGIS app itself.  Running
+    subprocess.call([QGIS_path, "-m", "pip", ...]) would launch a new QGIS
+    instance, which loads the plugin again, triggering an infinite loop.
+
+    This function therefore never returns a path that does not look like a
+    Python binary (basename must contain "python").  If no Python interpreter
+    can be found it raises RuntimeError so callers can fall back gracefully.
 
     Returns:
-        str: The path to the Python executable.
+        str: An absolute path whose basename contains "python".
+
+    Raises:
+        RuntimeError: When no suitable Python interpreter is found.
     """
     import sys
     import os
     import platform
+    import shutil
+    import sysconfig
 
+    # 1. Best case: sys.executable IS already a Python binary
+    if _looks_like_python(sys.executable):
+        return sys.executable
+
+    # 2. sysconfig.BINDIR — the canonical way to locate the running
+    #    interpreter's bin directory. Works even when sys.executable
+    #    points to a host app (QGIS) rather than Python itself.
+    candidates = []
+    bindir = sysconfig.get_config_var("BINDIR")
+    if bindir:
+        candidates += [
+            os.path.join(bindir, "python3"),
+            os.path.join(bindir, "python"),
+        ]
+
+    # 3. Platform-specific search
     if platform.system() == "Windows":
-        # On Windows, look for python.exe in the same directory as sys.executable
         python_dir = os.path.dirname(sys.executable)
-        python_path = os.path.join(python_dir, "python.exe")
-        if os.path.exists(python_path):
-            return python_path
-        # Fallback to python3.exe
-        python3_path = os.path.join(python_dir, "python3.exe")
-        if os.path.exists(python3_path):
-            return python3_path
+        candidates += [
+            os.path.join(python_dir, "python.exe"),
+            os.path.join(python_dir, "python3.exe"),
+        ]
     else:
-        # On Unix-like systems, look for python3 in bin directory
-        prefix_path = sys.exec_prefix
-        python3_path = os.path.join(prefix_path, "bin", "python3")
-        if os.path.exists(python3_path):
-            return python3_path
-        # Fallback to python in bin directory
-        python_path = os.path.join(prefix_path, "bin", "python")
-        if os.path.exists(python_path):
-            return python_path
+        for prefix in dict.fromkeys([sys.exec_prefix, sys.prefix,
+                                      sys.base_exec_prefix, sys.base_prefix]):
+            candidates += [
+                os.path.join(prefix, "bin", "python3"),
+                os.path.join(prefix, "bin", "python"),
+            ]
 
-    # Final fallback: use sys.executable itself
-    return sys.executable
+        # Mac QGIS: also check inside the .app bundle
+        if platform.system() == "Darwin" and sys.executable:
+            app_dir = os.path.dirname(sys.executable)
+            while app_dir and app_dir != "/":
+                if app_dir.endswith(".app"):
+                    break
+                app_dir = os.path.dirname(app_dir)
+            if app_dir.endswith(".app"):
+                candidates += [
+                    os.path.join(app_dir, "Contents", "MacOS", "bin", "python3"),
+                    os.path.join(
+                        app_dir, "Contents", "Frameworks",
+                        "Python.framework", "Versions", "Current", "bin", "python3",
+                    ),
+                    os.path.join(
+                        app_dir, "Contents", "Frameworks",
+                        "Python.framework", "Versions", "3.12", "bin", "python3",
+                    ),
+                    os.path.join(
+                        app_dir, "Contents", "Frameworks",
+                        "Python.framework", "Versions", "3.11", "bin", "python3",
+                    ),
+                    os.path.join(
+                        app_dir, "Contents", "Frameworks",
+                        "Python.framework", "Versions", "3.10", "bin", "python3",
+                    ),
+                ]
+
+        # Common system locations (Unix/Mac)
+        candidates += [
+            "/usr/local/bin/python3",
+            "/usr/bin/python3",
+            "/opt/homebrew/bin/python3",
+        ]
+
+    for path in candidates:
+        if _looks_like_python(path):
+            return path
+
+    # 4. shutil.which as a last resort
+    for name in ("python3", "python"):
+        found = shutil.which(name)
+        if found and _looks_like_python(found):
+            return found
+
+    # NEVER return a non-Python path — that causes infinite QGIS launches
+    raise RuntimeError(
+        f"Could not locate a Python interpreter. "
+        f"sys.executable={sys.executable!r}, "
+        f"sys.exec_prefix={sys.exec_prefix!r}, "
+        f"sysconfig BINDIR={sysconfig.get_config_var('BINDIR')!r}. "
+        f"Install dependencies manually:\n"
+        f"  python3 -m pip install snowflake-connector-python"
+    )
+
+
+def _safe_pip_call(args: list) -> None:
+    """Run a pip subprocess only if the executable looks like Python."""
+    import subprocess
+    if not args or not _looks_like_python(args[0]):
+        return
+    subprocess.call(args)
+
+
+def _in_process_pip(pip_args: list) -> int:
+    """Run pip in the current process (for embedded Python without a binary).
+
+    Some QGIS builds embed Python as a shared library with no standalone
+    ``python3`` executable.  In that case ``subprocess`` cannot be used.
+
+    Calls pip._internal.cli.main.main() directly — this returns an int
+    exit code WITHOUT calling sys.exit(), unlike runpy which executes
+    pip/__main__.py (which calls sys.exit and kills the host process).
+
+    Returns the pip exit code (0 = success).
+    """
+    from pip._internal.cli.main import main as _pip_main
+    return _pip_main(list(pip_args))
 
 
 def check_install_package(package_name) -> bool:
@@ -324,27 +430,30 @@ def check_install_package(package_name) -> bool:
     if check_package_installed(package_name):
         return True
 
-    import subprocess
-    python3_path = get_python_executable_path()
+    installed = False
+
+    # Strategy 1: subprocess with a standalone Python binary
     try:
-        subprocess.call([python3_path, "-m", "pip", "install", "pip", "--upgrade"])
-        subprocess.call(
-            [
-                python3_path,
-                "-m",
-                "pip",
-                "install",
-                package_name,
-            ]
-        )
-        subprocess.call(
-            [python3_path, "-m", "pip", "install", "pyopenssl", "--upgrade"]
-        )
-        subprocess.call(
-            [python3_path, "-m", "pip", "install", "cryptography", "--upgrade"]
-        )
-    except Exception:
+        python3_path = get_python_executable_path()
+        _safe_pip_call([python3_path, "-m", "pip", "install", "pip", "--upgrade"])
+        _safe_pip_call([python3_path, "-m", "pip", "install", package_name])
+        _safe_pip_call([python3_path, "-m", "pip", "install", "pyopenssl", "--upgrade"])
+        _safe_pip_call([python3_path, "-m", "pip", "install", "cryptography", "--upgrade"])
+        installed = True
+    except (RuntimeError, Exception):
         pass
+
+    if not installed:
+        # Strategy 2: no standalone python3 found (embedded Python, e.g. Mac QGIS).
+        # Invoke pip directly inside the current process via pip._internal
+        # (does NOT call sys.exit, safe for embedded interpreters).
+        try:
+            _in_process_pip(["install", "--upgrade", "pip"])
+            _in_process_pip(["install", package_name])
+            _in_process_pip(["install", "--upgrade", "pyopenssl"])
+            _in_process_pip(["install", "--upgrade", "cryptography"])
+        except Exception:
+            pass
 
     return check_package_installed(package_name)
 
@@ -363,23 +472,16 @@ def uninstall_snowflake_connector_package() -> None:
     'snowflake-connector-python[secure-local-storage]' package.
 
     It supports both Windows and non-Windows platforms.
-
-    Raises:
-        subprocess.CalledProcessError: If the uninstallation process fails.
     """
-    import subprocess
-
-    python3_path = get_python_executable_path()
-    subprocess.call(
-        [
-            python3_path,
-            "-m",
-            "pip",
-            "uninstall",
-            "snowflake-connector-python[secure-local-storage]",
-            "-y",
-        ]
-    )
+    args = ["uninstall", "snowflake-connector-python[secure-local-storage]", "-y"]
+    try:
+        python3_path = get_python_executable_path()
+        _safe_pip_call([python3_path, "-m", "pip"] + args)
+    except RuntimeError:
+        try:
+            _in_process_pip(args)
+        except Exception:
+            pass
 
 
 def get_auth_information(connection_name: str) -> dict:
