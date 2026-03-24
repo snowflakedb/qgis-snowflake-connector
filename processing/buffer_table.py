@@ -41,7 +41,9 @@ class BufferTableAlgorithm(QgsProcessingAlgorithm):
         return self.tr(
             "Creates a buffer around features in a Snowflake table using ST_BUFFER. "
             "The operation runs entirely on the Snowflake server. "
-            "Distance is in meters for GEOGRAPHY columns."
+            "Handles both GEOGRAPHY and GEOMETRY column types automatically. "
+            "For GEOGRAPHY columns the data is projected to Web Mercator (EPSG:3857) "
+            "so the distance parameter is always in meters."
         )
 
     def icon(self):
@@ -99,21 +101,44 @@ class BufferTableAlgorithm(QgsProcessingAlgorithm):
         qg = quote_identifier(geo_col)
         qo = quote_identifier(output)
 
+        ctx = {"schema_name": schema}
+
+        # Detect whether column is GEOGRAPHY or GEOMETRY
+        type_cursor = mgr.execute_query(
+            connection_name,
+            f"SELECT DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS "
+            f"WHERE TABLE_SCHEMA ILIKE '{schema}' AND TABLE_NAME ILIKE '{table}' "
+            f"AND COLUMN_NAME ILIKE '{geo_col}'",
+            ctx,
+        )
+        type_row = type_cursor.fetchone() if type_cursor else None
+        col_type = type_row[0] if type_row else "GEOGRAPHY"
+
+        if col_type == "GEOGRAPHY":
+            # Project to Web Mercator (meters), buffer, project back, cast to GEOGRAPHY
+            buffer_expr = (
+                f"TO_GEOGRAPHY(ST_TRANSFORM(ST_BUFFER("
+                f"ST_TRANSFORM(ST_SETSRID(TO_GEOMETRY({qg}), 4326), 3857)"
+                f", {distance}), 4326))"
+            )
+        else:
+            buffer_expr = f"ST_BUFFER({qg}, {distance})"
+
         sql = (
             f"CREATE OR REPLACE TABLE {qs}.{qo} AS "
             f"SELECT * EXCLUDE ({qg}), "
-            f"ST_BUFFER({qg}, {distance}) AS {qg} "
+            f"{buffer_expr} AS {qg} "
             f"FROM {qs}.{qt}"
         )
 
-        feedback.pushInfo(f"Running buffer: {sql}")
+        feedback.pushInfo(f"Running buffer ({col_type}): {sql}")
 
         try:
-            mgr.execute_query(connection_name, sql, {"schema_name": schema})
+            mgr.execute_query(connection_name, sql, ctx)
             count_cursor = mgr.execute_query(
                 connection_name,
                 f"SELECT COUNT(*) FROM {qs}.{qo}",
-                {"schema_name": schema},
+                ctx,
             )
             count_result = count_cursor.fetchone() if count_cursor else None
             row_count = count_result[0] if count_result else 0

@@ -50,7 +50,9 @@ class SpatialJoinAlgorithm(QgsProcessingAlgorithm):
         return self.tr(
             "Performs a server-side spatial join between two Snowflake tables "
             "using a chosen spatial predicate (ST_INTERSECTS, ST_CONTAINS, etc.). "
-            "Results are written to a new Snowflake table."
+            "Results are written to a new Snowflake table. "
+            "Columns from the right table that duplicate left table columns "
+            "are automatically prefixed with 'r_'."
         )
 
     def icon(self):
@@ -92,6 +94,17 @@ class SpatialJoinAlgorithm(QgsProcessingAlgorithm):
             self.OUTPUT, self.tr("Result summary"),
         ))
 
+    def _get_columns(self, mgr, connection_name, schema, table, ctx):
+        """Return list of column names for a table."""
+        cursor = mgr.execute_query(
+            connection_name,
+            f"SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+            f"WHERE TABLE_SCHEMA ILIKE '{schema}' AND TABLE_NAME ILIKE '{table}' "
+            f"ORDER BY ORDINAL_POSITION",
+            ctx,
+        )
+        return [r[0] for r in cursor.fetchall()] if cursor else []
+
     def processAlgorithm(self, parameters, context, feedback):
         from ..helpers.utils import get_auth_information
         from ..managers.sf_connection_manager import SFConnectionManager
@@ -119,9 +132,31 @@ class SpatialJoinAlgorithm(QgsProcessingAlgorithm):
         qlg = quote_identifier(left_geo)
         qrg = quote_identifier(right_geo)
 
+        ctx = {"schema_name": schema}
+
+        left_cols = {c.upper() for c in self._get_columns(mgr, connection_name, schema, left, ctx)}
+        right_cols = self._get_columns(mgr, connection_name, schema, right, ctx)
+
+        # Build right-side SELECT: skip right geo column, alias duplicates
+        right_select_parts = []
+        for col in right_cols:
+            if col.upper() == right_geo.upper():
+                continue
+            qc = quote_identifier(col)
+            if col.upper() in left_cols:
+                right_select_parts.append(f"b.{qc} AS r_{qc}")
+            else:
+                right_select_parts.append(f"b.{qc}")
+
+        right_select = ", ".join(right_select_parts)
+        if right_select:
+            select_clause = f"a.*, {right_select}"
+        else:
+            select_clause = "a.*"
+
         sql = (
             f"CREATE OR REPLACE TABLE {qs}.{qo} AS "
-            f"SELECT a.*, b.* EXCLUDE ({qrg}) "
+            f"SELECT {select_clause} "
             f"FROM {qs}.{ql} a "
             f"JOIN {qs}.{qr} b "
             f"ON {predicate}(a.{qlg}, b.{qrg})"
@@ -130,11 +165,11 @@ class SpatialJoinAlgorithm(QgsProcessingAlgorithm):
         feedback.pushInfo(f"Running spatial join: {sql}")
 
         try:
-            mgr.execute_query(connection_name, sql, {"schema_name": schema})
+            mgr.execute_query(connection_name, sql, ctx)
             count_cursor = mgr.execute_query(
                 connection_name,
                 f"SELECT COUNT(*) FROM {qs}.{qo}",
-                {"schema_name": schema},
+                ctx,
             )
             count_result = count_cursor.fetchone() if count_cursor else None
             row_count = count_result[0] if count_result else 0
