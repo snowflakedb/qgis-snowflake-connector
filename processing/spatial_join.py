@@ -9,6 +9,7 @@ from qgis.core import (
     QgsProcessingOutputString,
     Qgis,
 )
+from qgis.PyQt.QtCore import QCoreApplication
 from qgis.PyQt.QtGui import QIcon
 
 _IMAGES_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "ui", "images")
@@ -54,6 +55,9 @@ class SpatialJoinAlgorithm(QgsProcessingAlgorithm):
 
     def icon(self):
         return QIcon(os.path.join(_IMAGES_DIR, "qgis_logo.svg"))
+
+    def tr(self, string):
+        return QCoreApplication.translate("Processing", string)
 
     def createInstance(self):
         return SpatialJoinAlgorithm()
