@@ -4,6 +4,7 @@ Usage: type 'sf ' followed by a table name fragment (e.g. 'sf customers').
 """
 
 from qgis.core import (
+    QgsApplication,
     QgsLocatorFilter,
     QgsLocatorResult,
     Qgis,
@@ -37,6 +38,9 @@ class SFLocatorFilter(QgsLocatorFilter):
 
         try:
             from .helpers.utils import get_connection_child_groups, get_auth_information
+            from .helpers.sql import quote_literal
+            from .managers.sf_connection_manager import SFConnectionManager
+
             connections = get_connection_child_groups()
 
             for conn_name in connections:
@@ -45,20 +49,22 @@ class SFLocatorFilter(QgsLocatorFilter):
 
                 try:
                     auth = get_auth_information(conn_name)
-                    from .managers.sf_connection_manager import SFConnectionManager
                     mgr = SFConnectionManager.get_instance()
-                    mgr.connect(conn_name)
+                    if mgr.get_connection(conn_name) is None:
+                        mgr.connect(conn_name, auth)
 
                     sql = (
                         f"SELECT TABLE_SCHEMA, TABLE_NAME "
                         f"FROM INFORMATION_SCHEMA.TABLES "
-                        f"WHERE TABLE_NAME ILIKE '%{string}%' "
+                        f"WHERE TABLE_NAME ILIKE {quote_literal(f'%{string}%')} "
                         f"AND TABLE_SCHEMA != 'INFORMATION_SCHEMA' "
                         f"ORDER BY TABLE_NAME LIMIT 20"
                     )
-                    rows = mgr.execute_query(sql)
+                    cursor = mgr.execute_query(conn_name, sql)
+                    rows = cursor.fetchall() if cursor else []
+                    cursor.close() if cursor else None
 
-                    for schema_name, table_name in (rows or []):
+                    for schema_name, table_name in rows:
                         if feedback.isCanceled():
                             return
 
@@ -73,7 +79,12 @@ class SFLocatorFilter(QgsLocatorFilter):
                         }
                         self.resultFetched.emit(result)
 
-                except Exception:
+                except Exception as inner:
+                    QgsMessageLog.logMessage(
+                        f"Locator search on '{conn_name}' failed: {inner}",
+                        "Snowflake Plugin",
+                        Qgis.MessageLevel.Warning,
+                    )
                     continue
 
         except Exception as e:
@@ -94,20 +105,54 @@ class SFLocatorFilter(QgsLocatorFilter):
             table = data["table"]
 
             from .helpers.utils import get_auth_information
-            from .helpers.data_base import get_geo_columns
+            from .helpers.sql import quote_literal
+            from .managers.sf_connection_manager import SFConnectionManager
+            from .tasks.sf_convert_column_to_layer_task import SFConvertColumnToLayerTask
 
             auth = get_auth_information(conn_name)
+            mgr = SFConnectionManager.get_instance()
+            if mgr.get_connection(conn_name) is None:
+                mgr.connect(conn_name, auth)
 
-            from qgis.core import QgsVectorLayer
-
-            uri = (
-                f"connection_name={conn_name} "
-                f"schema_name={schema} "
-                f"table_name={table}"
+            geo_query = (
+                f"SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+                f"WHERE TABLE_SCHEMA ILIKE {quote_literal(schema)} "
+                f"AND TABLE_NAME ILIKE {quote_literal(table)} "
+                f"AND DATA_TYPE IN ('GEOGRAPHY', 'GEOMETRY') "
+                f"ORDER BY ORDINAL_POSITION"
             )
+            cursor = mgr.execute_query(
+                conn_name, geo_query, {"schema_name": schema}
+            )
+            geo_rows = cursor.fetchall() if cursor else []
+            cursor.close() if cursor else None
+
+            if not geo_rows:
+                QgsMessageLog.logMessage(
+                    f"No GEOGRAPHY/GEOMETRY column found in {schema}.{table}",
+                    "Snowflake Plugin",
+                    Qgis.MessageLevel.Warning,
+                )
+                return
+
+            geo_column = geo_rows[0][0]
+
+            context_information = {
+                "connection_name": conn_name,
+                "database_name": auth.get("database", ""),
+                "schema_name": schema,
+                "table_name": table,
+                "geo_column": geo_column,
+                "primary_key": "",
+            }
+            task = SFConvertColumnToLayerTask(
+                context_information=context_information,
+                path=f"locator:{conn_name}/{schema}/{table}",
+            )
+            QgsApplication.taskManager().addTask(task)
 
             QgsMessageLog.logMessage(
-                f"Loading Snowflake table: {schema}.{table} from {conn_name}",
+                f"Loading Snowflake table: {schema}.{table}.{geo_column} from {conn_name}",
                 "Snowflake Plugin",
                 Qgis.MessageLevel.Info,
             )

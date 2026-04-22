@@ -6,6 +6,7 @@ controller for time-based animation.
 """
 
 from qgis.core import (
+    QgsProviderRegistry,
     QgsVectorLayerTemporalProperties,
     QgsMessageLog,
     Qgis,
@@ -36,8 +37,10 @@ def configure_temporal_for_layer(layer):
 
     timestamp_fields = []
     try:
-        import re
-        parts = dict(re.findall(r'(\w+)=(\S+)', uri))
+        metadata = QgsProviderRegistry.instance().providerMetadata("snowflakedb")
+        if metadata is None:
+            return
+        parts = metadata.decodeUri(uri)
         conn_name = parts.get("connection_name", "")
         schema = parts.get("schema_name", "PUBLIC")
         table = parts.get("table_name", "")
@@ -45,20 +48,27 @@ def configure_temporal_for_layer(layer):
         if not conn_name or not table:
             return
 
+        from .helpers.sql import quote_literal
+        from .helpers.utils import get_auth_information
         from .managers.sf_connection_manager import SFConnectionManager
-        mgr = SFConnectionManager.get_instance()
-        mgr.connect(conn_name)
 
+        mgr = SFConnectionManager.get_instance()
+        if mgr.get_connection(conn_name) is None:
+            mgr.connect(conn_name, get_auth_information(conn_name))
+
+        types_in = ", ".join(quote_literal(t) for t in TIMESTAMP_TYPES)
         sql = (
             f"SELECT COLUMN_NAME, DATA_TYPE "
             f"FROM INFORMATION_SCHEMA.COLUMNS "
-            f"WHERE TABLE_SCHEMA ILIKE '{schema}' "
-            f"AND TABLE_NAME ILIKE '{table}' "
-            f"AND DATA_TYPE IN ({','.join(repr(t) for t in TIMESTAMP_TYPES)}) "
+            f"WHERE TABLE_SCHEMA ILIKE {quote_literal(schema)} "
+            f"AND TABLE_NAME ILIKE {quote_literal(table)} "
+            f"AND DATA_TYPE IN ({types_in}) "
             f"ORDER BY ORDINAL_POSITION"
         )
-        rows = mgr.execute_query(sql, {"schema_name": schema})
-        timestamp_fields = [(r[0], r[1]) for r in (rows or [])]
+        cursor = mgr.execute_query(conn_name, sql, {"schema_name": schema})
+        rows = cursor.fetchall() if cursor else []
+        cursor.close() if cursor else None
+        timestamp_fields = [(r[0], r[1]) for r in rows]
 
     except Exception as e:
         QgsMessageLog.logMessage(

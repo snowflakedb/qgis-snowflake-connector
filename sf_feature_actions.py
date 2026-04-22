@@ -4,11 +4,7 @@ Registers context actions on Snowflake vector layers that appear in the
 identify results panel and attribute table context menu.
 """
 
-from qgis.core import (
-    QgsAction,
-    QgsMessageLog,
-    Qgis,
-)
+from qgis.core import QgsAction
 
 
 def register_actions_for_layer(layer):
@@ -46,15 +42,14 @@ def _has_action(manager, action_name):
 def _add_view_in_snowsight(manager, uri):
     """Open the table in the Snowflake web UI (Snowsight)."""
     code = r"""
-import re, webbrowser
+import webbrowser
+from qgis.core import QgsProviderRegistry
 
-uri = '[% @layer_id %]'
 layer = QgsProject.instance().mapLayer('[% @layer_id %]')
 if layer:
     dp_uri = layer.dataProvider().dataSourceUri()
-    parts = dict(re.findall(r'(\w+)=(\S+)', dp_uri))
-    account = ''
-    # Retrieve account from stored connection settings
+    metadata = QgsProviderRegistry.instance().providerMetadata('snowflakedb')
+    parts = metadata.decodeUri(dp_uri) if metadata else {}
     from qgis.PyQt.QtCore import QSettings
     conn_name = parts.get('connection_name', '')
     settings = QSettings(QSettings.Format.IniFormat, QSettings.Scope.UserScope, 'Snowflake', 'SF_QGIS_PLUGIN')
@@ -101,8 +96,9 @@ if layer:
             vals.append(str(v))
     val_str = ', '.join(vals)
     dp_uri = layer.dataProvider().dataSourceUri()
-    import re
-    parts = dict(re.findall(r'(\w+)=(\S+)', dp_uri))
+    from qgis.core import QgsProviderRegistry
+    metadata = QgsProviderRegistry.instance().providerMetadata('snowflakedb')
+    parts = metadata.decodeUri(dp_uri) if metadata else {}
     table = parts.get('table_name', 'TABLE')
     sql = f'INSERT INTO {table} ({cols}) VALUES ({val_str});'
     QApplication.clipboard().setText(sql)

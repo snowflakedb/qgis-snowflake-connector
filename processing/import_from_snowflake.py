@@ -7,19 +7,54 @@ from qgis.core import (
     QgsProcessingParameterString,
     QgsProcessingParameterNumber,
     QgsProcessingParameterFeatureSink,
-    QgsProcessingParameterEnum,
     QgsFields,
     QgsField,
     QgsFeature,
     QgsGeometry,
     QgsWkbTypes,
     QgsCoordinateReferenceSystem,
-    Qgis,
 )
-from qgis.PyQt.QtCore import QCoreApplication, QMetaType, QVariant
+from qgis.PyQt.QtCore import QCoreApplication, QMetaType
 from qgis.PyQt.QtGui import QIcon
 
 _IMAGES_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "ui", "images")
+
+
+_GEO_TYPE_TO_WKB = {
+    "Point": QgsWkbTypes.Point,
+    "MultiPoint": QgsWkbTypes.MultiPoint,
+    "LineString": QgsWkbTypes.LineString,
+    "MultiLineString": QgsWkbTypes.MultiLineString,
+    "Polygon": QgsWkbTypes.Polygon,
+    "MultiPolygon": QgsWkbTypes.MultiPolygon,
+    "GeometryCollection": QgsWkbTypes.GeometryCollection,
+}
+
+
+def _pick_wkb_type(geo_types):
+    """Choose a WKB type that can hold all detected source geometry types."""
+    if not geo_types:
+        return QgsWkbTypes.Unknown
+    unique = list(dict.fromkeys(geo_types))
+    if len(unique) == 1:
+        return _GEO_TYPE_TO_WKB.get(unique[0], QgsWkbTypes.Unknown)
+    categories = set()
+    for t in unique:
+        if "Point" in t:
+            categories.add("point")
+        elif "LineString" in t:
+            categories.add("line")
+        elif "Polygon" in t:
+            categories.add("polygon")
+        else:
+            categories.add("other")
+    if categories == {"point"}:
+        return QgsWkbTypes.MultiPoint
+    if categories == {"line"}:
+        return QgsWkbTypes.MultiLineString
+    if categories == {"polygon"}:
+        return QgsWkbTypes.MultiPolygon
+    return QgsWkbTypes.GeometryCollection
 
 
 class ImportFromSnowflakeAlgorithm(QgsProcessingAlgorithm):
@@ -86,9 +121,14 @@ class ImportFromSnowflakeAlgorithm(QgsProcessingAlgorithm):
         ))
 
     def processAlgorithm(self, parameters, context, feedback):
+        from ..helpers.data_base import (
+            get_geo_column_type,
+            get_srid_from_table_geo_column,
+            get_type_from_table_geo_column,
+        )
         from ..helpers.utils import get_auth_information
+        from ..helpers.sql import quote_identifier, quote_literal
         from ..managers.sf_connection_manager import SFConnectionManager
-        from ..helpers.sql import quote_identifier
 
         connection_name = self.parameterAsString(parameters, self.CONNECTION, context)
         schema = self.parameterAsString(parameters, self.SCHEMA, context)
@@ -99,18 +139,49 @@ class ImportFromSnowflakeAlgorithm(QgsProcessingAlgorithm):
 
         auth = get_auth_information(connection_name)
         mgr = SFConnectionManager.get_instance()
-        mgr.connect(connection_name, auth)
+        if mgr.get_connection(connection_name) is None:
+            mgr.connect(connection_name, auth)
+
+        ctx_info = {
+            "connection_name": connection_name,
+            "database_name": auth.get("database", ""),
+            "schema_name": schema,
+            "table_name": table,
+        }
+
+        geo_column_type = get_geo_column_type(geo_col, ctx_info) or "GEOGRAPHY"
+
+        if geo_column_type == "GEOMETRY":
+            try:
+                srid = get_srid_from_table_geo_column(geo_col, table, ctx_info) or 4326
+            except Exception:
+                srid = 4326
+        else:
+            srid = 4326
+
+        try:
+            geo_types = get_type_from_table_geo_column(geo_col, table, ctx_info)
+        except Exception:
+            geo_types = []
+        wkb_type = _pick_wkb_type(geo_types)
+        feedback.pushInfo(
+            f"Detected geo column type={geo_column_type}, srid={srid}, "
+            f"geometry types={geo_types or 'unknown'}"
+        )
 
         fq_table = f"{quote_identifier(schema)}.{quote_identifier(table)}"
 
         col_query = (
             f"SELECT COLUMN_NAME, DATA_TYPE "
             f"FROM INFORMATION_SCHEMA.COLUMNS "
-            f"WHERE TABLE_SCHEMA ILIKE '{schema}' AND TABLE_NAME ILIKE '{table}' "
+            f"WHERE TABLE_SCHEMA ILIKE {quote_literal(schema)} "
+            f"AND TABLE_NAME ILIKE {quote_literal(table)} "
             f"ORDER BY ORDINAL_POSITION"
         )
         col_cursor = mgr.execute_query(connection_name, col_query, {"schema_name": schema})
         col_rows = col_cursor.fetchall() if col_cursor else []
+        if col_cursor:
+            col_cursor.close()
 
         fields = QgsFields()
         type_map = {
@@ -134,17 +205,18 @@ class ImportFromSnowflakeAlgorithm(QgsProcessingAlgorithm):
             fields.append(QgsField(col_name, qt_type))
             col_names.append(col_name)
 
-        crs = QgsCoordinateReferenceSystem("EPSG:4326")
+        crs = QgsCoordinateReferenceSystem.fromEpsgId(int(srid))
         (sink, dest_id) = self.parameterAsSink(
             parameters, self.OUTPUT, context,
-            fields, QgsWkbTypes.Point, crs,
+            fields, wkb_type, crs,
         )
 
         select_cols = ", ".join(quote_identifier(c) for c in col_names)
-        sql = (
-            f"SELECT {select_cols}, ST_ASWKB({quote_identifier(geo_col)}) AS _wkb "
-            f"FROM {fq_table}"
-        )
+        geo_select = f"ST_ASWKB({quote_identifier(geo_col)}) AS _wkb"
+        if select_cols:
+            sql = f"SELECT {select_cols}, {geo_select} FROM {fq_table}"
+        else:
+            sql = f"SELECT {geo_select} FROM {fq_table}"
         if where:
             sql += f" WHERE {where}"
         if limit > 0:
@@ -153,6 +225,8 @@ class ImportFromSnowflakeAlgorithm(QgsProcessingAlgorithm):
         feedback.pushInfo(f"Executing: {sql}")
         row_cursor = mgr.execute_query(connection_name, sql, {"schema_name": schema})
         rows = row_cursor.fetchall() if row_cursor else []
+        if row_cursor:
+            row_cursor.close()
 
         total = len(rows)
         for i, row in enumerate(rows):

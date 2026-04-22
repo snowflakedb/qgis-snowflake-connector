@@ -6,7 +6,6 @@ from qgis.core import (
     QgsProcessingAlgorithm,
     QgsProcessingParameterString,
     QgsProcessingOutputString,
-    Qgis,
 )
 from qgis.PyQt.QtCore import QCoreApplication
 from qgis.PyQt.QtGui import QIcon
@@ -72,8 +71,14 @@ class ExecuteSQLAlgorithm(QgsProcessingAlgorithm):
         feedback.pushInfo(f"Executing SQL on '{connection_name}'...")
         try:
             cursor = mgr.execute_query(connection_name, sql)
-            row_count = cursor.rowcount if cursor else 0
-            summary = f"Query executed successfully. Rows returned: {row_count}"
+            is_select = sql.lstrip().upper().startswith(("SELECT", "WITH", "SHOW", "DESCRIBE", "DESC"))
+            if cursor is None:
+                summary = "Query executed successfully."
+            elif is_select:
+                rows = cursor.fetchall()
+                summary = f"Query executed successfully. Rows returned: {len(rows)}"
+            else:
+                summary = f"Query executed successfully. Rows affected: {cursor.rowcount}"
             feedback.pushInfo(summary)
         except Exception as e:
             summary = f"Error: {e}"

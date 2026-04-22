@@ -4,10 +4,11 @@ import os
 
 from qgis.core import (
     QgsProcessingAlgorithm,
+    QgsProcessingException,
+    QgsProcessingParameterBoolean,
     QgsProcessingParameterString,
     QgsProcessingParameterNumber,
     QgsProcessingOutputString,
-    Qgis,
 )
 from qgis.PyQt.QtCore import QCoreApplication
 from qgis.PyQt.QtGui import QIcon
@@ -23,6 +24,7 @@ class H3IndexAlgorithm(QgsProcessingAlgorithm):
     GEO_COLUMN = "GEO_COLUMN"
     RESOLUTION = "RESOLUTION"
     OUTPUT_TABLE = "OUTPUT_TABLE"
+    OVERWRITE = "OVERWRITE"
     OUTPUT = "OUTPUT"
 
     def name(self):
@@ -74,6 +76,11 @@ class H3IndexAlgorithm(QgsProcessingAlgorithm):
         self.addParameter(QgsProcessingParameterString(
             self.OUTPUT_TABLE, self.tr("Output table name"),
         ))
+        self.addParameter(QgsProcessingParameterBoolean(
+            self.OVERWRITE,
+            self.tr("Overwrite output table if it already exists"),
+            defaultValue=False,
+        ))
         self.addOutput(QgsProcessingOutputString(
             self.OUTPUT, self.tr("Result summary"),
         ))
@@ -81,7 +88,7 @@ class H3IndexAlgorithm(QgsProcessingAlgorithm):
     def processAlgorithm(self, parameters, context, feedback):
         from ..helpers.utils import get_auth_information
         from ..managers.sf_connection_manager import SFConnectionManager
-        from ..helpers.sql import quote_identifier
+        from ..helpers.sql import quote_identifier, quote_literal
 
         connection_name = self.parameterAsString(parameters, self.CONNECTION, context)
         schema = self.parameterAsString(parameters, self.SCHEMA, context)
@@ -89,6 +96,7 @@ class H3IndexAlgorithm(QgsProcessingAlgorithm):
         geo_col = self.parameterAsString(parameters, self.GEO_COLUMN, context)
         resolution = self.parameterAsInt(parameters, self.RESOLUTION, context)
         output = self.parameterAsString(parameters, self.OUTPUT_TABLE, context)
+        overwrite = self.parameterAsBoolean(parameters, self.OVERWRITE, context)
 
         auth = get_auth_information(connection_name)
         mgr = SFConnectionManager.get_instance()
@@ -99,8 +107,24 @@ class H3IndexAlgorithm(QgsProcessingAlgorithm):
         qg = quote_identifier(geo_col)
         qo = quote_identifier(output)
 
+        if not overwrite:
+            exists_cursor = mgr.execute_query(
+                connection_name,
+                f"SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES "
+                f"WHERE TABLE_SCHEMA ILIKE {quote_literal(schema)} "
+                f"AND TABLE_NAME ILIKE {quote_literal(output)}",
+                {"schema_name": schema},
+            )
+            exists_row = exists_cursor.fetchone() if exists_cursor else None
+            if exists_row and exists_row[0] > 0:
+                raise QgsProcessingException(
+                    f"Output table {schema}.{output} already exists. "
+                    "Enable 'Overwrite' to replace it."
+                )
+
+        create_verb = "CREATE OR REPLACE TABLE" if overwrite else "CREATE TABLE"
         sql = (
-            f"CREATE OR REPLACE TABLE {qs}.{qo} AS "
+            f"{create_verb} {qs}.{qo} AS "
             f"SELECT *, "
             f"H3_LATLNG_TO_CELL(ST_Y({qg}), ST_X({qg}), {resolution}) AS H3_INDEX, "
             f"H3_CELL_TO_BOUNDARY(H3_LATLNG_TO_CELL(ST_Y({qg}), ST_X({qg}), {resolution})) AS H3_BOUNDARY "

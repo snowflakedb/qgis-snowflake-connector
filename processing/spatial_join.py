@@ -4,10 +4,11 @@ import os
 
 from qgis.core import (
     QgsProcessingAlgorithm,
+    QgsProcessingException,
+    QgsProcessingParameterBoolean,
     QgsProcessingParameterString,
     QgsProcessingParameterEnum,
     QgsProcessingOutputString,
-    Qgis,
 )
 from qgis.PyQt.QtCore import QCoreApplication
 from qgis.PyQt.QtGui import QIcon
@@ -32,6 +33,7 @@ class SpatialJoinAlgorithm(QgsProcessingAlgorithm):
     RIGHT_GEO = "RIGHT_GEO"
     PREDICATE = "PREDICATE"
     OUTPUT_TABLE = "OUTPUT_TABLE"
+    OVERWRITE = "OVERWRITE"
     OUTPUT = "OUTPUT"
 
     def name(self):
@@ -90,16 +92,23 @@ class SpatialJoinAlgorithm(QgsProcessingAlgorithm):
         self.addParameter(QgsProcessingParameterString(
             self.OUTPUT_TABLE, self.tr("Output table name"),
         ))
+        self.addParameter(QgsProcessingParameterBoolean(
+            self.OVERWRITE,
+            self.tr("Overwrite output table if it already exists"),
+            defaultValue=False,
+        ))
         self.addOutput(QgsProcessingOutputString(
             self.OUTPUT, self.tr("Result summary"),
         ))
 
     def _get_columns(self, mgr, connection_name, schema, table, ctx):
         """Return list of column names for a table."""
+        from ..helpers.sql import quote_literal
         cursor = mgr.execute_query(
             connection_name,
             f"SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
-            f"WHERE TABLE_SCHEMA ILIKE '{schema}' AND TABLE_NAME ILIKE '{table}' "
+            f"WHERE TABLE_SCHEMA ILIKE {quote_literal(schema)} "
+            f"AND TABLE_NAME ILIKE {quote_literal(table)} "
             f"ORDER BY ORDINAL_POSITION",
             ctx,
         )
@@ -108,7 +117,7 @@ class SpatialJoinAlgorithm(QgsProcessingAlgorithm):
     def processAlgorithm(self, parameters, context, feedback):
         from ..helpers.utils import get_auth_information
         from ..managers.sf_connection_manager import SFConnectionManager
-        from ..helpers.sql import quote_identifier
+        from ..helpers.sql import quote_identifier, quote_literal
 
         connection_name = self.parameterAsString(parameters, self.CONNECTION, context)
         schema = self.parameterAsString(parameters, self.SCHEMA, context)
@@ -118,6 +127,7 @@ class SpatialJoinAlgorithm(QgsProcessingAlgorithm):
         right_geo = self.parameterAsString(parameters, self.RIGHT_GEO, context)
         pred_idx = self.parameterAsEnum(parameters, self.PREDICATE, context)
         output = self.parameterAsString(parameters, self.OUTPUT_TABLE, context)
+        overwrite = self.parameterAsBoolean(parameters, self.OVERWRITE, context)
 
         predicate = PREDICATES[pred_idx]
 
@@ -133,6 +143,21 @@ class SpatialJoinAlgorithm(QgsProcessingAlgorithm):
         qrg = quote_identifier(right_geo)
 
         ctx = {"schema_name": schema}
+
+        if not overwrite:
+            exists_cursor = mgr.execute_query(
+                connection_name,
+                f"SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES "
+                f"WHERE TABLE_SCHEMA ILIKE {quote_literal(schema)} "
+                f"AND TABLE_NAME ILIKE {quote_literal(output)}",
+                ctx,
+            )
+            exists_row = exists_cursor.fetchone() if exists_cursor else None
+            if exists_row and exists_row[0] > 0:
+                raise QgsProcessingException(
+                    f"Output table {schema}.{output} already exists. "
+                    "Enable 'Overwrite' to replace it."
+                )
 
         left_cols = {c.upper() for c in self._get_columns(mgr, connection_name, schema, left, ctx)}
         right_cols = self._get_columns(mgr, connection_name, schema, right, ctx)
@@ -154,8 +179,9 @@ class SpatialJoinAlgorithm(QgsProcessingAlgorithm):
         else:
             select_clause = "a.*"
 
+        create_verb = "CREATE OR REPLACE TABLE" if overwrite else "CREATE TABLE"
         sql = (
-            f"CREATE OR REPLACE TABLE {qs}.{qo} AS "
+            f"{create_verb} {qs}.{qo} AS "
             f"SELECT {select_clause} "
             f"FROM {qs}.{ql} a "
             f"JOIN {qs}.{qr} b "
