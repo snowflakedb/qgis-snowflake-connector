@@ -384,6 +384,7 @@ def decodeUri(uri: str) -> Dict[str, str]:
         "geometry_type",
         "geo_column_type",
         "primary_key",
+        "load_all_rows",
     ]
     matches = re.findall(
         f"({'|'.join(supported_keys)})=(.*?) *?(?={'|'.join(supported_keys)}=|$)",

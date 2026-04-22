@@ -8,7 +8,8 @@ from ..helpers.data_base import (
     get_table_iterator,
 )
 from ..helpers.messages import (
-    get_proceed_cancel_message_box,
+    LargeDatasetChoice,
+    get_large_dataset_choice,
 )
 from ..helpers.utils import (
     decodeUri,
@@ -506,18 +507,22 @@ ORDER BY {column_name}"""
                     context_information=context_information,
                 )
 
+                load_all_rows = False
                 if table_exceeds_size:
-                    response = get_proceed_cancel_message_box(
+                    choice = get_large_dataset_choice(
                         "SFConvertColumnToLayerTask Dataset is too large",
                         (
                             "The dataset is too large. Please consider using "
-                            '"Execute SQL" to limit the result set. If you click '
-                            f'"Proceed", only a random sample of {limit_size // 1000} thousand rows '
-                            "will be loaded."
+                            '"Execute SQL" to limit the result set.\n\n'
+                            f'"Load sample" will load a random sample of {limit_size // 1000} '
+                            "thousand rows.\n"
+                            '"Load all rows" will load the full dataset '
+                            "(this may be slow and memory-intensive)."
                         ),
                     )
-                    if response == QMessageBox.StandardButton.Cancel:
+                    if choice == LargeDatasetChoice.CANCEL:
                         return False
+                    load_all_rows = choice == LargeDatasetChoice.LOAD_ALL
 
                 context_information["primary_key"] = prompt_and_get_primary_key(
                     context_information=context_information, data_type=self.geom_type
@@ -527,6 +532,7 @@ ORDER BY {column_name}"""
                 snowflake_covert_column_to_layer_task = SFConvertColumnToLayerTask(
                     context_information=context_information,
                     path=self.path(),
+                    load_all_rows=load_all_rows,
                 )
                 snowflake_covert_column_to_layer_task.on_handle_error.connect(
                     slot=on_handle_error

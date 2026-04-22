@@ -793,6 +793,34 @@ class TestEditingOperations(unittest.TestCase):
         self.assertIn("MAX(", body)
         self.assertIn("COALESCE", body)
 
+    def test_reload_data_emits_data_changed(self):
+        """reloadData() must emit dataChanged so edits surface without reopening."""
+        content = self._get_provider_content()
+        idx = content.index("def reloadData(self)")
+        next_def = content.index("\n    def ", idx + 1)
+        body = content[idx:next_def]
+        self.assertIn("self.dataChanged.emit(", body,
+                      "reloadData must emit dataChanged to refresh QGIS caches")
+
+    def test_add_features_sets_feature_id(self):
+        """addFeatures must stamp each inserted feature with its PK as fid."""
+        content = self._get_provider_content()
+        idx = content.index("def addFeatures(self")
+        next_def = content.index("\n    def ", idx + 1)
+        body = content[idx:next_def]
+        self.assertIn("feat.setId(", body,
+                      "addFeatures must assign fid from the PK value on success")
+
+    def test_default_value_clause_implemented_for_primary_key(self):
+        """Provider must implement defaultValueClause() to advertise the auto-ID default."""
+        content = self._get_provider_content()
+        self.assertIn("def defaultValueClause(self", content)
+        idx = content.index("def defaultValueClause(self")
+        next_def = content.index("\n    def ", idx + 1)
+        body = content[idx:next_def]
+        self.assertIn("_primary_key", body,
+                      "defaultValueClause must only advertise for the PK column")
+
 
 class TestGitHubIssuesFixes(unittest.TestCase):
     """Tests for remaining GitHub issues fixes."""
