@@ -2,6 +2,8 @@ from typing import Dict
 import typing
 import snowflake.connector
 
+from qgis.core import Qgis, QgsMessageLog
+
 from ..helpers.utils import get_auth_information
 from ..helpers.sql import quote_identifier
 
@@ -185,6 +187,12 @@ class SFConnectionManager:
             cursor.execute(query)
             return cursor
         except Exception as e:
+            QgsMessageLog.logMessage(
+                f"execute_query failed: {e}\n"
+                f"Query (first 2000 chars): {query[:2000]}",
+                "Snowflake Plugin",
+                Qgis.MessageLevel.Critical,
+            )
             raise e
 
     def execute_query_with_params(

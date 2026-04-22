@@ -24,6 +24,19 @@ from qgis.core import (
 from ..helpers.mappings import mapping_multi_single_to_geometry_type
 
 
+def _rect_is_valid_lonlat(rect) -> bool:
+    """Return True when every corner of ``rect`` falls inside the WGS84
+    lon/lat range, so it can be safely wrapped in ``ST_GEOGRAPHYFROMWKT``
+    without Snowflake rejecting it as an invalid Lng/Lat pair.
+    """
+    return (
+        -180.0 <= rect.xMinimum() <= 180.0
+        and -180.0 <= rect.xMaximum() <= 180.0
+        and -90.0 <= rect.yMinimum() <= 90.0
+        and -90.0 <= rect.yMaximum() <= 90.0
+    )
+
+
 class SFFeatureIterator(QgsAbstractFeatureIterator):
     def __init__(
         self,
@@ -184,15 +197,37 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                         f"ST_GEOMETRYFROMWKT('{filter_rect.asWktPolygon()}'))"
                     )
                 elif self._provider._geo_column_type == "GEOGRAPHY":
-                    filter_geom_clause = (
-                        f'ST_INTERSECTS({quoted_geom}, '
-                        f"ST_GEOGRAPHYFROMWKT('{filter_rect.asWktPolygon()}'))"
-                    )
+                    # ST_GEOGRAPHYFROMWKT requires valid WGS84 lon/lat. If the
+                    # rect from QGIS is outside that range (e.g. the transform
+                    # from the canvas CRS silently failed), skip the pushdown
+                    # rather than erroring on every fetch.
+                    if _rect_is_valid_lonlat(filter_rect):
+                        filter_geom_clause = (
+                            f'ST_INTERSECTS({quoted_geom}, '
+                            f"ST_GEOGRAPHYFROMWKT('{filter_rect.asWktPolygon()}'))"
+                        )
+                    else:
+                        QgsMessageLog.logMessage(
+                            f"Skipping spatial filter pushdown: rect "
+                            f"{filter_rect.toString()} is outside WGS84 lon/lat "
+                            f"range (GEOGRAPHY column {quoted_geom}).",
+                            "Snowflake Plugin",
+                            Qgis.MessageLevel.Warning,
+                        )
                 elif self._provider._geo_column_type in ["NUMBER", "TEXT"]:
-                    filter_geom_clause = (
-                        f'ST_INTERSECTS(H3_CELL_TO_BOUNDARY({quoted_geom}), '
-                        f"ST_GEOGRAPHYFROMWKT('{filter_rect.asWktPolygon()}'))"
-                    )
+                    if _rect_is_valid_lonlat(filter_rect):
+                        filter_geom_clause = (
+                            f'ST_INTERSECTS(H3_CELL_TO_BOUNDARY({quoted_geom}), '
+                            f"ST_GEOGRAPHYFROMWKT('{filter_rect.asWktPolygon()}'))"
+                        )
+                    else:
+                        QgsMessageLog.logMessage(
+                            f"Skipping spatial filter pushdown: rect "
+                            f"{filter_rect.toString()} is outside WGS84 lon/lat "
+                            f"range (H3 column {quoted_geom}).",
+                            "Snowflake Plugin",
+                            Qgis.MessageLevel.Warning,
+                        )
                 if filter_geom_clause != "":
                     filter_geom_clause = f"and {filter_geom_clause}"
 

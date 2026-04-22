@@ -54,6 +54,7 @@ from qgis.PyQt.QtCore import QCoreApplication, QByteArray, QVariant, QMetaType
 from qgis.core import (
     QgsProcessing,
     QgsProcessingAlgorithm,
+    QgsProcessingException,
     QgsProcessingParameterFeatureSource,
     QgsProcessingParameterString,
     QgsProcessingContext,
@@ -81,6 +82,35 @@ from .helpers.sql import (
     quote_literal,
     qualified_table_name,
 )
+from .helpers.wrapper import parse_uri
+
+
+SAME_TABLE_EXPORT_MESSAGE = (
+    "Destination is the same Snowflake table as the input layer. "
+    "Exporting would duplicate every row. To push edits, toggle Save Layer "
+    "Edits on the Snowflake layer. To make a copy, choose a different "
+    "database/schema/table."
+)
+
+
+def _sql_literal_from_value(feat_val):
+    """Serialize a feature attribute as a safe Snowflake SQL literal.
+
+    Unwraps QVariant wrappers so non-null QVariants never fall through to
+    ``str(QVariant)`` which emits ``<PyQt5.QtCore.QVariant object at 0x...>``
+    and breaks SQL compilation with an "unexpected '<'" syntax error.
+    """
+    if isinstance(feat_val, QVariant):
+        if feat_val.isNull():
+            return "NULL"
+        feat_val = feat_val.value()
+    if feat_val is None:
+        return "NULL"
+    if isinstance(feat_val, bool):
+        return "TRUE" if feat_val else "FALSE"
+    if isinstance(feat_val, (int, float)):
+        return repr(feat_val)
+    return quote_literal(str(feat_val))
 
 
 class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
@@ -180,6 +210,16 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
                 self.parameterAsString(parameters, self.CONNECTION_DYN_CB, context)
             )
         )
+
+        if self._targets_same_snowflake_table(
+            parameters,
+            context,
+            selected_connection,
+            selected_database,
+            selected_schema,
+            selected_table,
+        ):
+            raise QgsProcessingException(SAME_TABLE_EXPORT_MESSAGE)
 
         auth_information = get_authentification_information(
             self.settings, selected_connection
@@ -352,7 +392,7 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
                         ]:
                             query += quote_literal(str(feat_val))
                         else:
-                            query += f"{feat_val}"
+                            query += _sql_literal_from_value(feat_val)
                     else:
                         if feat_val is None:
                             query += "NULL"
@@ -374,7 +414,7 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
                                 feat_val.toString("yyyy-MM-dd hh:mm:ss")
                             )
                         else:
-                            query += f"{feat_val}"
+                            query += _sql_literal_from_value(feat_val)
             query += ")"
 
             # Update the progress bar
@@ -461,6 +501,57 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
     def createInstance(self):
         return QGISSnowflakeConnectorAlgorithm()
 
+    def _targets_same_snowflake_table(
+        self,
+        parameters,
+        context,
+        selected_connection: str,
+        selected_database: str,
+        selected_schema: str,
+        selected_table: str,
+    ) -> bool:
+        """Return True when the chosen destination matches the input layer's
+        source Snowflake table. Running Export on the same table duplicates
+        every row, since the algorithm is INSERT-only.
+        """
+        try:
+            layer = self.parameterAsVectorLayer(parameters, self.INPUT, context)
+            if layer is None:
+                return False
+            provider = layer.dataProvider()
+            if provider is None or provider.name() != "snowflakedb":
+                return False
+            (
+                src_connection,
+                _sql_query,
+                src_schema,
+                src_table,
+                _srid,
+                _geom_column,
+                _geometry_type,
+                _geo_column_type,
+                _primary_key,
+                _load_all_rows,
+            ) = parse_uri(provider.dataSourceUri())
+        except Exception:
+            return False
+
+        src_auth = get_authentification_information(self.settings, src_connection)
+        src_database = src_auth.get("database", "") if src_auth else ""
+
+        dst_schema = selected_schema if selected_schema else "PUBLIC"
+        src_schema_norm = src_schema if src_schema else "PUBLIC"
+
+        def _eq(a, b):
+            return (a or "").strip().upper() == (b or "").strip().upper()
+
+        return (
+            _eq(src_connection, selected_connection)
+            and _eq(src_database, selected_database)
+            and _eq(src_schema_norm, dst_schema)
+            and _eq(src_table, selected_table)
+        )
+
     def checkParameterValues(
         self, parameters: typing.Dict[str, typing.Any], context: "QgsProcessingContext"
     ) -> typing.Tuple[bool, str]:
@@ -489,6 +580,16 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
 
             if selected_connection == "":
                 return False, "Please select a connection!"
+
+            if self._targets_same_snowflake_table(
+                parameters,
+                context,
+                selected_connection,
+                selected_database,
+                selected_schema,
+                selected_table,
+            ):
+                return False, SAME_TABLE_EXPORT_MESSAGE
 
             if not selected_table_is_empty:
                 # Check if the selected table exists

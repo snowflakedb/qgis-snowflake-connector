@@ -64,6 +64,25 @@ class TestIssueRegressions(unittest.TestCase):
         )
         self.assertIn("qgsField.setSubType(subType)", content)
 
+    def test_export_blocks_same_snowflake_table(self):
+        """Export must refuse when target table matches the input layer's
+        source Snowflake table, since it would duplicate every row."""
+        content = (ROOT / "qgis_snowflake_connector_algorithm.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("SAME_TABLE_EXPORT_MESSAGE", content)
+        self.assertIn("same Snowflake table", content)
+        self.assertIn("def _targets_same_snowflake_table(", content)
+        self.assertIn("parse_uri", content)
+        # checkParameterValues guard (returns False with the message)
+        self.assertIn(
+            "return False, SAME_TABLE_EXPORT_MESSAGE", content
+        )
+        # processAlgorithm guard (raises QgsProcessingException)
+        self.assertIn(
+            "raise QgsProcessingException(SAME_TABLE_EXPORT_MESSAGE)", content
+        )
+
 
 class TestSQLSafety(unittest.TestCase):
     """Tests for Track 1: centralized SQL quoting."""
@@ -223,6 +242,17 @@ class TestProviderLifecycle(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn("table_schema ILIKE", content)
+
+    def test_fields_query_filters_by_catalog_and_distinct(self):
+        """fields() INFORMATION_SCHEMA query must scope to TABLE_CATALOG and
+        use SELECT DISTINCT so same-named tables in other databases or schemas
+        cannot contribute duplicated column entries to the layer's field list.
+        """
+        content = (ROOT / "providers" / "sf_vector_data_provider.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("table_catalog ILIKE", content)
+        self.assertIn("SELECT DISTINCT column_name", content)
 
     def test_feature_iterator_logs_errors(self):
         """fetchFeature() must log attribute errors via QgsMessageLog, not print()."""
@@ -866,6 +896,145 @@ class TestGitHubIssuesFixes(unittest.TestCase):
         content = (ROOT / "entities" / "sf_data_item.py").read_text(encoding="utf-8")
         self.assertIn("No accessible tables found", content)
         self.assertIn("QgsErrorItem", content)
+
+
+class TestSpatialFilterPushdownGuard(unittest.TestCase):
+    """Regression: the GEOGRAPHY / H3 spatial-filter pushdown must be skipped
+    when the filter rect is outside the WGS84 lon/lat range, otherwise
+    Snowflake rejects the ST_GEOGRAPHYFROMWKT polygon with
+    ``GeoJSON::Polygon::Loop: Invalid Lng/Lat pair``. See issue exposed by
+    commit ac882d5 (spatial filter pushdown column-type fix).
+    """
+
+    def _iterator_content(self):
+        return (ROOT / "providers" / "sf_feature_iterator.py").read_text(
+            encoding="utf-8"
+        )
+
+    def test_helper_defined(self):
+        content = self._iterator_content()
+        self.assertIn("def _rect_is_valid_lonlat(", content)
+
+    def test_geography_branch_guarded(self):
+        """GEOGRAPHY branch must call _rect_is_valid_lonlat before emitting
+        ST_GEOGRAPHYFROMWKT."""
+        content = self._iterator_content()
+        idx = content.index('_geo_column_type == "GEOGRAPHY"')
+        next_branch = content.index(
+            '_geo_column_type in ["NUMBER", "TEXT"]', idx
+        )
+        branch_body = content[idx:next_branch]
+        self.assertIn("_rect_is_valid_lonlat(filter_rect)", branch_body)
+        self.assertIn("ST_GEOGRAPHYFROMWKT", branch_body)
+        self.assertIn("Skipping spatial filter pushdown", branch_body)
+
+    def test_h3_branch_guarded(self):
+        """H3 (NUMBER / TEXT) branch must also be guarded."""
+        content = self._iterator_content()
+        idx = content.index('_geo_column_type in ["NUMBER", "TEXT"]')
+        next_block = content.index(
+            'if filter_geom_clause != ""', idx
+        )
+        branch_body = content[idx:next_block]
+        self.assertIn("_rect_is_valid_lonlat(filter_rect)", branch_body)
+        self.assertIn("H3_CELL_TO_BOUNDARY", branch_body)
+
+    def test_geometry_branch_unchanged(self):
+        """GEOMETRY branch must not be guarded (ST_GEOMETRYFROMWKT accepts
+        any coordinate range)."""
+        content = self._iterator_content()
+        idx = content.index('_geo_column_type == "GEOMETRY"')
+        next_branch = content.index(
+            '_geo_column_type == "GEOGRAPHY"', idx
+        )
+        branch_body = content[idx:next_branch]
+        self.assertIn("ST_GEOMETRYFROMWKT", branch_body)
+        self.assertNotIn("_rect_is_valid_lonlat", branch_body)
+
+    def test_rect_is_valid_lonlat_rejects_out_of_range(self):
+        """Unit-test the helper directly against the exact rect from the
+        user-reported failure (coords like 2821.43, 861.237)."""
+        class _FakeRect:
+            def __init__(self, xmin, ymin, xmax, ymax):
+                self._xmin, self._ymin = xmin, ymin
+                self._xmax, self._ymax = xmax, ymax
+
+            def xMinimum(self): return self._xmin
+            def yMinimum(self): return self._ymin
+            def xMaximum(self): return self._xmax
+            def yMaximum(self): return self._ymax
+
+        import importlib.util
+        import sys
+        import types
+
+        qgis_core = types.ModuleType("qgis.core")
+        for name in [
+            "QgsAbstractFeatureIterator", "QgsCoordinateTransform",
+            "QgsCsException", "QgsFeature", "QgsFeatureRequest",
+            "QgsGeometry", "QgsMessageLog", "Qgis",
+        ]:
+            setattr(qgis_core, name, type(name, (), {}))
+        qgis_pkg = types.ModuleType("qgis")
+        qgis_pkg.core = qgis_core
+        qgis_pyqt = types.ModuleType("qgis.PyQt")
+        qgis_pyqt_qtcore = types.ModuleType("qgis.PyQt.QtCore")
+        for name in ("QDate", "QDateTime", "QMetaType", "QTime"):
+            setattr(qgis_pyqt_qtcore, name, type(name, (), {}))
+        qgis_pyqt.QtCore = qgis_pyqt_qtcore
+        sys.modules.setdefault("qgis", qgis_pkg)
+        sys.modules.setdefault("qgis.core", qgis_core)
+        sys.modules.setdefault("qgis.PyQt", qgis_pyqt)
+        sys.modules.setdefault("qgis.PyQt.QtCore", qgis_pyqt_qtcore)
+
+        plugin_pkg = types.ModuleType("qgis_snowflake_connector")
+        plugin_pkg.__path__ = [str(ROOT)]
+        helpers_pkg = types.ModuleType("qgis_snowflake_connector.helpers")
+        helpers_pkg.__path__ = [str(ROOT / "helpers")]
+        helpers_limits = types.ModuleType(
+            "qgis_snowflake_connector.helpers.limits"
+        )
+        helpers_limits.limit_size_for_type = lambda t: 0
+        helpers_sql = types.ModuleType(
+            "qgis_snowflake_connector.helpers.sql"
+        )
+        helpers_sql.quote_identifier = lambda n: n
+        helpers_mappings = types.ModuleType(
+            "qgis_snowflake_connector.helpers.mappings"
+        )
+        helpers_mappings.mapping_multi_single_to_geometry_type = {}
+        providers_pkg = types.ModuleType(
+            "qgis_snowflake_connector.providers"
+        )
+        providers_pkg.__path__ = [str(ROOT / "providers")]
+        sf_feature_source = types.ModuleType(
+            "qgis_snowflake_connector.providers.sf_feature_source"
+        )
+        sf_feature_source.SFFeatureSource = type("SFFeatureSource", (), {})
+        for mod in (
+            plugin_pkg, helpers_pkg, helpers_limits, helpers_sql,
+            helpers_mappings, providers_pkg, sf_feature_source,
+        ):
+            sys.modules.setdefault(mod.__name__, mod)
+
+        spec = importlib.util.spec_from_file_location(
+            "qgis_snowflake_connector.providers.sf_feature_iterator",
+            ROOT / "providers" / "sf_feature_iterator.py",
+        )
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+
+        rect_bad = _FakeRect(-5392.42, -2469.11, 2821.43, 861.237)
+        self.assertFalse(module._rect_is_valid_lonlat(rect_bad))
+        rect_good = _FakeRect(-10.0, -10.0, 10.0, 10.0)
+        self.assertTrue(module._rect_is_valid_lonlat(rect_good))
+        rect_world = _FakeRect(-180.0, -90.0, 180.0, 90.0)
+        self.assertTrue(module._rect_is_valid_lonlat(rect_world))
+        rect_over_lon = _FakeRect(-10.0, -10.0, 180.001, 10.0)
+        self.assertFalse(module._rect_is_valid_lonlat(rect_over_lon))
+        rect_over_lat = _FakeRect(-10.0, -90.001, 10.0, 10.0)
+        self.assertFalse(module._rect_is_valid_lonlat(rect_over_lat))
 
 
 class TestQualityBaseline(unittest.TestCase):

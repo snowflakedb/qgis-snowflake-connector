@@ -260,15 +260,28 @@ class SFVectorDataProvider(QgsVectorDataProvider):
             self._fields = QgsFields()
             if self._is_valid:
                 if not self._sql_query:
+                    # Filter by TABLE_CATALOG / TABLE_SCHEMA / TABLE_NAME so
+                    # same-named tables in other DBs or schemas cannot bleed
+                    # their columns into this layer's field list. DISTINCT is
+                    # a belt-and-braces guard against any residual duplicates.
                     schema_filter = ""
                     if self._schema_name:
                         schema_filter = (
                             f" AND table_schema ILIKE"
                             f" {quote_literal(self._schema_name)}"
                         )
+                    catalog_filter = ""
+                    database_name = self._context_information.get("database_name")
+                    if database_name:
+                        catalog_filter = (
+                            f" AND table_catalog ILIKE"
+                            f" {quote_literal(database_name)}"
+                        )
                     query = (
-                        "SELECT column_name, data_type FROM information_schema.columns "
+                        "SELECT DISTINCT column_name, data_type, ordinal_position"
+                        " FROM information_schema.columns "
                         f"WHERE table_name ILIKE {quote_literal(self._table_name)}"
+                        f"{catalog_filter}"
                         f"{schema_filter}"
                         " AND data_type NOT IN ('GEOMETRY', 'GEOGRAPHY')"
                         " ORDER BY ordinal_position"
@@ -282,7 +295,8 @@ class SFVectorDataProvider(QgsVectorDataProvider):
 
                     field_info = cur.fetchall()
                     cur.close()
-                    for field_name, field_type in field_info:
+                    for row in field_info:
+                        field_name, field_type = row[0], row[1]
                         qgs_field = QgsField(
                             field_name, mapping_snowflake_qgis_type[field_type]
                         )
