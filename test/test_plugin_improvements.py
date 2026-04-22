@@ -152,8 +152,6 @@ class TestExpressionFunctions(unittest.TestCase):
         for func_name in [
             "sf_h3_resolution",
             "sf_h3_is_valid",
-            "sf_h3_parent",
-            "sf_h3_grid_distance",
             "sf_h3_to_string",
         ]:
             self.assertIn(func_name, source, f"Missing function: {func_name}")
@@ -264,6 +262,138 @@ class TestSpatialFilterDialog(unittest.TestCase):
         path = os.path.join(_plugin_root, filename)
         with open(path) as f:
             return f.read()
+
+
+class TestDevCorrectnessFixes(unittest.TestCase):
+    """Regression tests for the dev-branch correctness fixes."""
+
+    def _read(self, filename):
+        path = os.path.join(_plugin_root, filename)
+        with open(path) as f:
+            return f.read()
+
+    def _find_calls(self, source, func_name):
+        """Yield the argument string of each call to `func_name(` in source."""
+        idx = 0
+        while True:
+            start = source.find(func_name + "(", idx)
+            if start == -1:
+                return
+            depth = 0
+            i = start + len(func_name)
+            arg_start = i + 1
+            while i < len(source):
+                ch = source[i]
+                if ch == "(":
+                    depth += 1
+                elif ch == ")":
+                    depth -= 1
+                    if depth == 0:
+                        yield source[arg_start:i]
+                        idx = i + 1
+                        break
+                i += 1
+            else:
+                return
+
+    def test_mgr_connect_calls_use_two_args(self):
+        for filename in ["sf_locator_filter.py", "sf_temporal_support.py"]:
+            source = self._read(filename)
+            for args in self._find_calls(source, "mgr.connect"):
+                self.assertIn(",", args,
+                              f"{filename}: mgr.connect must be called with 2 arguments; got ({args})")
+
+    def test_execute_query_first_arg_is_connection_name(self):
+        for filename in [
+            "sf_locator_filter.py",
+            "sf_temporal_support.py",
+            "processing/import_from_snowflake.py",
+        ]:
+            source = self._read(filename)
+            for args in self._find_calls(source, "mgr.execute_query"):
+                first = args.split(",", 1)[0].strip()
+                self.assertNotIn("SELECT", first.upper(),
+                                 f"{filename}: execute_query first arg must be connection_name, not SQL")
+
+    def test_locator_trigger_creates_layer_task(self):
+        source = self._read("sf_locator_filter.py")
+        self.assertIn("def triggerResult", source)
+        self.assertIn("SFConvertColumnToLayerTask", source,
+                      "triggerResult must instantiate SFConvertColumnToLayerTask to load the layer")
+        self.assertIn("addTask", source)
+
+    def test_locator_uses_fetchall(self):
+        source = self._read("sf_locator_filter.py")
+        self.assertIn("fetchall()", source)
+
+    def test_import_from_snowflake_no_hardcoded_point(self):
+        source = self._read("processing/import_from_snowflake.py")
+        for args in self._find_calls(source, "self.parameterAsSink"):
+            self.assertNotIn("QgsWkbTypes.Point", args,
+                             "parameterAsSink must receive a detected WKB type, not QgsWkbTypes.Point")
+        self.assertIn("get_srid_from_table_geo_column", source)
+        self.assertIn("get_type_from_table_geo_column", source)
+
+    def test_import_from_snowflake_crs_not_hardcoded(self):
+        source = self._read("processing/import_from_snowflake.py")
+        self.assertNotIn('QgsCoordinateReferenceSystem("EPSG:4326")', source)
+        self.assertIn("QgsCoordinateReferenceSystem.fromEpsgId", source)
+
+    def test_overwrite_parameter_on_all_create_or_replace(self):
+        for filename in [
+            "processing/buffer_table.py",
+            "processing/spatial_join.py",
+            "processing/h3_index.py",
+        ]:
+            source = self._read(filename)
+            self.assertIn("OVERWRITE", source, f"{filename} missing OVERWRITE parameter")
+            self.assertIn("QgsProcessingParameterBoolean", source,
+                          f"{filename} missing boolean parameter")
+            if "CREATE OR REPLACE TABLE" in source:
+                self.assertIn("if overwrite", source,
+                              f"{filename}: CREATE OR REPLACE must be gated by overwrite")
+
+    def test_h3_expression_functions_removed(self):
+        source = self._read("sf_expression_functions.py")
+        self.assertNotIn("def sf_h3_parent", source,
+                         "sf_h3_parent returns a literal string; remove it until properly implemented")
+        self.assertNotIn("def sf_h3_grid_distance", source,
+                         "sf_h3_grid_distance returns a literal string; remove it until properly implemented")
+
+    def test_execute_sql_uses_fetchall_for_select(self):
+        source = self._read("processing/execute_sql.py")
+        self.assertIn("fetchall()", source)
+        self.assertIn("is_select", source)
+
+    def test_uri_parsing_uses_decode_uri(self):
+        for filename in ["sf_feature_actions.py", "sf_temporal_support.py"]:
+            source = self._read(filename)
+            self.assertIn("decodeUri", source, f"{filename} must use QgsProviderRegistry.decodeUri")
+            self.assertNotIn(r"re.findall(r'(\w+)=(\S+)'", source,
+                             f"{filename}: regex URI parsing must be removed")
+
+    def test_information_schema_queries_use_quote_literal(self):
+        for filename in [
+            "processing/buffer_table.py",
+            "processing/spatial_join.py",
+            "processing/h3_index.py",
+            "processing/import_from_snowflake.py",
+            "sf_locator_filter.py",
+            "sf_temporal_support.py",
+        ]:
+            source = self._read(filename)
+            if "INFORMATION_SCHEMA" in source:
+                self.assertIn("quote_literal", source,
+                              f"{filename}: INFORMATION_SCHEMA lookups must quote schema/table with quote_literal()")
+                self.assertNotIn("ILIKE '{", source,
+                                 f"{filename}: raw f-string ILIKE interpolation remains")
+
+    def test_unused_imports_removed(self):
+        src_exec = self._read("processing/execute_sql.py")
+        self.assertNotIn("from qgis.core import (\n    QgsProcessingAlgorithm,\n    QgsProcessingParameterString,\n    QgsProcessingOutputString,\n    Qgis,\n)", src_exec)
+
+        src_import = self._read("processing/import_from_snowflake.py")
+        self.assertNotIn("QgsProcessingParameterEnum", src_import)
 
 
 if __name__ == "__main__":
