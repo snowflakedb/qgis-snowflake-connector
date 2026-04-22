@@ -6,13 +6,9 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
 class TestIssueRegressions(unittest.TestCase):
-    def test_utils_uses_sys_executable_and_importlib_metadata(self):
+    def test_utils_uses_importlib_metadata(self):
         content = (ROOT / "helpers" / "utils.py").read_text(encoding="utf-8")
         self.assertIn("import importlib.metadata", content)
-        self.assertIn("def get_python_executable_path()", content)
-        self.assertIn("python3_path = get_python_executable_path()", content)
-        self.assertIn('"--upgrade"', content)
-        self.assertIn('"cryptography"', content)
 
     def test_vector_provider_reload_resets_caches(self):
         content = (ROOT / "providers" / "sf_vector_data_provider.py").read_text(
@@ -390,13 +386,14 @@ class TestStartupReliability(unittest.TestCase):
         self.assertIn("def check_install_package(package_name) -> bool:", content)
         self.assertIn("def check_install_snowflake_connector_package() -> bool:", content)
 
-    def test_check_install_package_has_exception_guard(self):
+    def test_check_install_package_delegates_to_check_package_installed(self):
         content = (ROOT / "helpers" / "utils.py").read_text(encoding="utf-8")
         idx_func = content.index("def check_install_package(")
         idx_next = content.index("\ndef ", idx_func + 1)
         func_body = content[idx_func:idx_next]
-        self.assertIn("except Exception:", func_body)
         self.assertIn("return check_package_installed(package_name)", func_body)
+        self.assertNotIn("subprocess", func_body)
+        self.assertNotIn("pip._internal", func_body)
 
 
 class TestEditabilityCapabilities(unittest.TestCase):
@@ -800,29 +797,22 @@ class TestEditingOperations(unittest.TestCase):
 class TestGitHubIssuesFixes(unittest.TestCase):
     """Tests for remaining GitHub issues fixes."""
 
-    def test_get_python_executable_path_never_returns_qgis(self):
-        """get_python_executable_path must validate and never return QGIS app."""
+    def test_no_subprocess_or_pip_in_install_path_issue_114(self):
+        """check_install_package must NOT invoke subprocess or pip (issue #114).
+
+        Auto-installing via pip on the UI thread froze QGIS on macOS because
+        the resolved 'python3' was actually a QGIS launcher stub.
+        """
         content = (ROOT / "helpers" / "utils.py").read_text(encoding="utf-8")
-        # Safety helpers must exist
-        self.assertIn("def _looks_like_python(", content)
-        self.assertIn("def _safe_pip_call(", content)
-        self.assertIn("def _in_process_pip(", content)
-        # get_python_executable_path must use the guard and raise on failure
-        if "def get_python_executable_path() -> str:" in content:
-            idx = content.index("def get_python_executable_path() -> str:")
-        else:
-            idx = content.index("def get_python_executable_path():")
-        next_def = content.find("\ndef ", idx + 1)
-        body = content[idx:next_def] if next_def != -1 else content[idx:]
-        self.assertIn("_looks_like_python", body)
-        self.assertIn("RuntimeError", body)
-        self.assertIn("sysconfig", body)
-        # check_install_package must have both strategies
-        ci_idx = content.index("def check_install_package(")
-        ci_end = content.find("\ndef ", ci_idx + 1)
-        ci_body = content[ci_idx:ci_end] if ci_end != -1 else content[ci_idx:]
-        self.assertIn("_safe_pip_call", ci_body)
-        self.assertIn("_in_process_pip", ci_body)
+        self.assertNotIn("def _safe_pip_call(", content)
+        self.assertNotIn("def _in_process_pip(", content)
+        self.assertNotIn("def get_python_executable_path(", content)
+        self.assertNotIn("subprocess", content)
+        self.assertNotIn("pip._internal", content)
+
+        init_content = (ROOT / "__init__.py").read_text(encoding="utf-8")
+        self.assertIn("_StubPlugin", init_content)
+        self.assertIn("python3 -m pip install snowflake-connector-python", init_content)
 
     def test_sql_branch_qgsfield_type_default_fixed(self):
         """SQL-query branch QgsField construction should use correct default."""
