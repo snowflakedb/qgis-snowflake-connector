@@ -174,17 +174,17 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
             quoted_geom = quote_identifier(geom_column)
             filter_geom_clause = ""
             if not filter_rect.isNull():
-                if self._provider._geometry_type == "GEOMETRY":
+                if self._provider._geo_column_type == "GEOMETRY":
                     filter_geom_clause = (
                         f'ST_INTERSECTS({quoted_geom}, '
                         f"ST_GEOMETRYFROMWKT('{filter_rect.asWktPolygon()}'))"
                     )
-                if self._provider._geometry_type == "GEOGRAPHY":
+                elif self._provider._geo_column_type == "GEOGRAPHY":
                     filter_geom_clause = (
                         f'ST_INTERSECTS({quoted_geom}, '
                         f"ST_GEOGRAPHYFROMWKT('{filter_rect.asWktPolygon()}'))"
                     )
-                if self._provider._geometry_type in ["NUMBER", "TEXT"]:
+                elif self._provider._geo_column_type in ["NUMBER", "TEXT"]:
                     filter_geom_clause = (
                         f'ST_INTERSECTS(H3_CELL_TO_BOUNDARY({quoted_geom}), '
                         f"ST_GEOGRAPHYFROMWKT('{filter_rect.asWktPolygon()}'))"

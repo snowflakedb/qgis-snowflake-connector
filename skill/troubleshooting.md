@@ -2,6 +2,18 @@
 
 ## Plugin Won't Load
 
+### QGIS freezes or shows "Invalid Data Source: /-m …" at startup (issue #114)
+
+Previous versions attempted to auto-install missing Python dependencies (via `subprocess` or `pip._internal`) during plugin load on the UI thread. On macOS, the resolved `python3` inside the `.app` bundle was sometimes a launcher stub that re-executed QGIS itself, causing an infinite loop and a frozen UI. The log would show `Unable to load /-m`, `/pip`, `/install`, `/--upgrade`.
+
+Fixed by removing all auto-install logic from `check_install_package`. The plugin now only checks for dependencies and shows a clear message if they are missing. Install manually:
+
+```bash
+python3 -m pip install snowflake-connector-python
+```
+
+Then restart QGIS.
+
 ### "No module named 'qgis-snowflake-connector.tasks.sf_connect_task'"
 
 The installed zip is missing the `tasks/` directory. Rebuild the package ensuring all directories (`tasks`, `scripts`, `help`, etc.) are included. See packaging section in SKILL.md.
