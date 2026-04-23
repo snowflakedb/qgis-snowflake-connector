@@ -24,6 +24,19 @@ from qgis.core import (
 from ..helpers.mappings import mapping_multi_single_to_geometry_type
 
 
+def _rect_is_valid_lonlat(rect) -> bool:
+    """Return True when every corner of ``rect`` falls inside the WGS84
+    lon/lat range, so it can be safely wrapped in ``ST_GEOGRAPHYFROMWKT``
+    without Snowflake rejecting it as an invalid Lng/Lat pair.
+    """
+    return (
+        -180.0 <= rect.xMinimum() <= 180.0
+        and -180.0 <= rect.xMaximum() <= 180.0
+        and -90.0 <= rect.yMinimum() <= 90.0
+        and -90.0 <= rect.yMaximum() <= 90.0
+    )
+
+
 class SFFeatureIterator(QgsAbstractFeatureIterator):
     def __init__(
         self,
@@ -55,6 +68,10 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
 
         if not self._provider.isValid():
             return
+
+        if getattr(self._provider, "_load_all_rows", False):
+            self._provider._features_loaded = False
+            self._provider._features = []
 
         if not self._provider._features_loaded:
             geom_column = self._provider.get_geometry_column()
@@ -174,21 +191,43 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
             quoted_geom = quote_identifier(geom_column)
             filter_geom_clause = ""
             if not filter_rect.isNull():
-                if self._provider._geometry_type == "GEOMETRY":
+                if self._provider._geo_column_type == "GEOMETRY":
                     filter_geom_clause = (
                         f'ST_INTERSECTS({quoted_geom}, '
                         f"ST_GEOMETRYFROMWKT('{filter_rect.asWktPolygon()}'))"
                     )
-                if self._provider._geometry_type == "GEOGRAPHY":
-                    filter_geom_clause = (
-                        f'ST_INTERSECTS({quoted_geom}, '
-                        f"ST_GEOGRAPHYFROMWKT('{filter_rect.asWktPolygon()}'))"
-                    )
-                if self._provider._geometry_type in ["NUMBER", "TEXT"]:
-                    filter_geom_clause = (
-                        f'ST_INTERSECTS(H3_CELL_TO_BOUNDARY({quoted_geom}), '
-                        f"ST_GEOGRAPHYFROMWKT('{filter_rect.asWktPolygon()}'))"
-                    )
+                elif self._provider._geo_column_type == "GEOGRAPHY":
+                    # ST_GEOGRAPHYFROMWKT requires valid WGS84 lon/lat. If the
+                    # rect from QGIS is outside that range (e.g. the transform
+                    # from the canvas CRS silently failed), skip the pushdown
+                    # rather than erroring on every fetch.
+                    if _rect_is_valid_lonlat(filter_rect):
+                        filter_geom_clause = (
+                            f'ST_INTERSECTS({quoted_geom}, '
+                            f"ST_GEOGRAPHYFROMWKT('{filter_rect.asWktPolygon()}'))"
+                        )
+                    else:
+                        QgsMessageLog.logMessage(
+                            f"Skipping spatial filter pushdown: rect "
+                            f"{filter_rect.toString()} is outside WGS84 lon/lat "
+                            f"range (GEOGRAPHY column {quoted_geom}).",
+                            "Snowflake Plugin",
+                            Qgis.MessageLevel.Warning,
+                        )
+                elif self._provider._geo_column_type in ["NUMBER", "TEXT"]:
+                    if _rect_is_valid_lonlat(filter_rect):
+                        filter_geom_clause = (
+                            f'ST_INTERSECTS(H3_CELL_TO_BOUNDARY({quoted_geom}), '
+                            f"ST_GEOGRAPHYFROMWKT('{filter_rect.asWktPolygon()}'))"
+                        )
+                    else:
+                        QgsMessageLog.logMessage(
+                            f"Skipping spatial filter pushdown: rect "
+                            f"{filter_rect.toString()} is outside WGS84 lon/lat "
+                            f"range (H3 column {quoted_geom}).",
+                            "Snowflake Plugin",
+                            Qgis.MessageLevel.Warning,
+                        )
                 if filter_geom_clause != "":
                     filter_geom_clause = f"and {filter_geom_clause}"
 
@@ -200,7 +239,7 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                     for clause in where_clause_list[1:]:
                         where_clause += f" and {clause}"
 
-            geom_query = f'ST_ASWKB({quoted_geom}), {quoted_geom}, '
+            geom_query = f'ST_ASWKB({quoted_geom}), '
             if self._provider._geo_column_type == "TEXT":
                 geom_query = f'ST_ASWKB(H3_CELL_TO_BOUNDARY({quoted_geom})), {quoted_geom}, '
             elif self._provider._geo_column_type == "NUMBER":
@@ -247,6 +286,15 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                 connection_name=self._provider._connection_name,
                 query=self.final_query,
                 context_information=self._provider._context_information,
+            )
+            self._col_index_by_name = {
+                desc.name: idx
+                for idx, desc in enumerate(self._result.description)
+            }
+            self._fetch_batch_size = (
+                50_000
+                if getattr(self._provider, "_load_all_rows", False)
+                else 5_000
             )
         self._index = 0
 
@@ -295,7 +343,9 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
 
             else:
                 if not self._cursor_batch_rows:
-                    self._cursor_batch_rows = self._result.fetchmany(5000)
+                    self._cursor_batch_rows = self._result.fetchmany(
+                        self._fetch_batch_size
+                    )
 
                 next_result = (
                     self._cursor_batch_rows.pop(0) if self._cursor_batch_rows else None
@@ -303,7 +353,8 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
 
                 if not next_result or not self._provider.isValid():
                     f.setValid(False)
-                    self._provider._features_loaded = True
+                    if not getattr(self._provider, "_load_all_rows", False):
+                        self._provider._features_loaded = True
                     return False
 
                 f.setFields(self._provider.fields())
@@ -316,11 +367,7 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
 
                 f.setId(self._index)
 
-                # # set attributes
-                desc_result = self._result.description
-                desc_result = list(
-                    map(lambda desc: desc.name, self._result.description)
-                )
+                col_index_by_name = self._col_index_by_name
                 if self._attributes_need_conversion:
                     if (
                         self._request_sub_attributes
@@ -346,9 +393,10 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                                     not in ("NUMBER", "TEXT")
                                 ):
                                     continue
-                                column_value = next_result[
-                                    desc_result.index(field_name)
-                                ]
+                                col_idx = col_index_by_name.get(field_name)
+                                if col_idx is None:
+                                    continue
+                                column_value = next_result[col_idx]
                                 converted_attribute = (
                                     None if column_value is None
                                     else self._attributes_converters[indx](column_value)
@@ -380,11 +428,13 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                                 not in ("NUMBER", "TEXT")
                             ):
                                 continue
-                            f.setAttribute(
-                                indx, next_result[desc_result.index(field_name)]
-                            )
+                            col_idx = col_index_by_name.get(field_name)
+                            if col_idx is None:
+                                continue
+                            f.setAttribute(indx, next_result[col_idx])
                 f.setValid(True)
-                self._provider._features.append(QgsFeature(f))
+                if not getattr(self._provider, "_load_all_rows", False):
+                    self._provider._features.append(QgsFeature(f))
 
             self._index += 1
         except Exception as e:

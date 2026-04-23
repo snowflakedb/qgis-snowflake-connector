@@ -1,6 +1,15 @@
 import json
-from qgis.PyQt.QtWidgets import QVBoxLayout, QLabel, QComboBox, QWidget, QMessageBox
+from qgis.PyQt.QtWidgets import (
+    QVBoxLayout,
+    QLabel,
+    QComboBox,
+    QSizePolicy,
+    QWidget,
+    QMessageBox,
+)
+from qgis.core import QgsProcessingFeatureSourceDefinition, QgsProject
 from ..helpers.data_base import get_schema_iterator, get_table_iterator
+from ..helpers.wrapper import parse_uri
 
 from ..helpers.utils import (
     get_authentification_information,
@@ -12,6 +21,9 @@ from processing.gui.wrappers import WidgetWrapper
 
 class DynamicConnectionComboBoxWidget(WidgetWrapper):
     def createWidget(self):
+        self._input_wrapper = None
+        self._prefilled = False
+
         widget = QWidget()
         layout = QVBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
@@ -21,6 +33,18 @@ class DynamicConnectionComboBoxWidget(WidgetWrapper):
         self.schemas_cb = QComboBox()
         self.tables_cb = QComboBox()
         self.tables_cb.setEditable(True)
+
+        # Keep combos shrinkable so the dropdown arrow stays visible when
+        # items are wider than the processing panel column.
+        for combo in (self.connections_cb, self.schemas_cb, self.tables_cb):
+            combo.setSizeAdjustPolicy(
+                QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+            )
+            combo.setMinimumContentsLength(0)
+            combo.setSizePolicy(
+                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+            )
+        self.tables_cb.lineEdit().setMinimumWidth(0)
 
         # Populate the comboboxes with your desired items
         self.settings = get_qsettings()
@@ -102,3 +126,76 @@ class DynamicConnectionComboBoxWidget(WidgetWrapper):
 
     def value(self):
         return self.get_selected_options()
+
+    def postInitialize(self, wrappers):
+        try:
+            for wrapper in wrappers:
+                name = wrapper.parameterDefinition().name()
+                if name == "INPUT":
+                    self._input_wrapper = wrapper
+                    break
+            if not self._prefilled:
+                self._prefilled = True
+                self._prefill_from_snowflake_layer()
+        except Exception:
+            pass
+
+    def _prefill_from_snowflake_layer(self):
+        layer = self._get_input_layer()
+        if layer is None:
+            return
+        provider = layer.dataProvider()
+        if provider is None or provider.name() != "snowflakedb":
+            return
+        try:
+            (
+                connection_name,
+                _sql_query,
+                _schema_name,
+                _table_name,
+                _srid,
+                _geom_column,
+                _geometry_type,
+                _geo_column_type,
+                _primary_key,
+                _load_all_rows,
+            ) = parse_uri(provider.dataSourceUri())
+        except Exception:
+            return
+
+        if connection_name:
+            self._set_combo_text(self.connections_cb, connection_name)
+
+    def _get_input_layer(self):
+        if self._input_wrapper is None:
+            return None
+        widget = getattr(self._input_wrapper, "widget", None)
+        if widget is not None and hasattr(widget, "currentLayer"):
+            layer = widget.currentLayer()
+            if layer is not None:
+                return layer
+        try:
+            val = self._input_wrapper.parameterValue()
+        except Exception:
+            try:
+                val = self._input_wrapper.value()
+            except Exception:
+                return None
+        if isinstance(val, QgsProcessingFeatureSourceDefinition):
+            source = val.source
+            val = source.staticValue() if hasattr(source, "staticValue") else source
+        if isinstance(val, str) and val:
+            layer = QgsProject.instance().mapLayer(val)
+            if layer is not None:
+                return layer
+        return None
+
+    @staticmethod
+    def _set_combo_text(combo, text):
+        if text is None:
+            return
+        index = combo.findText(text)
+        if index >= 0:
+            combo.setCurrentIndex(index)
+        elif combo.isEditable():
+            combo.setCurrentText(text)

@@ -1,7 +1,15 @@
+from enum import Enum
+
 from qgis.PyQt import QtWidgets
 
 # from PyQt5 import QWidget
 from qgis.PyQt.QtWidgets import QMessageBox
+
+
+class LargeDatasetChoice(Enum):
+    CANCEL = 0
+    SAMPLE = 1
+    LOAD_ALL = 2
 
 
 def get_proceed_cancel_message_box(title: str, text: str) -> int:
@@ -19,6 +27,67 @@ def get_proceed_cancel_message_box(title: str, text: str) -> int:
         return QtWidgets.QMessageBox.StandardButton.Ok
     elif message_box.clickedButton() == cancel_button:
         return QtWidgets.QMessageBox.StandardButton.Cancel
+
+
+def get_large_dataset_choice(title: str, text: str) -> LargeDatasetChoice:
+    """Shows a three-option dialog for oversized datasets.
+
+    Returns one of:
+    - LargeDatasetChoice.CANCEL
+    - LargeDatasetChoice.SAMPLE (load a random sample up to the row limit)
+    - LargeDatasetChoice.LOAD_ALL (load the full dataset)
+    """
+    message_box = QtWidgets.QMessageBox()
+    message_box.setWindowTitle(title)
+    message_box.setText(text)
+
+    sample_button = message_box.addButton(
+        "Load sample", QtWidgets.QMessageBox.ButtonRole.AcceptRole
+    )
+    load_all_button = message_box.addButton(
+        "Load all rows", QtWidgets.QMessageBox.ButtonRole.DestructiveRole
+    )
+    cancel_button = message_box.addButton(
+        "Cancel", QtWidgets.QMessageBox.ButtonRole.RejectRole
+    )
+
+    message_box.setDefaultButton(sample_button)
+    message_box.exec()
+
+    clicked = message_box.clickedButton()
+    if clicked == sample_button:
+        return LargeDatasetChoice.SAMPLE
+    if clicked == load_all_button:
+        return LargeDatasetChoice.LOAD_ALL
+    if clicked == cancel_button:
+        return LargeDatasetChoice.CANCEL
+    return LargeDatasetChoice.CANCEL
+
+
+def get_cancel_or_load_all_message_box(title: str, text: str) -> LargeDatasetChoice:
+    """Shows a two-option dialog returning CANCEL or LOAD_ALL.
+
+    Used in flows where sampling is not available (e.g. arbitrary SQL queries),
+    so the user only chooses between cancelling or loading the full result set.
+    """
+    message_box = QtWidgets.QMessageBox()
+    message_box.setWindowTitle(title)
+    message_box.setText(text)
+
+    load_all_button = message_box.addButton(
+        "Load all rows", QtWidgets.QMessageBox.ButtonRole.AcceptRole
+    )
+    cancel_button = message_box.addButton(
+        "Cancel", QtWidgets.QMessageBox.ButtonRole.RejectRole
+    )
+
+    message_box.setDefaultButton(cancel_button)
+    message_box.exec()
+
+    clicked = message_box.clickedButton()
+    if clicked == load_all_button:
+        return LargeDatasetChoice.LOAD_ALL
+    return LargeDatasetChoice.CANCEL
 
 
 def get_set_primary_key_message_box(

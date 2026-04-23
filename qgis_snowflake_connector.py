@@ -43,8 +43,6 @@ __author__ = "Snowflake Inc."
 __date__ = "2024-08-07"
 __copyright__ = "(C) 2024 by Snowflake"
 
-# This will get replaced with a git SHA1 when you do a git archive
-
 __revision__ = "$Format:%H$"
 
 import os
@@ -60,12 +58,12 @@ from qgis.core import (
 )
 
 from .providers.sf_metadata_provider import SFMetadataProvider
-
-from .qgis_snowflake_connector_algorithm import QGISSnowflakeConnectorAlgorithm
-
+from .qgis_snowflake_connector_provider import QGISSnowflakeConnectorProvider
 from .providers.sf_data_item_provider import SFDataItemProvider
-
 from .providers.sf_source_select_provider import SFSourceSelectProvider
+from .sf_locator_filter import SFLocatorFilter
+from .sf_expression_functions import register_sf_functions, unregister_sf_functions
+
 from qgis.gui import QgsGui
 
 cmd_folder = os.path.split(inspect.getfile(inspect.currentframe()))[0]
@@ -77,18 +75,11 @@ if cmd_folder not in sys.path:
 class QGISSnowflakeConnectorPlugin(object):
     def __init__(self):
         self.provider = None
+        self.locator_filter = None
 
     def initProcessing(self):
-        """Init Processing provider for QGIS >= 3.8."""
-        self.postgis_native_provider = QgsApplication.processingRegistry().providerById(
-            "native"
-        )
-
-        if self.postgis_native_provider:
-            self.qgis_snowflake_connector_algorithm = QGISSnowflakeConnectorAlgorithm()
-            self.postgis_native_provider.addAlgorithm(
-                self.qgis_snowflake_connector_algorithm
-            )
+        self.provider = QGISSnowflakeConnectorProvider()
+        QgsApplication.processingRegistry().addProvider(self.provider)
 
         self.tm = QgsApplication.taskManager()
         self.sf_source_select_provider = SFSourceSelectProvider("mssp")
@@ -147,18 +138,35 @@ class QGISSnowflakeConnectorPlugin(object):
 
     def initGui(self):
         self.initProcessing()
+
+        self.locator_filter = SFLocatorFilter()
+        self.iface = None
+        try:
+            from qgis.utils import iface
+            if iface:
+                iface.registerLocatorFilter(self.locator_filter)
+                self.iface = iface
+        except Exception:
+            pass
+
+        register_sf_functions()
+
         threading.Thread(
             target=self._check_for_updates, daemon=True
         ).start()
 
     def unload(self):
-        self.postgis_native_provider.algorithms().remove(
-            self.qgis_snowflake_connector_algorithm
-        )
-        self.postgis_native_provider.refreshAlgorithms()
+        if self.provider:
+            QgsApplication.processingRegistry().removeProvider(self.provider)
+
         QgsGui.sourceSelectProviderRegistry().removeProvider(
             self.sf_source_select_provider
         )
         QgsApplication.dataItemProviderRegistry().removeProvider(
             self.sf_data_item_provider
         )
+
+        if self.locator_filter and self.iface:
+            self.iface.deregisterLocatorFilter(self.locator_filter)
+
+        unregister_sf_functions()

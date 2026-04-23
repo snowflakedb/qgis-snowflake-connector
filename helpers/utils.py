@@ -278,108 +278,20 @@ def check_package_installed(package_name) -> bool:
         return False
 
 
-def get_python_executable_path() -> str:
-    """
-    Returns the path to the Python executable in a cross-platform manner.
-
-    Returns:
-        str: The path to the Python executable.
-    """
-    import sys
-    import os
-    import platform
-
-    if platform.system() == "Windows":
-        # On Windows, look for python.exe in the same directory as sys.executable
-        python_dir = os.path.dirname(sys.executable)
-        python_path = os.path.join(python_dir, "python.exe")
-        if os.path.exists(python_path):
-            return python_path
-        # Fallback to python3.exe
-        python3_path = os.path.join(python_dir, "python3.exe")
-        if os.path.exists(python3_path):
-            return python3_path
-    else:
-        # On Unix-like systems, look for python3 in bin directory
-        prefix_path = sys.exec_prefix
-        python3_path = os.path.join(prefix_path, "bin", "python3")
-        if os.path.exists(python3_path):
-            return python3_path
-        # Fallback to python in bin directory
-        python_path = os.path.join(prefix_path, "bin", "python")
-        if os.path.exists(python_path):
-            return python_path
-
-    # Final fallback: use sys.executable itself
-    return sys.executable
-
-
 def check_install_package(package_name) -> bool:
-    """Checks if a package is installed; if not, attempts to install it.
+    """Check whether *package_name* is installed.
 
-    Returns True if the package is available after the call (already
-    installed or successfully installed).  Returns False if installation
-    was attempted but the package is still unavailable.
+    Previous versions attempted to auto-install missing packages via pip
+    on the UI thread.  On macOS this could freeze QGIS entirely (see
+    GitHub issue #114).  The function now only checks — callers should
+    surface a user-visible message when it returns False.
     """
-    if check_package_installed(package_name):
-        return True
-
-    import subprocess
-    python3_path = get_python_executable_path()
-    try:
-        subprocess.call([python3_path, "-m", "pip", "install", "pip", "--upgrade"])
-        subprocess.call(
-            [
-                python3_path,
-                "-m",
-                "pip",
-                "install",
-                package_name,
-            ]
-        )
-        subprocess.call(
-            [python3_path, "-m", "pip", "install", "pyopenssl", "--upgrade"]
-        )
-        subprocess.call(
-            [python3_path, "-m", "pip", "install", "cryptography", "--upgrade"]
-        )
-    except Exception:
-        pass
-
     return check_package_installed(package_name)
 
 
 def check_install_snowflake_connector_package() -> bool:
-    """Ensure snowflake-connector-python is available. Returns True on success."""
+    """Return True if snowflake-connector-python is installed."""
     return check_install_package("snowflake-connector-python")
-
-
-def uninstall_snowflake_connector_package() -> None:
-    """
-    Uninstalls the Snowflake Connector for Python package.
-
-    This function determines the appropriate Python executable path based on the
-    operating system and uses it to run the pip uninstall command for the
-    'snowflake-connector-python[secure-local-storage]' package.
-
-    It supports both Windows and non-Windows platforms.
-
-    Raises:
-        subprocess.CalledProcessError: If the uninstallation process fails.
-    """
-    import subprocess
-
-    python3_path = get_python_executable_path()
-    subprocess.call(
-        [
-            python3_path,
-            "-m",
-            "pip",
-            "uninstall",
-            "snowflake-connector-python[secure-local-storage]",
-            "-y",
-        ]
-    )
 
 
 def get_auth_information(connection_name: str) -> dict:
@@ -472,6 +384,7 @@ def decodeUri(uri: str) -> Dict[str, str]:
         "geometry_type",
         "geo_column_type",
         "primary_key",
+        "load_all_rows",
     ]
     matches = re.findall(
         f"({'|'.join(supported_keys)})=(.*?) *?(?={'|'.join(supported_keys)}=|$)",

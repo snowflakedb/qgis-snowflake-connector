@@ -12,13 +12,20 @@ class SFConvertColumnToLayerTask(QgsTask):
     on_handle_warning = pyqtSignal(str, str)
     on_handle_finished = pyqtSignal(str)
 
-    def __init__(self, context_information: dict, path: str) -> None:
+    def __init__(
+        self,
+        context_information: dict,
+        path: str,
+        load_all_rows: bool = False,
+    ) -> None:
         """
         Initializes a SFConvertColumnToLayerTask object.
 
         Args:
             connection_name (str): The name of the connection.
             information_dict (dict): A dictionary containing information about the column, table, schema, and optional column type.
+            load_all_rows (bool): If True, the provider will load the full table
+                instead of a random sample when it exceeds the row limit.
 
         Raises:
             Exception: If initialization fails.
@@ -32,6 +39,7 @@ class SFConvertColumnToLayerTask(QgsTask):
             self.table = context_information["table_name"]
             self.column = context_information["geo_column"]
             self.primary_key = context_information["primary_key"]
+            self.load_all_rows = load_all_rows
 
             self.path = path
             super().__init__(
@@ -85,6 +93,8 @@ class SFConvertColumnToLayerTask(QgsTask):
                     f"geo_column_type={geo_column_type} "
                     f"primary_key={self.primary_key}"
                 )
+                if self.load_all_rows:
+                    uri += " load_all_rows=1"
 
                 layer_name = (
                     self.table

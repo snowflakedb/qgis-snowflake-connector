@@ -5,9 +5,11 @@ from ..helpers.data_base import (
     get_column_iterator,
     get_features_iterator,
     get_table_geo_columns,
+    get_table_iterator,
 )
 from ..helpers.messages import (
-    get_proceed_cancel_message_box,
+    LargeDatasetChoice,
+    get_large_dataset_choice,
 )
 from ..helpers.utils import (
     decodeUri,
@@ -204,9 +206,11 @@ class SFDataItem(QgsDataItem):
         children_item_type = "table"
 
         items_metadata = []
+        geo_table_names = set()
 
         for feat in columns:
             item_name = feat.attribute(0)
+            geo_table_names.add(feat.attribute(0))
             if len(items_metadata) > 0:
                 last_child = children[-1]
                 last_item_metadata = items_metadata[-1]
@@ -232,6 +236,46 @@ class SFDataItem(QgsDataItem):
                     "column_name": feat.attribute(1),
                 }
             )
+
+        # Add non-geometry tables under a separate group
+        all_tables = get_table_iterator(self.settings, self.connection_name, self.clean_name)
+        non_geo_tables = []
+        for feat in all_tables:
+            table_name = feat.attribute(0)
+            if table_name not in geo_table_names:
+                non_geo_tables.append(table_name)
+        
+        if non_geo_tables:
+            # Create a group item for non-geometry tables
+            group_item = self._create_data_item(
+                name="Tables (no geometry)",
+                type="table_group",
+                connection_name=self.connection_name,
+                clean_name="",
+                geom_type="",
+            )
+            children.append(group_item)
+            
+            # Add individual non-geo tables as children of the group
+            for table_name in sorted(non_geo_tables):
+                item = self._create_data_item(
+                    name=table_name,
+                    type="table_no_geom",
+                    connection_name=self.connection_name,
+                    clean_name=table_name,
+                    geom_type="",
+                )
+                item.geom_column = None
+                group_item.addChildItem(item, refresh=False)
+        
+        # If no tables found at all, show informative message
+        if not geo_table_names and not non_geo_tables:
+            error_item = QgsErrorItem(
+                self,
+                "No accessible tables found in this schema",
+                f"{self.path()}/error"
+            )
+            children.append(error_item)
 
     def create_table_item(self, children: typing.List["SFDataItem"]) -> None:
         """
@@ -428,6 +472,17 @@ ORDER BY {column_name}"""
             bool: True if the double click event is handled successfully, False otherwise.
         """
         try:
+            if self.item_type == "table_no_geom":
+                # Show message for non-geometry tables
+                QMessageBox.information(
+                    None,
+                    "No Geometry Column",
+                    f"Table '{self.clean_name}' has no geometry column and cannot be displayed on the map.\n\n"
+                    "You can:\n"
+                    "• Use 'Execute SQL' to query this table\n"
+                    "• View/edit attributes via Processing tools",
+                )
+                return True
             if self.item_type == "table" and not self.geom_column:
                 return False
             schema_data_item = self.parent()
@@ -452,18 +507,22 @@ ORDER BY {column_name}"""
                     context_information=context_information,
                 )
 
+                load_all_rows = False
                 if table_exceeds_size:
-                    response = get_proceed_cancel_message_box(
+                    choice = get_large_dataset_choice(
                         "SFConvertColumnToLayerTask Dataset is too large",
                         (
                             "The dataset is too large. Please consider using "
-                            '"Execute SQL" to limit the result set. If you click '
-                            f'"Proceed", only a random sample of {limit_size // 1000} thousand rows '
-                            "will be loaded."
+                            '"Execute SQL" to limit the result set.\n\n'
+                            f'"Load sample" will load a random sample of {limit_size // 1000} '
+                            "thousand rows.\n"
+                            '"Load all rows" will load the full dataset '
+                            "(this may be slow and memory-intensive)."
                         ),
                     )
-                    if response == QMessageBox.StandardButton.Cancel:
+                    if choice == LargeDatasetChoice.CANCEL:
                         return False
+                    load_all_rows = choice == LargeDatasetChoice.LOAD_ALL
 
                 context_information["primary_key"] = prompt_and_get_primary_key(
                     context_information=context_information, data_type=self.geom_type
@@ -473,6 +532,7 @@ ORDER BY {column_name}"""
                 snowflake_covert_column_to_layer_task = SFConvertColumnToLayerTask(
                     context_information=context_information,
                     path=self.path(),
+                    load_all_rows=load_all_rows,
                 )
                 snowflake_covert_column_to_layer_task.on_handle_error.connect(
                     slot=on_handle_error

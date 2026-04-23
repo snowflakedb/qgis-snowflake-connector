@@ -8,7 +8,7 @@ qgisMinimumVersion=3.34.1
 qgisMaximumVersion=4.99
 supportsQt6=True
 description=This package includes the Snowflake Connector for QGIS.
-version=1.0.5
+version=1.0.10
 author=Snowflake Inc.
 email=erick.cuberojimenez@snowflake.com
 
@@ -21,8 +21,9 @@ repository=https://github.com/snowflakedb/qgis-snowflake-connector/
 # Recommended items:
 
 hasProcessingProvider=yes
-# Uncomment the following line and add your changelog:
-# changelog=
+changelog=1.0.10 - Refresh attribute table after edits without reopening the layer;
+ advertise auto-increment default for numeric primary keys via defaultValueClause();
+ add "Load all rows" option for tables exceeding the 50,000-row visualization limit.
 
 # Tags are comma separated with spaces allowed
 tags=Snowflake, data provider

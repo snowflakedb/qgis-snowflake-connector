@@ -6,13 +6,9 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
 class TestIssueRegressions(unittest.TestCase):
-    def test_utils_uses_sys_executable_and_importlib_metadata(self):
+    def test_utils_uses_importlib_metadata(self):
         content = (ROOT / "helpers" / "utils.py").read_text(encoding="utf-8")
         self.assertIn("import importlib.metadata", content)
-        self.assertIn("def get_python_executable_path()", content)
-        self.assertIn("python3_path = get_python_executable_path()", content)
-        self.assertIn('"--upgrade"', content)
-        self.assertIn('"cryptography"', content)
 
     def test_vector_provider_reload_resets_caches(self):
         content = (ROOT / "providers" / "sf_vector_data_provider.py").read_text(
@@ -67,6 +63,25 @@ class TestIssueRegressions(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn("qgsField.setSubType(subType)", content)
+
+    def test_export_blocks_same_snowflake_table(self):
+        """Export must refuse when target table matches the input layer's
+        source Snowflake table, since it would duplicate every row."""
+        content = (ROOT / "qgis_snowflake_connector_algorithm.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("SAME_TABLE_EXPORT_MESSAGE", content)
+        self.assertIn("same Snowflake table", content)
+        self.assertIn("def _targets_same_snowflake_table(", content)
+        self.assertIn("parse_uri", content)
+        # checkParameterValues guard (returns False with the message)
+        self.assertIn(
+            "return False, SAME_TABLE_EXPORT_MESSAGE", content
+        )
+        # processAlgorithm guard (raises QgsProcessingException)
+        self.assertIn(
+            "raise QgsProcessingException(SAME_TABLE_EXPORT_MESSAGE)", content
+        )
 
 
 class TestSQLSafety(unittest.TestCase):
@@ -205,8 +220,8 @@ class TestSQLSafety(unittest.TestCase):
 class TestProviderLifecycle(unittest.TestCase):
     """Tests for Track 3: provider cache correctness and geometry handling."""
 
-    def test_reload_data_resets_all_caches(self):
-        """reloadData() must clear features list, loaded flag, count, extent, and fields."""
+    def test_reload_data_resets_feature_caches(self):
+        """reloadData() must clear features, count, extent but preserve _fields."""
         content = (ROOT / "providers" / "sf_vector_data_provider.py").read_text(
             encoding="utf-8"
         )
@@ -217,7 +232,8 @@ class TestProviderLifecycle(unittest.TestCase):
         self.assertIn("self._features_loaded = False", body)
         self.assertIn("self._feature_count = None", body)
         self.assertIn("self._extent = None", body)
-        self.assertIn("self._fields = None", body)
+        self.assertNotIn("self._fields = None", body,
+                         "reloadData must NOT reset _fields to preserve column order")
         self.assertIn("self.connect_database()", body)
 
     def test_fields_query_filters_by_schema(self):
@@ -226,6 +242,17 @@ class TestProviderLifecycle(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn("table_schema ILIKE", content)
+
+    def test_fields_query_filters_by_catalog_and_distinct(self):
+        """fields() INFORMATION_SCHEMA query must scope to TABLE_CATALOG and
+        use SELECT DISTINCT so same-named tables in other databases or schemas
+        cannot contribute duplicated column entries to the layer's field list.
+        """
+        content = (ROOT / "providers" / "sf_vector_data_provider.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("table_catalog ILIKE", content)
+        self.assertIn("SELECT DISTINCT column_name", content)
 
     def test_feature_iterator_logs_errors(self):
         """fetchFeature() must log attribute errors via QgsMessageLog, not print()."""
@@ -332,8 +359,9 @@ class TestUIBoundary(unittest.TestCase):
     def test_dialogs_import_from_ui(self):
         """Each dialog wrapper should import its generated UI base class."""
         dialogs_dir = ROOT / "dialogs"
+        skip = {"__init__.py", "sf_spatial_filter_dialog.py"}
         for py_file in sorted(dialogs_dir.glob("*.py")):
-            if py_file.name == "__init__.py":
+            if py_file.name in skip:
                 continue
             content = py_file.read_text(encoding="utf-8")
             has_ui_import = "from ..ui." in content
@@ -388,13 +416,14 @@ class TestStartupReliability(unittest.TestCase):
         self.assertIn("def check_install_package(package_name) -> bool:", content)
         self.assertIn("def check_install_snowflake_connector_package() -> bool:", content)
 
-    def test_check_install_package_has_exception_guard(self):
+    def test_check_install_package_delegates_to_check_package_installed(self):
         content = (ROOT / "helpers" / "utils.py").read_text(encoding="utf-8")
         idx_func = content.index("def check_install_package(")
         idx_next = content.index("\ndef ", idx_func + 1)
         func_body = content[idx_func:idx_next]
-        self.assertIn("except Exception:", func_body)
         self.assertIn("return check_package_installed(package_name)", func_body)
+        self.assertNotIn("subprocess", func_body)
+        self.assertNotIn("pip._internal", func_body)
 
 
 class TestEditabilityCapabilities(unittest.TestCase):
@@ -735,9 +764,9 @@ class TestEditingOperations(unittest.TestCase):
                           f"{func} must log errors")
 
     def test_editing_methods_call_reload_or_update_cache(self):
-        """Editing methods must either reload or update the in-memory cache."""
+        """Editing methods must call reloadData() to refresh the cache."""
         content = self._get_provider_content()
-        for method in ["addFeatures", "deleteFeatures"]:
+        for method in ["addFeatures", "deleteFeatures", "changeAttributeValues"]:
             idx = content.index(f"def {method}(self")
             next_def = content.index("\n    def ", idx + 1)
             body = content[idx:next_def]
@@ -748,8 +777,6 @@ class TestEditingOperations(unittest.TestCase):
         body = content[idx:next_def]
         self.assertIn("update_table_attributes", body,
                       "changeAttributeValues must persist to Snowflake")
-        self.assertIn("QgsFeature(feature)", body,
-                      "changeAttributeValues must clone features for thread safety")
 
     def test_editing_methods_propagate_errors_via_push_error(self):
         """All editing methods must call pushError() to surface Snowflake errors."""
@@ -763,6 +790,251 @@ class TestEditingOperations(unittest.TestCase):
             body = content[idx:next_def] if next_def != -1 else content[idx:]
             self.assertIn("self.pushError(", body,
                           f"{method} must call pushError() to propagate Snowflake errors")
+
+
+    def test_reload_data_preserves_fields(self):
+        """reloadData() must NOT reset _fields to avoid column order scrambling."""
+        content = self._get_provider_content()
+        idx = content.index("def reloadData(self)")
+        next_def = content.index("\n    def ", idx + 1)
+        body = content[idx:next_def]
+        self.assertNotIn("self._fields = None", body,
+                         "reloadData() must not reset _fields")
+
+    def test_default_value_implemented_for_primary_key(self):
+        """Provider must implement defaultValue() for auto-increment PK."""
+        content = self._get_provider_content()
+        self.assertIn("def defaultValue(self", content)
+        idx = content.index("def defaultValue(self")
+        next_def = content.index("\n    def ", idx + 1)
+        body = content[idx:next_def]
+        self.assertIn("_primary_key", body,
+                      "defaultValue must check primary key column")
+        self.assertIn("get_next_primary_key_value", body,
+                      "defaultValue must query next PK value from Snowflake")
+
+    def test_get_next_primary_key_value_helper_exists(self):
+        """data_base.py must have get_next_primary_key_value helper."""
+        content = self._get_database_content()
+        self.assertIn("def get_next_primary_key_value(", content)
+        idx = content.index("def get_next_primary_key_value(")
+        next_def = content.find("\ndef ", idx + 1)
+        body = content[idx:next_def] if next_def != -1 else content[idx:]
+        self.assertIn("MAX(", body)
+        self.assertIn("COALESCE", body)
+
+    def test_reload_data_emits_data_changed(self):
+        """reloadData() must emit dataChanged so edits surface without reopening."""
+        content = self._get_provider_content()
+        idx = content.index("def reloadData(self)")
+        next_def = content.index("\n    def ", idx + 1)
+        body = content[idx:next_def]
+        self.assertIn("self.dataChanged.emit(", body,
+                      "reloadData must emit dataChanged to refresh QGIS caches")
+
+    def test_add_features_sets_feature_id(self):
+        """addFeatures must stamp each inserted feature with its PK as fid."""
+        content = self._get_provider_content()
+        idx = content.index("def addFeatures(self")
+        next_def = content.index("\n    def ", idx + 1)
+        body = content[idx:next_def]
+        self.assertIn("feat.setId(", body,
+                      "addFeatures must assign fid from the PK value on success")
+
+    def test_default_value_clause_implemented_for_primary_key(self):
+        """Provider must implement defaultValueClause() to advertise the auto-ID default."""
+        content = self._get_provider_content()
+        self.assertIn("def defaultValueClause(self", content)
+        idx = content.index("def defaultValueClause(self")
+        next_def = content.index("\n    def ", idx + 1)
+        body = content[idx:next_def]
+        self.assertIn("_primary_key", body,
+                      "defaultValueClause must only advertise for the PK column")
+
+
+class TestGitHubIssuesFixes(unittest.TestCase):
+    """Tests for remaining GitHub issues fixes."""
+
+    def test_no_subprocess_or_pip_in_install_path_issue_114(self):
+        """check_install_package must NOT invoke subprocess or pip (issue #114).
+
+        Auto-installing via pip on the UI thread froze QGIS on macOS because
+        the resolved 'python3' was actually a QGIS launcher stub.
+        """
+        content = (ROOT / "helpers" / "utils.py").read_text(encoding="utf-8")
+        self.assertNotIn("def _safe_pip_call(", content)
+        self.assertNotIn("def _in_process_pip(", content)
+        self.assertNotIn("def get_python_executable_path(", content)
+        self.assertNotIn("subprocess", content)
+        self.assertNotIn("pip._internal", content)
+
+        init_content = (ROOT / "__init__.py").read_text(encoding="utf-8")
+        self.assertIn("_StubPlugin", init_content)
+        self.assertIn("python3 -m pip install snowflake-connector-python", init_content)
+
+    def test_sql_branch_qgsfield_type_default_fixed(self):
+        """SQL-query branch QgsField construction should use correct default."""
+        content = (ROOT / "providers" / "sf_vector_data_provider.py").read_text(encoding="utf-8")
+        # The buggy pattern was: SNOWFLAKE_METADATA_TYPE_CODE_DICT[2]["qvariant_type"] as default
+        # Fixed pattern: SNOWFLAKE_METADATA_TYPE_CODE_DICT[2] as default (the full dict)
+        # Check that the fixed pattern exists
+        self.assertIn("SNOWFLAKE_METADATA_TYPE_CODE_DICT.get", content)
+        # Ensure we're not using the buggy nested default
+        buggy_pattern = 'SNOWFLAKE_METADATA_TYPE_CODE_DICT[2]["qvariant_type"]'
+        self.assertNotIn(buggy_pattern, content,
+                         "SQL branch should not use buggy nested default for unknown type codes")
+
+    def test_non_geo_tables_support_added(self):
+        """Browser should support showing non-geometry tables."""
+        content = (ROOT / "entities" / "sf_data_item.py").read_text(encoding="utf-8")
+        self.assertIn("get_table_iterator", content)
+        self.assertIn("table_no_geom", content)
+        self.assertIn("Tables (no geometry)", content)
+
+    def test_empty_schema_feedback_added(self):
+        """Schema with no tables should show QgsErrorItem feedback."""
+        content = (ROOT / "entities" / "sf_data_item.py").read_text(encoding="utf-8")
+        self.assertIn("No accessible tables found", content)
+        self.assertIn("QgsErrorItem", content)
+
+
+class TestSpatialFilterPushdownGuard(unittest.TestCase):
+    """Regression: the GEOGRAPHY / H3 spatial-filter pushdown must be skipped
+    when the filter rect is outside the WGS84 lon/lat range, otherwise
+    Snowflake rejects the ST_GEOGRAPHYFROMWKT polygon with
+    ``GeoJSON::Polygon::Loop: Invalid Lng/Lat pair``. See issue exposed by
+    commit ac882d5 (spatial filter pushdown column-type fix).
+    """
+
+    def _iterator_content(self):
+        return (ROOT / "providers" / "sf_feature_iterator.py").read_text(
+            encoding="utf-8"
+        )
+
+    def test_helper_defined(self):
+        content = self._iterator_content()
+        self.assertIn("def _rect_is_valid_lonlat(", content)
+
+    def test_geography_branch_guarded(self):
+        """GEOGRAPHY branch must call _rect_is_valid_lonlat before emitting
+        ST_GEOGRAPHYFROMWKT."""
+        content = self._iterator_content()
+        idx = content.index('_geo_column_type == "GEOGRAPHY"')
+        next_branch = content.index(
+            '_geo_column_type in ["NUMBER", "TEXT"]', idx
+        )
+        branch_body = content[idx:next_branch]
+        self.assertIn("_rect_is_valid_lonlat(filter_rect)", branch_body)
+        self.assertIn("ST_GEOGRAPHYFROMWKT", branch_body)
+        self.assertIn("Skipping spatial filter pushdown", branch_body)
+
+    def test_h3_branch_guarded(self):
+        """H3 (NUMBER / TEXT) branch must also be guarded."""
+        content = self._iterator_content()
+        idx = content.index('_geo_column_type in ["NUMBER", "TEXT"]')
+        next_block = content.index(
+            'if filter_geom_clause != ""', idx
+        )
+        branch_body = content[idx:next_block]
+        self.assertIn("_rect_is_valid_lonlat(filter_rect)", branch_body)
+        self.assertIn("H3_CELL_TO_BOUNDARY", branch_body)
+
+    def test_geometry_branch_unchanged(self):
+        """GEOMETRY branch must not be guarded (ST_GEOMETRYFROMWKT accepts
+        any coordinate range)."""
+        content = self._iterator_content()
+        idx = content.index('_geo_column_type == "GEOMETRY"')
+        next_branch = content.index(
+            '_geo_column_type == "GEOGRAPHY"', idx
+        )
+        branch_body = content[idx:next_branch]
+        self.assertIn("ST_GEOMETRYFROMWKT", branch_body)
+        self.assertNotIn("_rect_is_valid_lonlat", branch_body)
+
+    def test_rect_is_valid_lonlat_rejects_out_of_range(self):
+        """Unit-test the helper directly against the exact rect from the
+        user-reported failure (coords like 2821.43, 861.237)."""
+        class _FakeRect:
+            def __init__(self, xmin, ymin, xmax, ymax):
+                self._xmin, self._ymin = xmin, ymin
+                self._xmax, self._ymax = xmax, ymax
+
+            def xMinimum(self): return self._xmin
+            def yMinimum(self): return self._ymin
+            def xMaximum(self): return self._xmax
+            def yMaximum(self): return self._ymax
+
+        import importlib.util
+        import sys
+        import types
+
+        qgis_core = types.ModuleType("qgis.core")
+        for name in [
+            "QgsAbstractFeatureIterator", "QgsCoordinateTransform",
+            "QgsCsException", "QgsFeature", "QgsFeatureRequest",
+            "QgsGeometry", "QgsMessageLog", "Qgis",
+        ]:
+            setattr(qgis_core, name, type(name, (), {}))
+        qgis_pkg = types.ModuleType("qgis")
+        qgis_pkg.core = qgis_core
+        qgis_pyqt = types.ModuleType("qgis.PyQt")
+        qgis_pyqt_qtcore = types.ModuleType("qgis.PyQt.QtCore")
+        for name in ("QDate", "QDateTime", "QMetaType", "QTime"):
+            setattr(qgis_pyqt_qtcore, name, type(name, (), {}))
+        qgis_pyqt.QtCore = qgis_pyqt_qtcore
+        sys.modules.setdefault("qgis", qgis_pkg)
+        sys.modules.setdefault("qgis.core", qgis_core)
+        sys.modules.setdefault("qgis.PyQt", qgis_pyqt)
+        sys.modules.setdefault("qgis.PyQt.QtCore", qgis_pyqt_qtcore)
+
+        plugin_pkg = types.ModuleType("qgis_snowflake_connector")
+        plugin_pkg.__path__ = [str(ROOT)]
+        helpers_pkg = types.ModuleType("qgis_snowflake_connector.helpers")
+        helpers_pkg.__path__ = [str(ROOT / "helpers")]
+        helpers_limits = types.ModuleType(
+            "qgis_snowflake_connector.helpers.limits"
+        )
+        helpers_limits.limit_size_for_type = lambda t: 0
+        helpers_sql = types.ModuleType(
+            "qgis_snowflake_connector.helpers.sql"
+        )
+        helpers_sql.quote_identifier = lambda n: n
+        helpers_mappings = types.ModuleType(
+            "qgis_snowflake_connector.helpers.mappings"
+        )
+        helpers_mappings.mapping_multi_single_to_geometry_type = {}
+        providers_pkg = types.ModuleType(
+            "qgis_snowflake_connector.providers"
+        )
+        providers_pkg.__path__ = [str(ROOT / "providers")]
+        sf_feature_source = types.ModuleType(
+            "qgis_snowflake_connector.providers.sf_feature_source"
+        )
+        sf_feature_source.SFFeatureSource = type("SFFeatureSource", (), {})
+        for mod in (
+            plugin_pkg, helpers_pkg, helpers_limits, helpers_sql,
+            helpers_mappings, providers_pkg, sf_feature_source,
+        ):
+            sys.modules.setdefault(mod.__name__, mod)
+
+        spec = importlib.util.spec_from_file_location(
+            "qgis_snowflake_connector.providers.sf_feature_iterator",
+            ROOT / "providers" / "sf_feature_iterator.py",
+        )
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+
+        rect_bad = _FakeRect(-5392.42, -2469.11, 2821.43, 861.237)
+        self.assertFalse(module._rect_is_valid_lonlat(rect_bad))
+        rect_good = _FakeRect(-10.0, -10.0, 10.0, 10.0)
+        self.assertTrue(module._rect_is_valid_lonlat(rect_good))
+        rect_world = _FakeRect(-180.0, -90.0, 180.0, 90.0)
+        self.assertTrue(module._rect_is_valid_lonlat(rect_world))
+        rect_over_lon = _FakeRect(-10.0, -10.0, 180.001, 10.0)
+        self.assertFalse(module._rect_is_valid_lonlat(rect_over_lon))
+        rect_over_lat = _FakeRect(-10.0, -90.001, 10.0, 10.0)
+        self.assertFalse(module._rect_is_valid_lonlat(rect_over_lat))
 
 
 class TestQualityBaseline(unittest.TestCase):

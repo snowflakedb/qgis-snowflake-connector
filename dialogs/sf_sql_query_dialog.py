@@ -17,7 +17,10 @@ import typing
 
 from ..enums.snowflake_metadata_type import SnowflakeMetadataType
 from ..helpers.data_base import checks_sql_query_exceeds_size
-from ..helpers.messages import get_proceed_cancel_message_box
+from ..helpers.messages import (
+    LargeDatasetChoice,
+    get_cancel_or_load_all_message_box,
+)
 from ..tasks.sf_convert_sql_query_to_layer_task import SFConvertSQLQueryToLayerTask
 from ..tasks.sf_execute_sql_query_task import SFExecuteSQLQueryTask
 from ..helpers.utils import get_qsettings
@@ -83,15 +86,16 @@ class SFSQLQueryDialog(QDialog, Ui_QgsQueryResultWidgetBase):
 
                 task_should_run = True
                 if table_exceeds_size:
-                    response = get_proceed_cancel_message_box(
+                    choice = get_cancel_or_load_all_message_box(
                         title="Resultset is too large",
                         text=(
                             "You are trying to load more than 50 thousand rows. We "
                             'recommend you to apply a limit clause (e.g. "LIMIT 50000") to your query. '
-                            'If you click "Proceed" your query will execute as is.'
+                            'If you click "Load all rows" your query will execute as is '
+                            "(this may be slow and memory-intensive)."
                         ),
                     )
-                    task_should_run = response != QMessageBox.StandardButton.Cancel
+                    task_should_run = choice == LargeDatasetChoice.LOAD_ALL
                 if task_should_run:
                     geo_column_name = self.mGeometryColumnComboBox.currentText()
                     self.context_information["geo_column_name"] = geo_column_name

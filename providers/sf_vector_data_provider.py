@@ -24,6 +24,7 @@ from ..helpers.data_base import (
     alter_table_drop_columns,
     check_from_clause_exceeds_size,
     delete_table_features,
+    get_next_primary_key_value,
     insert_table_feature,
     limit_size_for_type,
     update_table_attributes,
@@ -64,6 +65,7 @@ class SFVectorDataProvider(QgsVectorDataProvider):
         self._fields = None
         self._feature_count = None
         self.filter_where_clause = None
+        self._load_all_rows = False
         try:
             (
                 self._connection_name,
@@ -75,6 +77,7 @@ class SFVectorDataProvider(QgsVectorDataProvider):
                 self._geometry_type,
                 self._geo_column_type,
                 self._primary_key,
+                self._load_all_rows,
             ) = parse_uri(uri)
 
         except Exception as e:
@@ -112,11 +115,14 @@ class SFVectorDataProvider(QgsVectorDataProvider):
             self._from_clause = f"({self._sql_query})"
         else:
             self._from_clause = quote_identifier(self._table_name)
-            self._is_limited_unordered = check_from_clause_exceeds_size(
-                from_clause=self._from_clause,
-                context_information=self._context_information,
-                limit_size=limit_size_for_type(self._geo_column_type),
-            )
+            if self._load_all_rows:
+                self._is_limited_unordered = False
+            else:
+                self._is_limited_unordered = check_from_clause_exceeds_size(
+                    from_clause=self._from_clause,
+                    context_information=self._context_information,
+                    limit_size=limit_size_for_type(self._geo_column_type),
+                )
 
         self.get_geometry_column()
 
@@ -254,15 +260,28 @@ class SFVectorDataProvider(QgsVectorDataProvider):
             self._fields = QgsFields()
             if self._is_valid:
                 if not self._sql_query:
+                    # Filter by TABLE_CATALOG / TABLE_SCHEMA / TABLE_NAME so
+                    # same-named tables in other DBs or schemas cannot bleed
+                    # their columns into this layer's field list. DISTINCT is
+                    # a belt-and-braces guard against any residual duplicates.
                     schema_filter = ""
                     if self._schema_name:
                         schema_filter = (
                             f" AND table_schema ILIKE"
                             f" {quote_literal(self._schema_name)}"
                         )
+                    catalog_filter = ""
+                    database_name = self._context_information.get("database_name")
+                    if database_name:
+                        catalog_filter = (
+                            f" AND table_catalog ILIKE"
+                            f" {quote_literal(database_name)}"
+                        )
                     query = (
-                        "SELECT column_name, data_type FROM information_schema.columns "
+                        "SELECT DISTINCT column_name, data_type, ordinal_position"
+                        " FROM information_schema.columns "
                         f"WHERE table_name ILIKE {quote_literal(self._table_name)}"
+                        f"{catalog_filter}"
                         f"{schema_filter}"
                         " AND data_type NOT IN ('GEOMETRY', 'GEOGRAPHY')"
                         " ORDER BY ordinal_position"
@@ -276,7 +295,8 @@ class SFVectorDataProvider(QgsVectorDataProvider):
 
                     field_info = cur.fetchall()
                     cur.close()
-                    for field_name, field_type in field_info:
+                    for row in field_info:
+                        field_name, field_type = row[0], row[1]
                         qgs_field = QgsField(
                             field_name, mapping_snowflake_qgis_type[field_type]
                         )
@@ -298,14 +318,49 @@ class SFVectorDataProvider(QgsVectorDataProvider):
                                 data[0],
                                 SNOWFLAKE_METADATA_TYPE_CODE_DICT.get(
                                     data[1],
-                                    SNOWFLAKE_METADATA_TYPE_CODE_DICT[2][
-                                        "qvariant_type"
-                                    ],
+                                    SNOWFLAKE_METADATA_TYPE_CODE_DICT[2],
                                 ).get("qvariant_type"),
                             )
                             self._fields.append(qgs_field)
 
         return self._fields
+
+    def defaultValue(self, fieldIndex, context=None):
+        """Auto-generate the next sequential value for numeric primary key columns."""
+        fields = self.fields()
+        if fieldIndex < 0 or fieldIndex >= fields.count():
+            return QVariant()
+        field = fields.field(fieldIndex)
+        if field.name() != self._primary_key:
+            return QVariant()
+        if field.type() not in (QMetaType.Type.Int, QMetaType.Type.Double, QMetaType.Type.LongLong):
+            return QVariant()
+        next_val = get_next_primary_key_value(
+            self._context_information, self._table_name, self._primary_key,
+        )
+        if next_val is not None:
+            # Wrap in QVariant for Qt6 consistency; some QGIS paths check
+            # QVariant.isNull() and reject raw Python ints when a null-check
+            # is expected.
+            return QVariant(next_val)
+        return QVariant()
+
+    def defaultValueClause(self, fieldIndex):
+        """Advertise an auto-increment default for the PK column.
+
+        Returning a non-empty string tells QGIS' attribute form to treat the
+        field as having a server-generated default, which triggers
+        defaultValue() to populate the actual next ID on form open.
+        """
+        fields = self.fields()
+        if fieldIndex < 0 or fieldIndex >= fields.count():
+            return ""
+        field = fields.field(fieldIndex)
+        if field.name() != self._primary_key:
+            return ""
+        if field.type() not in (QMetaType.Type.Int, QMetaType.Type.Double, QMetaType.Type.LongLong):
+            return ""
+        return "Autogenerated"
 
     def dataSourceUri(self, expandAuthConfig=False):
         """Returns the data source specification: database path and
@@ -439,8 +494,11 @@ class SFVectorDataProvider(QgsVectorDataProvider):
         self._features_loaded = False
         self._feature_count = None
         self._extent = None
-        self._fields = None
         self.connect_database()
+        # Notify QGIS so the layer-level feature cache (QgsVectorLayerCache)
+        # and the attribute table model refresh without requiring the user
+        # to close and reopen the layer.
+        self.dataChanged.emit()
 
     # -- QGIS QMetaType -> Snowflake DDL type mapping for addAttributes ------
     _QGIS_TO_SF_TYPE = {
@@ -505,11 +563,8 @@ class SFVectorDataProvider(QgsVectorDataProvider):
                 if err:
                     self.pushError(err)
                     all_ok = False
-                else:
-                    updated = QgsFeature(feature)
-                    for field_idx, new_value in field_map.items():
-                        updated.setAttribute(field_idx, self._unwrap_value(new_value))
-                    self._features[fid] = updated
+            if all_ok:
+                self.reloadData()
             return all_ok
         except Exception as e:
             self.pushError(f"changeAttributeValues: {e}")
@@ -533,6 +588,17 @@ class SFVectorDataProvider(QgsVectorDataProvider):
                 if err:
                     self.pushError(err)
                     all_ok = False
+                else:
+                    # Stamp the inserted feature with the PK value as its fid so
+                    # QGIS' edit buffer / attribute table correlates it with the
+                    # row that lands in Snowflake after reloadData().
+                    if self._primary_key:
+                        pk_val = self._unwrap_value(feat.attribute(self._primary_key))
+                        if pk_val is not None:
+                            try:
+                                feat.setId(int(pk_val))
+                            except (ValueError, TypeError):
+                                pass
             self.reloadData()
             return all_ok, flist
         except Exception as e:
