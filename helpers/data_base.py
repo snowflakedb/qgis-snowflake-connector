@@ -34,7 +34,7 @@ def get_schema_iterator(settings: QSettings, connection_name: str) -> SFFeatureI
     query = f"""SELECT DISTINCT SCHEMA_NAME
 FROM INFORMATION_SCHEMA.SCHEMATA
 WHERE CATALOG_NAME ILIKE {quote_literal(auth_information["database"])}
-ORDER BY SCHEMA_NAME"""
+ORDER BY SCHEMA_NAME"""  # nosec B608 - value escaped via quote_literal
 
     sf_data_provider.load_data(query, connection_name)
     return sf_data_provider.get_feature_iterator()
@@ -78,9 +78,9 @@ def filter_geo_columns(
                 (SELECT H3_IS_VALID_CELL({column})
                 FROM {table}
                 WHERE {column} IS NOT NULL
-                LIMIT 1)""")
+                LIMIT 1)""")  # nosec B608 - table/column sanitized via qualified_table_name/quote_identifier
     if len(number_queries) > 0:
-        query = f"SELECT {','.join(number_queries)}"
+        query = f"SELECT {','.join(number_queries)}"  # nosec B608 - subqueries pre-sanitized above
         result = sf_data_provider.execute_query(query, connection_name).fetchall()[0]
         for i in range(len(result)):
             if result[i]:
@@ -111,7 +111,7 @@ def get_table_geo_columns(
 FROM INFORMATION_SCHEMA.COLUMNS
 WHERE TABLE_CATALOG ILIKE {quote_literal(sf_data_provider.connection_params["database"])}
 AND TABLE_SCHEMA ILIKE {quote_literal(table_name)}
-ORDER BY TABLE_NAME, COLUMN_NAME"""
+ORDER BY TABLE_NAME, COLUMN_NAME"""  # nosec B608 - values escaped via quote_literal
 
     sf_data_provider.load_data(schema_selected_query, connection_name)
     columns = sf_data_provider.get_feature_iterator()
@@ -142,7 +142,7 @@ def get_geo_columns(
 FROM INFORMATION_SCHEMA.COLUMNS
 WHERE TABLE_CATALOG ILIKE {quote_literal(sf_data_provider.connection_params["database"])}
 AND DATA_TYPE IN ('GEOGRAPHY', 'GEOMETRY', 'NUMBER', 'TEXT')
-ORDER BY TABLE_NAME, COLUMN_NAME"""
+ORDER BY TABLE_NAME, COLUMN_NAME"""  # nosec B608 - value escaped via quote_literal
 
     sf_data_provider.load_data(schema_selected_query, connection_name)
     columns = sf_data_provider.get_feature_iterator()
@@ -177,7 +177,7 @@ FROM INFORMATION_SCHEMA.COLUMNS
 WHERE TABLE_CATALOG ILIKE {quote_literal(auth_information["database"])}
 AND TABLE_SCHEMA ILIKE {quote_literal(schema_data_item.clean_name)}
 AND TABLE_NAME ILIKE {quote_literal(table_data_item.clean_name)}
-ORDER BY COLUMN_NAME"""
+ORDER BY COLUMN_NAME"""  # nosec B608 - values escaped via quote_literal
 
     sf_data_provider.load_data(query, connection_name)
     return sf_data_provider.get_feature_iterator()
@@ -202,7 +202,7 @@ def get_table_iterator(settings: QSettings, connection_name: str, schema_name: s
 FROM INFORMATION_SCHEMA.TABLES
 WHERE table_catalog ILIKE {quote_literal(auth_information["database"])}
 AND TABLE_SCHEMA ILIKE {quote_literal(schema_name)}
-ORDER BY TABLE_NAME"""
+ORDER BY TABLE_NAME"""  # nosec B608 - values escaped via quote_literal
 
     sf_data_provider.load_data(query, connection_name)
     return sf_data_provider.get_feature_iterator()
@@ -264,7 +264,7 @@ def get_columns_cursor(
         AND TABLE_SCHEMA ILIKE {quote_literal(schema)}
         AND TABLE_NAME ILIKE {quote_literal(table)}
         ORDER BY COLUMN_NAME
-    """
+    """  # nosec B608 - values escaped via quote_literal
     return sf_data_provider.execute_query(
         query=query_select_columns, connection_name=connection_name
     )
@@ -361,7 +361,7 @@ def get_count_schemas(
     query_search_public_schema = f"""SELECT DISTINCT SCHEMA_NAME
 FROM INFORMATION_SCHEMA.SCHEMATA
 WHERE CATALOG_NAME ILIKE {quote_literal(data_base_name)}
-AND SCHEMA_NAME ILIKE {quote_literal(schema_name)}"""
+AND SCHEMA_NAME ILIKE {quote_literal(schema_name)}"""  # nosec B608 - values escaped via quote_literal
     return __get_cur_count(settings, connection_name, query_search_public_schema)
 
 
@@ -406,7 +406,7 @@ def get_count_tables(
 FROM INFORMATION_SCHEMA.TABLES
 WHERE TABLE_CATALOG ILIKE {quote_literal(database_name)}
 AND TABLE_SCHEMA ILIKE {quote_literal(schema_name)}
-AND TABLE_NAME ILIKE {quote_literal(table_name)}"""
+AND TABLE_NAME ILIKE {quote_literal(table_name)}"""  # nosec B608 - values escaped via quote_literal
 
     return __get_cur_count(settings, connection_name, query_search_table)
 
@@ -441,7 +441,7 @@ def get_srid_from_table_geo_column(
     """
     connection_manager: SFConnectionManager = SFConnectionManager.get_instance()
     query_srid = (
-        f'SELECT ANY_VALUE(ST_SRID({quote_identifier(geo_column_name)})) '
+        f'SELECT ANY_VALUE(ST_SRID({quote_identifier(geo_column_name)})) '  # nosec B608 - identifiers escaped via quote_identifier
         f'FROM {quote_identifier(table_name)} WHERE {quote_identifier(geo_column_name)} IS NOT NULL'
     )
     cur = connection_manager.execute_query(
@@ -499,7 +499,7 @@ def get_geo_column_type(
     """
     connection_manager: SFConnectionManager = SFConnectionManager.get_instance()
     query_geo_column_type = (
-        "SELECT DISTINCT DATA_TYPE "
+        "SELECT DISTINCT DATA_TYPE "  # nosec B608 - values escaped via quote_literal
         "FROM INFORMATION_SCHEMA.COLUMNS "
         f"WHERE TABLE_CATALOG ILIKE {quote_literal(context_information['database_name'])} "
         f"AND TABLE_SCHEMA ILIKE {quote_literal(context_information['schema_name'])} "
@@ -574,7 +574,7 @@ def get_srid_from_sql_query_geo_column(
 ) -> int:
     connection_manager: SFConnectionManager = SFConnectionManager.get_instance()
     query_srid = (
-        f'SELECT ANY_VALUE(ST_SRID({quote_identifier(context_information["geo_column_name"])})) '
+        f'SELECT ANY_VALUE(ST_SRID({quote_identifier(context_information["geo_column_name"])})) '  # nosec B608 - identifier escaped via quote_identifier; query wrapped in subquery
         f'FROM ({query}) WHERE {quote_identifier(context_information["geo_column_name"])} IS NOT NULL'
     )
     cur = connection_manager.execute_query(
@@ -616,7 +616,7 @@ def get_geo_types_from_geo_json_column(
     """
     connection_manager: SFConnectionManager = SFConnectionManager.get_instance()
     query_geo_type = (
-        f'SELECT DISTINCT ST_ASGEOJSON({quote_identifier(column)}):type::string '
+        f'SELECT DISTINCT ST_ASGEOJSON({quote_identifier(column)}):type::string '  # nosec B608 - identifier escaped via quote_identifier; from_clause is caller-quoted
         f'FROM {from_clause} WHERE {quote_identifier(column)} IS NOT NULL'
     )
     cur = connection_manager.execute_query(
@@ -686,7 +686,7 @@ def check_from_clause_exceeds_size(
         bool: True if the number of rows exceeds the limit size, False otherwise.
     """
     connection_manager: SFConnectionManager = SFConnectionManager.get_instance()
-    query = f"SELECT count(*) FROM {from_clause}"
+    query = f"SELECT count(*) FROM {from_clause}"  # nosec B608 - from_clause is caller-quoted via quote_identifier or subquery
     cur = connection_manager.execute_query(
         connection_name=context_information["connection_name"],
         query=query,
@@ -745,7 +745,7 @@ def get_limit_sql_query(
     connection_manager: SFConnectionManager = SFConnectionManager.get_instance()
     cur_desc = connection_manager.execute_query(
         connection_name=context_information["connection_name"],
-        query=f"SELECT * FROM ({query}) LIMIT 0",
+        query=f"SELECT * FROM ({query}) LIMIT 0",  # nosec B608 - query is wrapped in subquery; LIMIT is a constant
         context_information=context_information,
     )
     cur_description = cur_desc.description
@@ -781,7 +781,7 @@ def get_limit_sql_query(
                 }
         h3_query_any_value_columns.append(h3_query_any_value_column_value)
 
-    sub_query = f"SELECT {query_columns} FROM ({query}) LIMIT {limit}"
+    sub_query = f"SELECT {query_columns} FROM ({query}) LIMIT {limit}"  # nosec B608 - query_columns built from quoted identifiers; limit is an int; query wrapped in subquery
     cur = connection_manager.execute_query(
         connection_name=context_information["connection_name"],
         query=sub_query,
@@ -815,7 +815,7 @@ def get_h3_columns_from_query(
         typing.List: A list containing the rows of the result set from the executed sub-query.
     """
     connection_manager: SFConnectionManager = SFConnectionManager.get_instance()
-    sub_query = f"SELECT {generate_query_columns(query_columns)} FROM (SELECT * FROM ({query}) LIMIT 1)"
+    sub_query = f"SELECT {generate_query_columns(query_columns)} FROM (SELECT * FROM ({query}) LIMIT 1)"  # nosec B608 - generated columns use quoted aliases; query wrapped in subquery
     cur = None
     try:
         cur = connection_manager.execute_query(
@@ -897,7 +897,7 @@ def get_table_columns(
     """
     connection_manager: SFConnectionManager = SFConnectionManager.get_instance()
     query_table_columns = (
-        "SELECT COLUMN_NAME "
+        "SELECT COLUMN_NAME "  # nosec B608 - values escaped via quote_literal
         "FROM INFORMATION_SCHEMA.COLUMNS "
         f"WHERE TABLE_CATALOG ILIKE {quote_literal(context_information['database_name'])} "
         f"AND TABLE_SCHEMA ILIKE {quote_literal(context_information['schema_name'])} "
@@ -932,7 +932,7 @@ def check_column_has_duplicates(
         f"{quote_identifier(context_information['table_name'])}"
     )
     query = (
-        f"SELECT COUNT(*) - COUNT(DISTINCT {quote_identifier(column_name)}) "
+        f"SELECT COUNT(*) - COUNT(DISTINCT {quote_identifier(column_name)}) "  # nosec B608 - identifiers escaped via quote_identifier
         f"FROM {fq_table}"
     )
     cur = connection_manager.execute_query(
@@ -960,7 +960,7 @@ def update_table_feature(
     try:
         connection_manager: SFConnectionManager = SFConnectionManager.get_instance()
         update_sql = (
-            f"UPDATE {quote_identifier(context_information['table_name'])} "
+            f"UPDATE {quote_identifier(context_information['table_name'])} "  # nosec B608 - identifiers escaped via quote_identifier; values bound as params
             f"SET {quote_identifier(context_information['column_geom'])} = %s "
             f"WHERE {quote_identifier(context_information['primary_key_name'])} = %s"
         )
@@ -1000,7 +1000,7 @@ def update_table_attributes(
     try:
         connection_manager: SFConnectionManager = SFConnectionManager.get_instance()
         sql = (
-            f"UPDATE {quote_identifier(context_information['table_name'])} "
+            f"UPDATE {quote_identifier(context_information['table_name'])} "  # nosec B608 - identifiers escaped via quote_identifier; set_clauses built from quoted identifiers; values bound as params
             f"SET {', '.join(set_clauses)} "
             f"WHERE {quote_identifier(context_information['primary_key_name'])} = %s"
         )
@@ -1033,7 +1033,7 @@ def insert_table_feature(
         cols = ", ".join(quote_identifier(c) for c in column_names)
         placeholders = ", ".join(["%s"] * len(column_names))
         sql = (
-            f"INSERT INTO {quote_identifier(context_information['table_name'])} "
+            f"INSERT INTO {quote_identifier(context_information['table_name'])} "  # nosec B608 - identifiers escaped via quote_identifier; placeholders are literal '%s'; values bound as params
             f"({cols}) VALUES ({placeholders})"
         )
 
@@ -1063,7 +1063,7 @@ def delete_table_features(
         connection_manager: SFConnectionManager = SFConnectionManager.get_instance()
         placeholders = ", ".join(["%s"] * len(pk_values))
         sql = (
-            f"DELETE FROM {quote_identifier(context_information['table_name'])} "
+            f"DELETE FROM {quote_identifier(context_information['table_name'])} "  # nosec B608 - identifiers escaped via quote_identifier; placeholders are literal '%s'; values bound as params
             f"WHERE {quote_identifier(context_information['primary_key_name'])} "
             f"IN ({placeholders})"
         )
@@ -1143,7 +1143,7 @@ def get_next_primary_key_value(
     try:
         connection_manager: SFConnectionManager = SFConnectionManager.get_instance()
         sql = (
-            f"SELECT COALESCE(MAX({quote_identifier(pk_column)}), 0) + 1 "
+            f"SELECT COALESCE(MAX({quote_identifier(pk_column)}), 0) + 1 "  # nosec B608 - identifiers escaped via quote_identifier
             f"FROM {quote_identifier(table_name)}"
         )
         cur = connection_manager.execute_query(

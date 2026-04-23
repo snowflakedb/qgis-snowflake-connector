@@ -145,7 +145,7 @@ class SFNewTableDialog(QDialog, Ui_QgsNewVectorTableDialogBase):
                     FROM INFORMATION_SCHEMA.COLUMNS
                     WHERE table_catalog ILIKE {quote_literal(auth_information["database"])}
                     ORDER BY TABLE_SCHEMA
-                """
+                """  # nosec B608 - value escaped via quote_literal
 
         sf_data_provider = SFDataProvider(auth_information)
 

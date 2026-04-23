@@ -148,7 +148,7 @@ class SFConnectionStringDialog(QDialog, Ui_QgsPgNewConnectionBase):
                 method_to_call = getattr(widget, method_name)
                 if method_to_call() == "":
                     unfilled_required_fields.append(f"- {field_name}\n")
-            except Exception as _:
+            except Exception as _:  # nosec B110 - skipping a widget that does not expose the expected getter is intentional; field simply isn't treated as required
                 pass
 
         return unfilled_required_fields

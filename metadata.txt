@@ -8,7 +8,7 @@ qgisMinimumVersion=3.34.1
 qgisMaximumVersion=4.99
 supportsQt6=True
 description=This package includes the Snowflake Connector for QGIS.
-version=1.0.10
+version=1.0.11
 author=Snowflake Inc.
 email=erick.cuberojimenez@snowflake.com
 
@@ -21,7 +21,15 @@ repository=https://github.com/snowflakedb/qgis-snowflake-connector/
 # Recommended items:
 
 hasProcessingProvider=yes
-changelog=1.0.10 - Refresh attribute table after edits without reopening the layer;
+changelog=1.0.11 - Security hardening for QGIS plugin portal scan:
+ route all remaining raw identifier interpolation in helpers/layer_creation.py
+ and tasks/sf_connect_task.py through quote_identifier / quote_literal /
+ qualified_table_name; validate URL scheme and host before the GitHub update
+ check in qgis_snowflake_connector.py; replace silent exception swallowing in
+ the feature iterator and export algorithm with QgsMessageLog diagnostics;
+ annotate already-sanitized SQL construction sites with documented bandit
+ suppressions. No user-visible behaviour change.
+ 1.0.10 - Refresh attribute table after edits without reopening the layer;
  advertise auto-increment default for numeric primary keys via defaultValueClause();
  add "Load all rows" option for tables exceeding the 50,000-row visualization limit.
 

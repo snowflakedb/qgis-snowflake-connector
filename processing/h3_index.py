@@ -110,7 +110,7 @@ class H3IndexAlgorithm(QgsProcessingAlgorithm):
         if not overwrite:
             exists_cursor = mgr.execute_query(
                 connection_name,
-                f"SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES "
+                f"SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES "  # nosec B608 - values escaped via quote_literal
                 f"WHERE TABLE_SCHEMA ILIKE {quote_literal(schema)} "
                 f"AND TABLE_NAME ILIKE {quote_literal(output)}",
                 {"schema_name": schema},
@@ -124,7 +124,7 @@ class H3IndexAlgorithm(QgsProcessingAlgorithm):
 
         create_verb = "CREATE OR REPLACE TABLE" if overwrite else "CREATE TABLE"
         sql = (
-            f"{create_verb} {qs}.{qo} AS "
+            f"{create_verb} {qs}.{qo} AS "  # nosec B608 - create_verb is a constant; identifiers escaped via quote_identifier; resolution is an int
             f"SELECT *, "
             f"H3_LATLNG_TO_CELL(ST_Y({qg}), ST_X({qg}), {resolution}) AS H3_INDEX, "
             f"H3_CELL_TO_BOUNDARY(H3_LATLNG_TO_CELL(ST_Y({qg}), ST_X({qg}), {resolution})) AS H3_BOUNDARY "
@@ -138,7 +138,7 @@ class H3IndexAlgorithm(QgsProcessingAlgorithm):
             mgr.execute_query(connection_name, sql, {"schema_name": schema})
             count_cursor = mgr.execute_query(
                 connection_name,
-                f"SELECT COUNT(*) FROM {qs}.{qo}",
+                f"SELECT COUNT(*) FROM {qs}.{qo}",  # nosec B608 - identifiers escaped via quote_identifier
                 {"schema_name": schema},
             )
             count_result = count_cursor.fetchone() if count_cursor else None

@@ -89,7 +89,7 @@ def classFactory(iface):  # pylint: disable=invalid-name
                 "Snowflake Connector",
                 "Required dependencies missing. See Log Messages for details.",
             )
-        except Exception:
+        except Exception:  # nosec B110 - message bar is best-effort; never block plugin bootstrap if iface is unavailable
             pass
         return _StubPlugin()
 
@@ -118,6 +118,6 @@ def classFactory(iface):  # pylint: disable=invalid-name
                 "Snowflake Connector",
                 "Plugin failed to load. See Log Messages for details.",
             )
-        except Exception:
+        except Exception:  # nosec B110 - message bar is best-effort; never block plugin bootstrap if iface is unavailable
             pass
         return _StubPlugin()

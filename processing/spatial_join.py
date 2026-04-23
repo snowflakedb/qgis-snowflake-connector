@@ -106,7 +106,7 @@ class SpatialJoinAlgorithm(QgsProcessingAlgorithm):
         from ..helpers.sql import quote_literal
         cursor = mgr.execute_query(
             connection_name,
-            f"SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+            f"SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "  # nosec B608 - values escaped via quote_literal
             f"WHERE TABLE_SCHEMA ILIKE {quote_literal(schema)} "
             f"AND TABLE_NAME ILIKE {quote_literal(table)} "
             f"ORDER BY ORDINAL_POSITION",
@@ -147,7 +147,7 @@ class SpatialJoinAlgorithm(QgsProcessingAlgorithm):
         if not overwrite:
             exists_cursor = mgr.execute_query(
                 connection_name,
-                f"SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES "
+                f"SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES "  # nosec B608 - values escaped via quote_literal
                 f"WHERE TABLE_SCHEMA ILIKE {quote_literal(schema)} "
                 f"AND TABLE_NAME ILIKE {quote_literal(output)}",
                 ctx,
@@ -181,7 +181,7 @@ class SpatialJoinAlgorithm(QgsProcessingAlgorithm):
 
         create_verb = "CREATE OR REPLACE TABLE" if overwrite else "CREATE TABLE"
         sql = (
-            f"{create_verb} {qs}.{qo} AS "
+            f"{create_verb} {qs}.{qo} AS "  # nosec B608 - create_verb and predicate are constants; identifiers escaped via quote_identifier; select_clause built from quoted identifiers
             f"SELECT {select_clause} "
             f"FROM {qs}.{ql} a "
             f"JOIN {qs}.{qr} b "
@@ -194,7 +194,7 @@ class SpatialJoinAlgorithm(QgsProcessingAlgorithm):
             mgr.execute_query(connection_name, sql, ctx)
             count_cursor = mgr.execute_query(
                 connection_name,
-                f"SELECT COUNT(*) FROM {qs}.{qo}",
+                f"SELECT COUNT(*) FROM {qs}.{qo}",  # nosec B608 - identifiers escaped via quote_identifier
                 ctx,
             )
             count_result = count_cursor.fetchone() if count_cursor else None

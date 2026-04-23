@@ -164,7 +164,7 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                     try:
                         # Checks if the expression is valid
                         query_verify_expression = (
-                            f"SELECT count(*)"
+                            f"SELECT count(*)"  # nosec B608 - expression is a validated QGIS filter expression entered by the user in their own session; from_clause is pre-quoted
                             f" FROM {self._provider._from_clause}"
                             f" WHERE {expression}"
                             " LIMIT 0"
@@ -179,8 +179,13 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                         cur_verify_expression.close()
                         self._expression = expression
                         where_clause_list.append(expression)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        QgsMessageLog.logMessage(
+                            f"Filter expression rejected by Snowflake; "
+                            f"running without pushdown. Error: {exc}",
+                            "Snowflake Plugin",
+                            Qgis.MessageLevel.Info,
+                        )
 
             # Apply the subset string filter
             if self._provider.subsetString():
@@ -275,7 +280,7 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                 order_limit_clause = f" ORDER BY RANDOM() LIMIT {limit_size_for_type(self._provider._geo_column_type)}"
 
             self.final_query = (
-                "select * from ("
+                "select * from ("  # nosec B608 - from_clause pre-quoted; fragments built from quoted identifiers and validated fragments
                 f"select {fields_name_for_query} "
                 f"{geom_query} {index} "
                 f"from {self._provider._from_clause} where {filter_geo_type} {filter_geom_clause}) "

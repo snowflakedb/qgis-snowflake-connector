@@ -172,7 +172,7 @@ class ImportFromSnowflakeAlgorithm(QgsProcessingAlgorithm):
         fq_table = f"{quote_identifier(schema)}.{quote_identifier(table)}"
 
         col_query = (
-            f"SELECT COLUMN_NAME, DATA_TYPE "
+            f"SELECT COLUMN_NAME, DATA_TYPE "  # nosec B608 - values escaped via quote_literal
             f"FROM INFORMATION_SCHEMA.COLUMNS "
             f"WHERE TABLE_SCHEMA ILIKE {quote_literal(schema)} "
             f"AND TABLE_NAME ILIKE {quote_literal(table)} "
@@ -214,9 +214,9 @@ class ImportFromSnowflakeAlgorithm(QgsProcessingAlgorithm):
         select_cols = ", ".join(quote_identifier(c) for c in col_names)
         geo_select = f"ST_ASWKB({quote_identifier(geo_col)}) AS _wkb"
         if select_cols:
-            sql = f"SELECT {select_cols}, {geo_select} FROM {fq_table}"
+            sql = f"SELECT {select_cols}, {geo_select} FROM {fq_table}"  # nosec B608 - select_cols and fq_table built from quote_identifier; geo_select uses quote_identifier
         else:
-            sql = f"SELECT {geo_select} FROM {fq_table}"
+            sql = f"SELECT {geo_select} FROM {fq_table}"  # nosec B608 - fq_table and geo_select built from quote_identifier
         if where:
             sql += f" WHERE {where}"
         if limit > 0:

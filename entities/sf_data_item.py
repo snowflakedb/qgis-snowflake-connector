@@ -422,7 +422,7 @@ WHERE table_catalog ILIKE {quote_literal(auth_information["database"])}
 {schema_filter}
 {table_filter}
 {geo_type_filter}
-ORDER BY {column_name}"""
+ORDER BY {column_name}"""  # nosec B608 - column_name is a fixed literal; values escaped via quote_literal; filters assembled above with quote_literal
 
         return auth_information, column_name, children_item_type, query
 

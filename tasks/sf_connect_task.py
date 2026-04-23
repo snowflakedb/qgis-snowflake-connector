@@ -1,6 +1,7 @@
 import typing
 
 from ..helpers.data_base import get_geo_columns
+from ..helpers.sql import quote_literal
 from ..helpers.utils import get_authentification_information, get_qsettings
 from ..providers.sf_data_source_provider import SFDataProvider
 from qgis.core import QgsTask
@@ -32,10 +33,10 @@ class SFConnectTask(QgsTask):
             self.query = f"""
             SELECT TABLE_CATALOG, TABLE_SCHEMA, TABLE_NAME, COMMENT, COLUMN_NAME, DATA_TYPE
             FROM INFORMATION_SCHEMA.COLUMNS
-            WHERE TABLE_CATALOG = '{self.auth_information["database"].upper()}'
+            WHERE TABLE_CATALOG = {quote_literal(self.auth_information["database"].upper())}
             AND DATA_TYPE in ('GEOGRAPHY', 'GEOMETRY', 'NUMBER', 'TEXT')
             ORDER BY TABLE_CATALOG, TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, DATA_TYPE
-            """
+            """  # nosec B608 - value escaped via quote_literal
             self.connection_name = connection_name
         except Exception as e:
             self.on_handle_error.emit(

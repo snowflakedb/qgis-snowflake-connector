@@ -52,6 +52,8 @@ import json
 import typing
 from qgis.PyQt.QtCore import QCoreApplication, QByteArray, QVariant, QMetaType
 from qgis.core import (
+    Qgis,
+    QgsMessageLog,
     QgsProcessing,
     QgsProcessingAlgorithm,
     QgsProcessingException,
@@ -279,7 +281,7 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
         variant_columns = set()
         try:
             variant_query = (
-                "SELECT column_name FROM information_schema.columns "
+                "SELECT column_name FROM information_schema.columns "  # nosec B608 - values escaped via quote_literal
                 f"WHERE table_catalog ILIKE {quote_literal(selected_database)} "
                 f"AND table_schema ILIKE {quote_literal(selected_schema)} "
                 f"AND table_name ILIKE {quote_literal(selected_table)} "
@@ -290,8 +292,12 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
             )
             variant_columns = {row[0] for row in cur.fetchall()}
             cur.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            QgsMessageLog.logMessage(
+                f"variant column detection skipped: {exc}",
+                "Snowflake Plugin",
+                Qgis.MessageLevel.Info,
+            )
 
         total = 100.0 / source.featureCount() if source.featureCount() else 0
         features = source.getFeatures()
@@ -333,7 +339,7 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
             tuple_position += 1
 
         query_base = (
-            f'INSERT INTO {fq_table} ({query_columns}) '
+            f'INSERT INTO {fq_table} ({query_columns}) '  # nosec B608 - fq_table built via qualified_table_name; query_columns built from quote_identifier; select_projection uses fixed aliases
             f"SELECT {','.join(select_projection)} FROM VALUES "
         )
         query_values_alias = f" AS v({','.join(value_aliases)})"
@@ -626,7 +632,7 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
                     WHERE TABLE_CATALOG ILIKE {quote_literal(selected_database)}
                     AND TABLE_SCHEMA ILIKE {quote_literal(selected_schema)}
                     AND TABLE_NAME ILIKE {quote_literal(selected_table)}
-                """
+                """  # nosec B608 - values escaped via quote_literal
                 cur_select_columns = self.sf_data_provider.execute_query(
                     query_select_columns, selected_connection
                 )

@@ -114,7 +114,7 @@ class BufferTableAlgorithm(QgsProcessingAlgorithm):
         if not overwrite:
             exists_cursor = mgr.execute_query(
                 connection_name,
-                f"SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES "
+                f"SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES "  # nosec B608 - values escaped via quote_literal
                 f"WHERE TABLE_SCHEMA ILIKE {quote_literal(schema)} "
                 f"AND TABLE_NAME ILIKE {quote_literal(output)}",
                 ctx,
@@ -130,7 +130,7 @@ class BufferTableAlgorithm(QgsProcessingAlgorithm):
 
         type_cursor = mgr.execute_query(
             connection_name,
-            f"SELECT DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS "
+            f"SELECT DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS "  # nosec B608 - values escaped via quote_literal
             f"WHERE TABLE_SCHEMA ILIKE {quote_literal(schema)} "
             f"AND TABLE_NAME ILIKE {quote_literal(table)} "
             f"AND COLUMN_NAME ILIKE {quote_literal(geo_col)}",
@@ -152,7 +152,7 @@ class BufferTableAlgorithm(QgsProcessingAlgorithm):
 
         create_verb = "CREATE OR REPLACE TABLE" if overwrite else "CREATE TABLE"
         sql = (
-            f"{create_verb} {qs}.{qo} AS "
+            f"{create_verb} {qs}.{qo} AS "  # nosec B608 - create_verb is a constant; identifiers escaped via quote_identifier; buffer_expr uses quoted identifiers and numeric distance
             f"SELECT * EXCLUDE ({qg}), "
             f"{buffer_expr} AS {qg} "
             f"FROM {qs}.{qt}"
@@ -164,7 +164,7 @@ class BufferTableAlgorithm(QgsProcessingAlgorithm):
             mgr.execute_query(connection_name, sql, ctx)
             count_cursor = mgr.execute_query(
                 connection_name,
-                f"SELECT COUNT(*) FROM {qs}.{qo}",
+                f"SELECT COUNT(*) FROM {qs}.{qo}",  # nosec B608 - identifiers escaped via quote_identifier
                 ctx,
             )
             count_result = count_cursor.fetchone() if count_cursor else None

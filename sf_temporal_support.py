@@ -58,7 +58,7 @@ def configure_temporal_for_layer(layer):
 
         types_in = ", ".join(quote_literal(t) for t in TIMESTAMP_TYPES)
         sql = (
-            f"SELECT COLUMN_NAME, DATA_TYPE "
+            f"SELECT COLUMN_NAME, DATA_TYPE "  # nosec B608 - values escaped via quote_literal; types_in built from quote_literal over fixed allowlist
             f"FROM INFORMATION_SCHEMA.COLUMNS "
             f"WHERE TABLE_SCHEMA ILIKE {quote_literal(schema)} "
             f"AND TABLE_NAME ILIKE {quote_literal(table)} "

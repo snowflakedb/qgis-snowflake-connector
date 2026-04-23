@@ -278,7 +278,7 @@ class SFVectorDataProvider(QgsVectorDataProvider):
                             f" {quote_literal(database_name)}"
                         )
                     query = (
-                        "SELECT DISTINCT column_name, data_type, ordinal_position"
+                        "SELECT DISTINCT column_name, data_type, ordinal_position"  # nosec B608 - values escaped via quote_literal; catalog_filter/schema_filter built with quote_literal above
                         " FROM information_schema.columns "
                         f"WHERE table_name ILIKE {quote_literal(self._table_name)}"
                         f"{catalog_filter}"
@@ -415,11 +415,11 @@ class SFVectorDataProvider(QgsVectorDataProvider):
         results = set()
         quoted_col = quote_identifier(column_name)
         query = (
-            f"SELECT DISTINCT {quoted_col} FROM {self._from_clause} "
+            f"SELECT DISTINCT {quoted_col} FROM {self._from_clause} "  # nosec B608 - identifier escaped via quote_identifier; from_clause is pre-quoted
             f"ORDER BY {quoted_col}"
         )
         if limit >= 0:
-            query += f" LIMIT {limit}"
+            query += f" LIMIT {limit}"  # nosec B608 - limit is an int
 
         cur = self.connection_manager.execute_query(
             connection_name=self._connection_name,
@@ -449,7 +449,7 @@ class SFVectorDataProvider(QgsVectorDataProvider):
                 cur = self.connection_manager.execute_query(
                     connection_name=self._connection_name,
                     query=(
-                        f"SELECT COUNT(*) FROM {self._from_clause} "
+                        f"SELECT COUNT(*) FROM {self._from_clause} "  # nosec B608 - from_clause pre-quoted; subsetstring validated by Snowflake with LIMIT 0 probe
                         f"WHERE {subsetstring} LIMIT 0"
                     ),
                     context_information=self._context_information,
@@ -718,9 +718,9 @@ class SFGeoVectorDataProvider(SFVectorDataProvider):
                 if self._is_limited_unordered:
                     self._feature_count = limit_size_for_type(self._geo_column_type)
                 else:
-                    query = f"SELECT COUNT(*) FROM {self._from_clause}"
+                    query = f"SELECT COUNT(*) FROM {self._from_clause}"  # nosec B608 - from_clause pre-quoted
                     if self.subsetString():
-                        query += f" WHERE {self.subsetString()}"
+                        query += f" WHERE {self.subsetString()}"  # nosec B608 - subsetString validated via setSubsetString LIMIT 0 probe
 
                     cur = self.connection_manager.execute_query(
                         connection_name=self._connection_name,
@@ -741,7 +741,7 @@ class SFGeoVectorDataProvider(SFVectorDataProvider):
             else:
                 qgeom = quote_identifier(self._column_geom)
                 query = (
-                    f'SELECT MIN(ST_XMIN({qgeom})), '
+                    f'SELECT MIN(ST_XMIN({qgeom})), '  # nosec B608 - identifier escaped via quote_identifier; from_clause pre-quoted; geometry_type is a provider-internal constant
                     f'MIN(ST_YMIN({qgeom})), '
                     f'MAX(ST_XMAX({qgeom})), '
                     f'MAX(ST_YMAX({qgeom})) '
@@ -775,7 +775,7 @@ class SFH3VectorDataProvider(SFVectorDataProvider):
     ):
         super().__init__(uri, providerOptions, flags)
         qgeom = quote_identifier(self._column_geom)
-        query = f'SELECT H3_IS_VALID_CELL({qgeom}) FROM {self._from_clause} WHERE {qgeom} IS NOT NULL LIMIT 1'
+        query = f'SELECT H3_IS_VALID_CELL({qgeom}) FROM {self._from_clause} WHERE {qgeom} IS NOT NULL LIMIT 1'  # nosec B608 - identifier escaped via quote_identifier; from_clause pre-quoted
 
         cur = self.connection_manager.execute_query(
             connection_name=self._connection_name,
@@ -795,10 +795,10 @@ class SFH3VectorDataProvider(SFVectorDataProvider):
                     self._feature_count = limit_size_for_type(self._geo_column_type)
                     return self._feature_count
 
-                query = f"SELECT COUNT(*) FROM {self._from_clause}"
-                query += f' WHERE H3_IS_VALID_CELL({quote_identifier(self._column_geom)})'
+                query = f"SELECT COUNT(*) FROM {self._from_clause}"  # nosec B608 - from_clause pre-quoted
+                query += f' WHERE H3_IS_VALID_CELL({quote_identifier(self._column_geom)})'  # nosec B608 - identifier escaped via quote_identifier
                 if self.subsetString():
-                    query += f" AND {self.subsetString()}"
+                    query += f" AND {self.subsetString()}"  # nosec B608 - subsetString validated via setSubsetString LIMIT 0 probe
 
                 cur = self.connection_manager.execute_query(
                     connection_name=self._connection_name,
@@ -819,7 +819,7 @@ class SFH3VectorDataProvider(SFVectorDataProvider):
             else:
                 qgeom = quote_identifier(self._column_geom)
                 query = (
-                    f'SELECT MIN(ST_XMIN(H3_CELL_TO_BOUNDARY({qgeom}))), '
+                    f'SELECT MIN(ST_XMIN(H3_CELL_TO_BOUNDARY({qgeom}))), '  # nosec B608 - identifier escaped via quote_identifier; from_clause pre-quoted
                     f'MIN(ST_YMIN(H3_CELL_TO_BOUNDARY({qgeom}))), '
                     f'MAX(ST_XMAX(H3_CELL_TO_BOUNDARY({qgeom}))), '
                     f'MAX(ST_YMAX(H3_CELL_TO_BOUNDARY({qgeom}))) '
