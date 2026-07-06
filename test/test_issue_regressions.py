@@ -1971,10 +1971,19 @@ class TestSpatialFilterPushdownGuard(unittest.TestCase):
             "qgis_snowflake_connector.providers.sf_feature_source"
         )
         sf_feature_source.SFFeatureSource = type("SFFeatureSource", (), {})
+        managers_pkg = types.ModuleType(
+            "qgis_snowflake_connector.managers"
+        )
+        managers_pkg.__path__ = [str(ROOT / "managers")]
+        sf_connection_manager = types.ModuleType(
+            "qgis_snowflake_connector.managers.sf_connection_manager"
+        )
+        sf_connection_manager.build_op_tag = lambda *a, **k: ""
         for mod in (
             plugin_pkg, helpers_pkg, helpers_limits, helpers_sql,
             helpers_expression_compiler,
             helpers_mappings, providers_pkg, sf_feature_source,
+            managers_pkg, sf_connection_manager,
         ):
             sys.modules.setdefault(mod.__name__, mod)
 
