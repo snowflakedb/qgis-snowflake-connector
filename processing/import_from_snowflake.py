@@ -4,6 +4,7 @@ import os
 
 from qgis.core import (
     QgsProcessingAlgorithm,
+    QgsProcessingException,
     QgsProcessingParameterString,
     QgsProcessingParameterNumber,
     QgsProcessingParameterFeatureSink,
@@ -127,7 +128,11 @@ class ImportFromSnowflakeAlgorithm(QgsProcessingAlgorithm):
             get_type_from_table_geo_column,
         )
         from ..helpers.utils import get_auth_information
-        from ..helpers.sql import quote_identifier, quote_literal
+        from ..helpers.sql import (
+            quote_identifier,
+            quote_literal,
+            predicate_has_statement_breakers,
+        )
         from ..managers.sf_connection_manager import SFConnectionManager
 
         connection_name = self.parameterAsString(parameters, self.CONNECTION, context)
@@ -218,6 +223,12 @@ class ImportFromSnowflakeAlgorithm(QgsProcessingAlgorithm):
         else:
             sql = f"SELECT {geo_select} FROM {fq_table}"  # nosec B608 - fq_table and geo_select built from quote_identifier
         if where:
+            if predicate_has_statement_breakers(where):
+                raise QgsProcessingException(
+                    "The WHERE clause contains disallowed SQL tokens "
+                    "(comments, statement terminators, or set operators such "
+                    "as UNION). Please provide a single boolean predicate."
+                )
             sql += f" WHERE {where}"
         if limit > 0:
             sql += f" LIMIT {limit}"

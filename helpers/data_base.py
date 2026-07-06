@@ -472,7 +472,7 @@ def get_type_from_table_geo_column(
     """
     return get_geo_types_from_geo_json_column(
         column=geo_column_name,
-        from_clause=table_name,
+        from_clause=quote_identifier(table_name),
         context_information=context_information,
     )
 
@@ -519,6 +519,54 @@ def get_geo_column_type(
 from .limits import limit_size_for_type, limit_size_for_table
 
 
+def get_cheap_row_count(
+    context_information: dict,
+) -> typing.Optional[int]:
+    """Best-effort fast row count via ``INFORMATION_SCHEMA.TABLES.ROW_COUNT``.
+
+    Snowflake maintains ``ROW_COUNT`` on base tables without scanning them, so
+    this is effectively free compared to ``SELECT COUNT(*)``. Returns ``None``
+    when the row count is unavailable (views, external tables, temporary
+    tables, or missing catalog/schema info) so the caller can fall back to a
+    real ``COUNT(*)`` probe.
+    """
+    database_name = context_information.get("database_name")
+    schema_name = context_information.get("schema_name")
+    table_name = context_information.get("table_name")
+    if not database_name or not schema_name or not table_name:
+        return None
+    connection_manager: SFConnectionManager = SFConnectionManager.get_instance()
+    query = (
+        "SELECT ROW_COUNT FROM INFORMATION_SCHEMA.TABLES "  # nosec B608 - values escaped via quote_literal
+        f"WHERE TABLE_CATALOG ILIKE {quote_literal(database_name)} "
+        f"AND TABLE_SCHEMA ILIKE {quote_literal(schema_name)} "
+        f"AND TABLE_NAME ILIKE {quote_literal(table_name)} "
+        "AND TABLE_TYPE = 'BASE TABLE' "
+        "AND ROW_COUNT IS NOT NULL"
+    )
+    try:
+        cur = connection_manager.execute_query(
+            connection_name=context_information["connection_name"],
+            query=query,
+            context_information=context_information,
+        )
+        row = cur.fetchone()
+        cur.close()
+    except Exception as e:
+        QgsMessageLog.logMessage(
+            f"get_cheap_row_count lookup failed: {e}",
+            "Snowflake Plugin",
+            Qgis.MessageLevel.Info,
+        )
+        return None
+    if not row or row[0] is None:
+        return None
+    try:
+        return int(row[0])
+    except (ValueError, TypeError):
+        return None
+
+
 def check_table_exceeds_size(
     context_information: dict,
 ) -> bool:
@@ -535,6 +583,10 @@ def check_table_exceeds_size(
     """
 
     limit_size = limit_size_for_table(context_information=context_information)
+    # A4: avoid a blocking COUNT(*) when Snowflake already tracks the row count.
+    cheap = get_cheap_row_count(context_information)
+    if cheap is not None:
+        return cheap > limit_size
     return check_from_clause_exceeds_size(
         from_clause=quote_identifier(context_information["table_name"]),
         context_information=context_information,
@@ -866,6 +918,57 @@ def generate_query_columns(
     return ", ".join(col_map)
 
 
+def get_declared_primary_key(
+    context_information: dict,
+) -> typing.Optional[str]:
+    """Return the single column name of a table's declared primary key, or None.
+
+    Uses ``SHOW PRIMARY KEYS IN TABLE <db>.<schema>.<table>``. Returns ``None``
+    when the table has no declared PK or when the PK is composite (the rest
+    of the provider only supports a single-column PK).
+    """
+    database_name = context_information.get("database_name")
+    schema_name = context_information.get("schema_name")
+    table_name = context_information.get("table_name")
+    if not database_name or not schema_name or not table_name:
+        return None
+    connection_manager: SFConnectionManager = SFConnectionManager.get_instance()
+    fq_table = (
+        f"{quote_identifier(database_name)}."
+        f"{quote_identifier(schema_name)}."
+        f"{quote_identifier(table_name)}"
+    )
+    query = f"SHOW PRIMARY KEYS IN TABLE {fq_table}"
+    try:
+        cur = connection_manager.execute_query(
+            connection_name=context_information["connection_name"],
+            query=query,
+            context_information=context_information,
+        )
+        # SHOW PRIMARY KEYS column order is stable:
+        # created_on, database_name, schema_name, table_name, column_name, ...
+        column_name_idx = 4
+        for desc in cur.description:
+            if desc[0].lower() == "column_name":
+                column_name_idx = cur.description.index(desc)
+                break
+        rows = cur.fetchall()
+        cur.close()
+    except Exception as e:
+        QgsMessageLog.logMessage(
+            f"get_declared_primary_key lookup failed: {e}",
+            "Snowflake Plugin",
+            Qgis.MessageLevel.Info,
+        )
+        return None
+    if not rows or len(rows) != 1:
+        return None
+    try:
+        return str(rows[0][column_name_idx])
+    except (IndexError, TypeError):
+        return None
+
+
 def get_table_columns(
     context_information: dict,
 ) -> typing.List[typing.Tuple[str]]:
@@ -945,6 +1048,17 @@ def check_column_has_duplicates(
     return row[0] > 0
 
 
+def _edit_op_tag(context_information: dict) -> str:
+    """Build the QUERY_TAG payload used for every plugin-issued DML (E3)."""
+    from ..managers.sf_connection_manager import build_op_tag
+    return build_op_tag(
+        "edit",
+        connection_name=context_information.get("connection_name"),
+        schema=context_information.get("schema_name"),
+        table=context_information.get("table_name"),
+    )
+
+
 def update_table_feature(
     context_information: dict,
 ) -> bool:
@@ -975,6 +1089,7 @@ def update_table_feature(
             query=update_sql,
             params=params,
             context_information=context_information,
+            op_tag=_edit_op_tag(context_information),
         )
 
         cur.close()
@@ -1010,6 +1125,7 @@ def update_table_attributes(
             query=sql,
             params=params,
             context_information=context_information,
+            op_tag=_edit_op_tag(context_information),
         )
         cur.close()
         return None
@@ -1042,6 +1158,7 @@ def insert_table_feature(
             query=sql,
             params=params,
             context_information=context_information,
+            op_tag=_edit_op_tag(context_information),
         )
         cur.close()
         return None
@@ -1073,6 +1190,7 @@ def delete_table_features(
             query=sql,
             params=tuple(pk_values),
             context_information=context_information,
+            op_tag=_edit_op_tag(context_information),
         )
         cur.close()
         return None
@@ -1093,12 +1211,14 @@ def alter_table_add_columns(
     try:
         connection_manager: SFConnectionManager = SFConnectionManager.get_instance()
         table = quote_identifier(context_information["table_name"])
+        edit_tag = _edit_op_tag(context_information)
         for col_name, col_type in columns:
             sql = f"ALTER TABLE {table} ADD COLUMN {quote_identifier(col_name)} {col_type}"
             cur = connection_manager.execute_query(
                 connection_name=context_information["connection_name"],
                 query=sql,
                 context_information=context_information,
+                op_tag=edit_tag,
             )
             cur.close()
         return None
@@ -1119,12 +1239,14 @@ def alter_table_drop_columns(
     try:
         connection_manager: SFConnectionManager = SFConnectionManager.get_instance()
         table = quote_identifier(context_information["table_name"])
+        edit_tag = _edit_op_tag(context_information)
         for col_name in column_names:
             sql = f"ALTER TABLE {table} DROP COLUMN {quote_identifier(col_name)}"
             cur = connection_manager.execute_query(
                 connection_name=context_information["connection_name"],
                 query=sql,
                 context_information=context_information,
+                op_tag=edit_tag,
             )
             cur.close()
         return None
