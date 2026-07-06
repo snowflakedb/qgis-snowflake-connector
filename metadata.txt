@@ -8,7 +8,7 @@ qgisMinimumVersion=3.34.1
 qgisMaximumVersion=4.99
 supportsQt6=True
 description=This package includes the Snowflake Connector for QGIS.
-version=1.0.14
+version=1.0.15
 author=Snowflake Inc.
 email=erick.cuberojimenez@snowflake.com
 
@@ -21,10 +21,11 @@ repository=https://github.com/snowflakedb/qgis-snowflake-connector/
 # Recommended items:
 
 hasProcessingProvider=yes
-changelog=1.0.14 - Fix packaging: install under the valid Python package name
- qgis_snowflake_connector (underscore) instead of the hyphenated folder, which
- QGIS could not import consistently and caused a ModuleNotFoundError in
- SFFeatureSource when loading or rendering a layer.
+changelog=1.0.15 - Fix layer load/rendering error at its root: remove a stray
+ sys.path entry that let the plugin modules import under two names, causing a
+ ModuleNotFoundError in SFFeatureSource. Restores the canonical package folder
+ name for the QGIS plugin repository.
+ 1.0.14 - Packaging change (superseded by 1.0.15).
  1.0.13 - Fix SNOW-3712094 auth-config reuse: load the stored config
  with full=True so the connection alias is matched and the existing authcfg id
  is reused, instead of leaking a new QGIS auth config on every layer creation.
