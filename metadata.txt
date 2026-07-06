@@ -6,9 +6,8 @@
 name=Snowflake Connector for QGIS
 qgisMinimumVersion=3.34.1
 qgisMaximumVersion=4.99
-supportsQt6=True
 description=This package includes the Snowflake Connector for QGIS.
-version=1.0.15
+version=1.0.16
 author=Snowflake Inc.
 email=erick.cuberojimenez@snowflake.com
 
@@ -21,7 +20,11 @@ repository=https://github.com/snowflakedb/qgis-snowflake-connector/
 # Recommended items:
 
 hasProcessingProvider=yes
-changelog=1.0.15 - Fix layer load/rendering error at its root: remove a stray
+changelog=1.0.16 - Packaging/metadata cleanup for the QGIS plugin repository:
+ remove the deprecated supportsQt6 flag (QGIS 4 compatibility is set via
+ qgisMaximumVersion) and exclude the Sphinx help/make.bat from the package so
+ it no longer trips the repository's suspicious-file scan.
+ 1.0.15 - Fix layer load/rendering error at its root: remove a stray
  sys.path entry that let the plugin modules import under two names, causing a
  ModuleNotFoundError in SFFeatureSource. Restores the canonical package folder
  name for the QGIS plugin repository.

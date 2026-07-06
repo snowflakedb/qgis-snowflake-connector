@@ -101,7 +101,7 @@ def build_package(repo_root, output_dir, include_tests=False, slim=False):
                     item,
                     dest,
                     ignore=shutil.ignore_patterns(
-                        "__pycache__", "*.pyc", "*.pyo", ".DS_Store"
+                        "__pycache__", "*.pyc", "*.pyo", ".DS_Store", "*.bat"
                     ),
                 )
             else:
