@@ -179,7 +179,11 @@ class SFConnectionStringDialog(QDialog, Ui_QgsPgNewConnectionBase):
                 self.cbxConnectionType.currentText() == "Default Authentication"
             )
 
-            if is_default_auth:
+            # SNOW-3712079: only persist a cleartext password when the user is
+            # NOT using the encrypted (Configurations) tab. Capturing it
+            # unconditionally leaked the password into the world-readable INI
+            # even after the user opted into QgsAuthManager storage.
+            if is_default_auth and not config_tab_selected:
                 conn_settings["password"] = self.mAuthSettings.password()
 
             if config_tab_selected:

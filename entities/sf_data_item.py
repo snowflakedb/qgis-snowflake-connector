@@ -27,7 +27,7 @@ from ..helpers.utils import (
 from ..helpers.sql import quote_literal
 from ..tasks.sf_convert_column_to_layer_task import SFConvertColumnToLayerTask
 from ..dialogs.sf_connection_string_dialog import SFConnectionStringDialog
-from qgis.PyQt.QtCore import pyqtSignal
+from qgis.PyQt.QtCore import pyqtSignal, Qt
 from qgis.core import (
     QgsDataItem,
     Qgis,
@@ -473,15 +473,21 @@ ORDER BY {column_name}"""  # nosec B608 - column_name is a fixed literal; values
         """
         try:
             if self.item_type == "table_no_geom":
-                # Show message for non-geometry tables
-                QMessageBox.information(
-                    None,
-                    "No Geometry Column",
+                # SNOW-3712087: the table name is server-controlled and shown on
+                # the first line. Force plain text so Qt::mightBeRichText() can
+                # never switch the label to rich text and auto-load a UNC <img>
+                # (forced SMB auth / NTLM hash leak).
+                msg_box = QMessageBox(None)
+                msg_box.setIcon(QMessageBox.Icon.Information)
+                msg_box.setWindowTitle("No Geometry Column")
+                msg_box.setTextFormat(Qt.TextFormat.PlainText)
+                msg_box.setText(
                     f"Table '{self.clean_name}' has no geometry column and cannot be displayed on the map.\n\n"
                     "You can:\n"
                     "• Use 'Execute SQL' to query this table\n"
-                    "• View/edit attributes via Processing tools",
+                    "• View/edit attributes via Processing tools"
                 )
+                msg_box.exec()
                 return True
             if self.item_type == "table" and not self.geom_column:
                 return False
