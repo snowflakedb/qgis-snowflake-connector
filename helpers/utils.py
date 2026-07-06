@@ -484,8 +484,10 @@ def get_or_create_connection_authcfg(connection_name: str):
 
         auth_manager = QgsApplication.authManager()
         if existing:
-            probe = QgsAuthMethodConfig()
-            auth_manager.loadAuthenticationConfig(existing, probe, False)
+            # full=True so the encrypted config map (connection_name) is
+            # actually loaded; otherwise probe.config(...) is empty and we would
+            # never reuse the stored id, leaking a new auth config every call.
+            probe = get_auth_method_config(existing)
             if probe.isValid() and probe.config("connection_name") == connection_name:
                 return existing
 

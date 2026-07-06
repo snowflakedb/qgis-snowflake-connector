@@ -58,6 +58,324 @@ def _load_helpers_utils(testcase):
     return mod
 
 
+# --- Fake QgsExpression AST node classes for the expression compiler tests ---
+# These duck-type the PyQGIS node API used by helpers/expression_compiler.py.
+# The SAME class objects are injected into the stubbed qgis.core so the
+# compiler's isinstance() checks match instances built here.
+
+
+class _FakeColumnRef:
+    def __init__(self, name):
+        self._name = name
+
+    def name(self):
+        return self._name
+
+
+class _FakeLiteral:
+    def __init__(self, value):
+        self._value = value
+
+    def value(self):
+        return self._value
+
+
+class _FakeBinaryOperator:
+    # Enum values mirror QgsExpressionNodeBinaryOperator (exact values are not
+    # important as long as they are consistent between here and the compiler).
+    boOr = 0
+    boAnd = 1
+    boEQ = 2
+    boNE = 3
+    boLE = 4
+    boGE = 5
+    boLT = 6
+    boGT = 7
+    boRegexp = 8
+    boLike = 9
+    boNotLike = 10
+    boILike = 11
+    boNotILike = 12
+    boIs = 13
+    boIsNot = 14
+    boPlus = 15
+    boMinus = 16
+    boMul = 17
+    boDiv = 18
+
+    def __init__(self, op, left, right):
+        self._op = op
+        self._left = left
+        self._right = right
+
+    def op(self):
+        return self._op
+
+    def opLeft(self):
+        return self._left
+
+    def opRight(self):
+        return self._right
+
+
+class _FakeUnaryOperator:
+    uoNot = 0
+    uoMinus = 1
+
+    def __init__(self, op, operand):
+        self._op = op
+        self._operand = operand
+
+    def op(self):
+        return self._op
+
+    def operand(self):
+        return self._operand
+
+
+class _FakeNodeList:
+    def __init__(self, nodes):
+        self._nodes = nodes
+
+    def list(self):
+        return self._nodes
+
+
+class _FakeInOperator:
+    def __init__(self, node, members, is_not=False):
+        self._node = node
+        self._list = _FakeNodeList(members)
+        self._is_not = is_not
+
+    def node(self):
+        return self._node
+
+    def list(self):
+        return self._list
+
+    def isNotIn(self):
+        return self._is_not
+
+
+class _FakeExpression:
+    def __init__(self, text):
+        self._text = text
+
+    def hasParserError(self):
+        return False
+
+    def rootNode(self):
+        return None
+
+
+class _FakeField:
+    def __init__(self, name):
+        self._name = name
+
+    def name(self):
+        return self._name
+
+
+class _FakeFields:
+    """Case-insensitive field lookup mirroring QgsFields."""
+
+    def __init__(self, names):
+        self._names = list(names)
+
+    def lookupField(self, name):
+        for idx, existing in enumerate(self._names):
+            if existing.lower() == name.lower():
+                return idx
+        return -1
+
+    def at(self, idx):
+        return _FakeField(self._names[idx])
+
+
+class _FakeUnsupportedNode:
+    """A node type outside the whitelist (e.g. a function)."""
+
+
+def _load_expression_compiler(testcase):
+    """Load the real helpers/expression_compiler.py against a stub qgis.core
+    that exposes the AST node classes (but NOT QgsSqlExpressionCompiler).
+
+    This exercises the module's real import list, so it guards against the
+    plugin-load crash that occurred when the module depended on the
+    unavailable QgsSqlExpressionCompiler binding.
+    """
+    import sys
+    import types
+    import importlib.util
+
+    names = ("qgis", "qgis.core", "helpers", "helpers.sql",
+             "helpers.expression_compiler")
+    saved = {n: sys.modules.get(n) for n in names}
+
+    def _restore():
+        for n, prev in saved.items():
+            if prev is None:
+                sys.modules.pop(n, None)
+            else:
+                sys.modules[n] = prev
+    testcase.addCleanup(_restore)
+
+    qgis = types.ModuleType("qgis")
+    core = types.ModuleType("qgis.core")
+    core.QgsExpression = _FakeExpression
+    core.QgsExpressionNodeBinaryOperator = _FakeBinaryOperator
+    core.QgsExpressionNodeColumnRef = _FakeColumnRef
+    core.QgsExpressionNodeInOperator = _FakeInOperator
+    core.QgsExpressionNodeLiteral = _FakeLiteral
+    core.QgsExpressionNodeUnaryOperator = _FakeUnaryOperator
+    core.QgsFields = _FakeFields
+    qgis.core = core
+    sys.modules["qgis"] = qgis
+    sys.modules["qgis.core"] = core
+
+    # Register a "helpers" package rooted at the real folder so the module's
+    # relative "from .sql import ..." resolves to the real (pure-Python) sql.py.
+    helpers_pkg = types.ModuleType("helpers")
+    helpers_pkg.__path__ = [str(ROOT / "helpers")]
+    sys.modules["helpers"] = helpers_pkg
+    sys.modules.pop("helpers.sql", None)
+
+    spec = importlib.util.spec_from_file_location(
+        "helpers.expression_compiler", ROOT / "helpers" / "expression_compiler.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["helpers.expression_compiler"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class TestExpressionCompilerCompilation(unittest.TestCase):
+    """Behavioral + import-safety tests for the pure-Python AST compiler."""
+
+    def setUp(self):
+        self.mod = _load_expression_compiler(self)
+        self.fields = _FakeFields(["POP", "NAME", "ID"])
+
+    def _compile(self, node):
+        return self.mod._compile_node(node, self.fields)
+
+    def test_module_imports_without_qgs_sql_expression_compiler(self):
+        # The mere fact setUp() loaded the module under a qgis.core that does
+        # NOT define QgsSqlExpressionCompiler proves the import bug is gone.
+        self.assertTrue(hasattr(self.mod, "compile_expression_to_sql"))
+
+    def test_equality_compiles_with_quoting(self):
+        node = _FakeBinaryOperator(
+            _FakeBinaryOperator.boEQ, _FakeColumnRef("POP"), _FakeLiteral(1000)
+        )
+        self.assertEqual(self._compile(node), "(POP = 1000)")
+
+    def test_and_of_predicates_compiles(self):
+        node = _FakeBinaryOperator(
+            _FakeBinaryOperator.boAnd,
+            _FakeBinaryOperator(
+                _FakeBinaryOperator.boGT, _FakeColumnRef("POP"), _FakeLiteral(1000)
+            ),
+            _FakeBinaryOperator(
+                _FakeBinaryOperator.boILike,
+                _FakeColumnRef("NAME"),
+                _FakeLiteral("A%"),
+            ),
+        )
+        self.assertEqual(
+            self._compile(node), "((POP > 1000) AND (NAME ILIKE 'A%'))"
+        )
+
+    def test_or_of_predicates_compiles(self):
+        node = _FakeBinaryOperator(
+            _FakeBinaryOperator.boOr,
+            _FakeBinaryOperator(
+                _FakeBinaryOperator.boEQ, _FakeColumnRef("ID"), _FakeLiteral(1)
+            ),
+            _FakeBinaryOperator(
+                _FakeBinaryOperator.boEQ, _FakeColumnRef("ID"), _FakeLiteral(2)
+            ),
+        )
+        self.assertEqual(
+            self._compile(node), "((ID = 1) OR (ID = 2))"
+        )
+
+    def test_in_operator_compiles(self):
+        node = _FakeInOperator(
+            _FakeColumnRef("ID"), [_FakeLiteral(1), _FakeLiteral(2)]
+        )
+        self.assertEqual(self._compile(node), "(ID IN (1, 2))")
+
+    def test_not_in_operator_compiles(self):
+        node = _FakeInOperator(
+            _FakeColumnRef("ID"), [_FakeLiteral(1)], is_not=True
+        )
+        self.assertEqual(self._compile(node), "(ID NOT IN (1))")
+
+    def test_not_unary_compiles(self):
+        node = _FakeUnaryOperator(
+            _FakeUnaryOperator.uoNot,
+            _FakeBinaryOperator(
+                _FakeBinaryOperator.boEQ, _FakeColumnRef("POP"), _FakeLiteral(1)
+            ),
+        )
+        self.assertEqual(self._compile(node), "(NOT (POP = 1))")
+
+    def test_string_literal_is_escaped(self):
+        node = _FakeBinaryOperator(
+            _FakeBinaryOperator.boEQ,
+            _FakeColumnRef("NAME"),
+            _FakeLiteral("x'); DROP TABLE t;--"),
+        )
+        compiled = self._compile(node)
+        self.assertEqual(compiled, "(NAME = 'x''); DROP TABLE t;--')")
+
+    def test_null_and_bool_literals(self):
+        is_null = _FakeBinaryOperator(
+            _FakeBinaryOperator.boIs, _FakeColumnRef("NAME"), _FakeLiteral(None)
+        )
+        self.assertEqual(self._compile(is_null), "(NAME IS NULL)")
+        is_true = _FakeBinaryOperator(
+            _FakeBinaryOperator.boEQ, _FakeColumnRef("ID"), _FakeLiteral(True)
+        )
+        self.assertEqual(self._compile(is_true), "(ID = TRUE)")
+
+    def test_unknown_column_returns_none(self):
+        node = _FakeBinaryOperator(
+            _FakeBinaryOperator.boEQ, _FakeColumnRef("SECRET"), _FakeLiteral(1)
+        )
+        self.assertIsNone(self._compile(node))
+
+    def test_unsupported_binary_operator_returns_none(self):
+        node = _FakeBinaryOperator(
+            _FakeBinaryOperator.boPlus, _FakeColumnRef("POP"), _FakeLiteral(1)
+        )
+        self.assertIsNone(self._compile(node))
+
+    def test_unsupported_node_type_returns_none(self):
+        self.assertIsNone(self._compile(_FakeUnsupportedNode()))
+
+    def test_unary_minus_returns_none(self):
+        node = _FakeUnaryOperator(
+            _FakeUnaryOperator.uoMinus, _FakeLiteral(1)
+        )
+        self.assertIsNone(self._compile(node))
+
+    def test_in_with_uncompilable_member_returns_none(self):
+        node = _FakeInOperator(
+            _FakeColumnRef("ID"), [_FakeLiteral(1), _FakeUnsupportedNode()]
+        )
+        self.assertIsNone(self._compile(node))
+
+    def test_compile_expression_to_sql_guards_empty_and_none(self):
+        self.assertIsNone(
+            self.mod.compile_expression_to_sql("", self.fields)
+        )
+        self.assertIsNone(
+            self.mod.compile_expression_to_sql("x", None)
+        )
+
+
 class TestIssueRegressions(unittest.TestCase):
     def test_utils_uses_importlib_metadata(self):
         content = (ROOT / "helpers" / "utils.py").read_text(encoding="utf-8")
@@ -439,9 +757,11 @@ class TestPhase3PredicateInjection(unittest.TestCase):
         content = (ROOT / "helpers" / "expression_compiler.py").read_text(
             encoding="utf-8"
         )
-        self.assertIn("QgsSqlExpressionCompiler", content)
-        # Only fully-compiled expressions are emitted; everything else -> None.
-        self.assertIn("QgsSqlExpressionCompiler.Complete", content)
+        # QgsSqlExpressionCompiler is NOT exposed in PyQGIS; the module must not
+        # depend on it (that dependency crashed plugin load).
+        self.assertNotIn("QgsSqlExpressionCompiler", content)
+        # Compilation walks the QgsExpression AST and fails closed to None.
+        self.assertIn("rootNode()", content)
         self.assertIn("def compile_expression_to_sql(", content)
         # Values/identifiers routed through the safe helpers.
         self.assertIn("quote_identifier", content)
