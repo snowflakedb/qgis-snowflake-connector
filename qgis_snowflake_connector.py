@@ -46,8 +46,6 @@ __copyright__ = "(C) 2024 by Snowflake"
 __revision__ = "$Format:%H$"
 
 import os
-import sys
-import inspect
 import threading
 
 from qgis.core import (
@@ -65,11 +63,6 @@ from .sf_locator_filter import SFLocatorFilter
 from .sf_expression_functions import register_sf_functions, unregister_sf_functions
 
 from qgis.gui import QgsGui
-
-cmd_folder = os.path.split(inspect.getfile(inspect.currentframe()))[0]
-
-if cmd_folder not in sys.path:
-    sys.path.insert(0, cmd_folder)
 
 
 class QGISSnowflakeConnectorPlugin(object):
