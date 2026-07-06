@@ -1,5 +1,7 @@
 import typing
 from ..providers.sf_data_source_provider import SFDataProvider
+from ..helpers.sql import qualified_table_name, quote_identifier
+from ..helpers.mappings import create_qgs_field
 from qgis.core import (
     QgsFeature,
     QgsField,
@@ -217,7 +219,11 @@ def add_features_attributes_to_layer(
         if layer_field.name() == geo_column_name:
             continue
         layer_fields.append(
-            QgsField(layer_field.name(), QMetaType.Type.QString, subType=layer_field.subType())
+            create_qgs_field(
+                layer_field.name(),
+                QMetaType.Type.QString,
+                sub_type=layer_field.subType(),
+            )
         )
 
     for layer_type in layer_dict:
@@ -255,7 +261,10 @@ def check_table_exceeds_size(
     data_base_name = table_information["database"]
     schema_name = table_information["schema"]
     table_name = table_information["table"]
-    qre = f'SELECT count(*) FROM "{data_base_name}"."{schema_name}"."{table_name}"'
+    qre = (
+        f"SELECT count(*) FROM "  # nosec B608 - identifiers escaped via qualified_table_name
+        f"{qualified_table_name(data_base_name, schema_name, table_name)}"
+    )
     cur_count = sf_data_provider.execute_query(
         query=qre,
         connection_name=connection_name,
@@ -309,7 +318,10 @@ def get_srid_from_table(
     data_base_name = table_information["database"]
     schema_name = table_information["schema"]
     table_name = table_information["table"]
-    qre = f'SELECT ANY_VALUE(ST_SRID("{column_name}")) FROM "{data_base_name}"."{schema_name}"."{table_name}"'
+    qre = (
+        f"SELECT ANY_VALUE(ST_SRID({quote_identifier(column_name)})) "  # nosec B608 - identifiers escaped via quote_identifier/qualified_table_name
+        f"FROM {qualified_table_name(data_base_name, schema_name, table_name)}"
+    )
     cur_srid = sf_data_provider.execute_query(
         query=qre,
         connection_name=connection_name,

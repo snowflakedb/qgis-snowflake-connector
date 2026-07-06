@@ -54,7 +54,7 @@ class SFLocatorFilter(QgsLocatorFilter):
                         mgr.connect(conn_name, auth)
 
                     sql = (
-                        f"SELECT TABLE_SCHEMA, TABLE_NAME "
+                        f"SELECT TABLE_SCHEMA, TABLE_NAME "  # nosec B608 - value escaped via quote_literal
                         f"FROM INFORMATION_SCHEMA.TABLES "
                         f"WHERE TABLE_NAME ILIKE {quote_literal(f'%{string}%')} "
                         f"AND TABLE_SCHEMA != 'INFORMATION_SCHEMA' "
@@ -115,7 +115,7 @@ class SFLocatorFilter(QgsLocatorFilter):
                 mgr.connect(conn_name, auth)
 
             geo_query = (
-                f"SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
+                f"SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "  # nosec B608 - values escaped via quote_literal
                 f"WHERE TABLE_SCHEMA ILIKE {quote_literal(schema)} "
                 f"AND TABLE_NAME ILIKE {quote_literal(table)} "
                 f"AND DATA_TYPE IN ('GEOGRAPHY', 'GEOMETRY') "

@@ -4,6 +4,7 @@ import os
 
 from qgis.core import (
     QgsProcessingAlgorithm,
+    QgsProcessingException,
     QgsProcessingParameterString,
     QgsProcessingParameterNumber,
     QgsProcessingParameterFeatureSink,
@@ -127,7 +128,12 @@ class ImportFromSnowflakeAlgorithm(QgsProcessingAlgorithm):
             get_type_from_table_geo_column,
         )
         from ..helpers.utils import get_auth_information
-        from ..helpers.sql import quote_identifier, quote_literal
+        from ..helpers.sql import (
+            quote_identifier,
+            quote_literal,
+            predicate_has_statement_breakers,
+        )
+        from ..helpers.mappings import create_qgs_field
         from ..managers.sf_connection_manager import SFConnectionManager
 
         connection_name = self.parameterAsString(parameters, self.CONNECTION, context)
@@ -172,7 +178,7 @@ class ImportFromSnowflakeAlgorithm(QgsProcessingAlgorithm):
         fq_table = f"{quote_identifier(schema)}.{quote_identifier(table)}"
 
         col_query = (
-            f"SELECT COLUMN_NAME, DATA_TYPE "
+            f"SELECT COLUMN_NAME, DATA_TYPE "  # nosec B608 - values escaped via quote_literal
             f"FROM INFORMATION_SCHEMA.COLUMNS "
             f"WHERE TABLE_SCHEMA ILIKE {quote_literal(schema)} "
             f"AND TABLE_NAME ILIKE {quote_literal(table)} "
@@ -202,7 +208,7 @@ class ImportFromSnowflakeAlgorithm(QgsProcessingAlgorithm):
             if col_name.upper() == geo_col.upper():
                 continue
             qt_type = type_map.get(col_type, QMetaType.Type.QString)
-            fields.append(QgsField(col_name, qt_type))
+            fields.append(create_qgs_field(col_name, qt_type))
             col_names.append(col_name)
 
         crs = QgsCoordinateReferenceSystem.fromEpsgId(int(srid))
@@ -214,10 +220,16 @@ class ImportFromSnowflakeAlgorithm(QgsProcessingAlgorithm):
         select_cols = ", ".join(quote_identifier(c) for c in col_names)
         geo_select = f"ST_ASWKB({quote_identifier(geo_col)}) AS _wkb"
         if select_cols:
-            sql = f"SELECT {select_cols}, {geo_select} FROM {fq_table}"
+            sql = f"SELECT {select_cols}, {geo_select} FROM {fq_table}"  # nosec B608 - select_cols and fq_table built from quote_identifier; geo_select uses quote_identifier
         else:
-            sql = f"SELECT {geo_select} FROM {fq_table}"
+            sql = f"SELECT {geo_select} FROM {fq_table}"  # nosec B608 - fq_table and geo_select built from quote_identifier
         if where:
+            if predicate_has_statement_breakers(where):
+                raise QgsProcessingException(
+                    "The WHERE clause contains disallowed SQL tokens "
+                    "(comments, statement terminators, or set operators such "
+                    "as UNION). Please provide a single boolean predicate."
+                )
             sql += f" WHERE {where}"
         if limit > 0:
             sql += f" LIMIT {limit}"

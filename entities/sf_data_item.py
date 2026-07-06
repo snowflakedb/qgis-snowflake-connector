@@ -27,7 +27,7 @@ from ..helpers.utils import (
 from ..helpers.sql import quote_literal
 from ..tasks.sf_convert_column_to_layer_task import SFConvertColumnToLayerTask
 from ..dialogs.sf_connection_string_dialog import SFConnectionStringDialog
-from qgis.PyQt.QtCore import pyqtSignal
+from qgis.PyQt.QtCore import pyqtSignal, Qt
 from qgis.core import (
     QgsDataItem,
     Qgis,
@@ -97,7 +97,7 @@ class SFDataItem(QgsDataItem):
         """
         children: typing.List["SFDataItem"] = []
         try:
-            if self.item_type == "field":
+            if self.item_type in ("field", "table_no_geom"):
                 pass
             elif self.item_type == "root":
                 self.create_root_item(children)
@@ -106,6 +106,9 @@ class SFDataItem(QgsDataItem):
 
             elif self.item_type == "table":
                 self.create_table_item(children)
+
+            elif self.item_type == "table_group":
+                self.create_table_group_item(children)
 
             elif self.item_type == "fields":
                 self.create_fields_item(children)
@@ -254,20 +257,14 @@ class SFDataItem(QgsDataItem):
                 clean_name="",
                 geom_type="",
             )
+            # Stash the table names so the group builds its children lazily in
+            # createChildren(). Adding them eagerly via addChildItem() left the
+            # group unpopulated, so expanding it re-ran createChildren() and fell
+            # through to _get_query_metadata() with an unhandled item_type. See
+            # issue #118.
+            group_item.non_geo_tables = sorted(non_geo_tables)
             children.append(group_item)
-            
-            # Add individual non-geo tables as children of the group
-            for table_name in sorted(non_geo_tables):
-                item = self._create_data_item(
-                    name=table_name,
-                    type="table_no_geom",
-                    connection_name=self.connection_name,
-                    clean_name=table_name,
-                    geom_type="",
-                )
-                item.geom_column = None
-                group_item.addChildItem(item, refresh=False)
-        
+
         # If no tables found at all, show informative message
         if not geo_table_names and not non_geo_tables:
             error_item = QgsErrorItem(
@@ -276,6 +273,32 @@ class SFDataItem(QgsDataItem):
                 f"{self.path()}/error"
             )
             children.append(error_item)
+
+    def create_table_group_item(self, children: typing.List["SFDataItem"]) -> None:
+        """
+        Creates the child items for the "Tables (no geometry)" group.
+
+        The non-geometry table names are stashed on the group item by
+        create_schema_item so they can be built lazily here, avoiding the
+        _get_query_metadata() path that does not handle this item type.
+
+        Args:
+            children (typing.List["SFDataItem"]): A list to which the created
+                                                  table items will be appended.
+
+        Returns:
+            None
+        """
+        for table_name in getattr(self, "non_geo_tables", []):
+            item = self._create_data_item(
+                name=table_name,
+                type="table_no_geom",
+                connection_name=self.connection_name,
+                clean_name=table_name,
+                geom_type="",
+            )
+            item.geom_column = None
+            children.append(item)
 
     def create_table_item(self, children: typing.List["SFDataItem"]) -> None:
         """
@@ -422,7 +445,7 @@ WHERE table_catalog ILIKE {quote_literal(auth_information["database"])}
 {schema_filter}
 {table_filter}
 {geo_type_filter}
-ORDER BY {column_name}"""
+ORDER BY {column_name}"""  # nosec B608 - column_name is a fixed literal; values escaped via quote_literal; filters assembled above with quote_literal
 
         return auth_information, column_name, children_item_type, query
 
@@ -473,15 +496,21 @@ ORDER BY {column_name}"""
         """
         try:
             if self.item_type == "table_no_geom":
-                # Show message for non-geometry tables
-                QMessageBox.information(
-                    None,
-                    "No Geometry Column",
+                # SNOW-3712087: the table name is server-controlled and shown on
+                # the first line. Force plain text so Qt::mightBeRichText() can
+                # never switch the label to rich text and auto-load a UNC <img>
+                # (forced SMB auth / NTLM hash leak).
+                msg_box = QMessageBox(None)
+                msg_box.setIcon(QMessageBox.Icon.Information)
+                msg_box.setWindowTitle("No Geometry Column")
+                msg_box.setTextFormat(Qt.TextFormat.PlainText)
+                msg_box.setText(
                     f"Table '{self.clean_name}' has no geometry column and cannot be displayed on the map.\n\n"
                     "You can:\n"
                     "• Use 'Execute SQL' to query this table\n"
-                    "• View/edit attributes via Processing tools",
+                    "• View/edit attributes via Processing tools"
                 )
+                msg_box.exec()
                 return True
             if self.item_type == "table" and not self.geom_column:
                 return False

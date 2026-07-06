@@ -1,7 +1,26 @@
-from qgis.core import QgsWkbTypes
+from qgis.core import Qgis, QgsField, QgsWkbTypes
 from qgis.PyQt.QtCore import (QVariant,QMetaType)
 
 from ..enums.snowflake_metadata_type import SnowflakeMetadataType
+
+
+def create_qgs_field(name, metatype, type_name="", sub_type=None):
+    """Construct a QgsField in a QGIS-version-compatible way.
+
+    QGIS >= 3.38 accepts a QMetaType.Type argument; older builds (e.g. QGIS
+    3.34 on Qt5) only accept the deprecated QVariant.Type overload. QVariant.Type
+    and QMetaType.Type share the same integer values for the types used here, so
+    converting via int() is safe.
+    """
+    if Qgis.QGIS_VERSION_INT >= 33800:
+        field = QgsField(name, metatype, type_name)
+        if sub_type is not None:
+            field.setSubType(sub_type)
+        return field
+    field = QgsField(name, QVariant.Type(int(metatype)), type_name)
+    if sub_type is not None:
+        field.setSubType(QVariant.Type(int(sub_type)))
+    return field
 
 
 mapping_single_to_multi_geometry_type = {

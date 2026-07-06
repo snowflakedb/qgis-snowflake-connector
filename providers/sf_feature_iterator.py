@@ -9,7 +9,9 @@ from qgis.PyQt.QtCore import QDate, QDateTime, QMetaType, QTime
 
 # PyQGIS
 from ..helpers.limits import limit_size_for_type
-from ..helpers.sql import quote_identifier
+from ..helpers.sql import quote_identifier, quote_literal
+from ..helpers.expression_compiler import compile_expression_to_sql
+from ..managers.sf_connection_manager import build_op_tag
 from ..providers.sf_feature_source import SFFeatureSource
 from qgis.core import (
     QgsAbstractFeatureIterator,
@@ -46,6 +48,10 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
         self._cursor_batch_rows = []
         super().__init__(request)
         self._provider = source.get_provider()
+        # Initialized unconditionally: nextFeatureFilterExpression() reads
+        # self._expression even when the provider's features are already cached
+        # (the block below that would otherwise set it is skipped). See issue #119.
+        self._expression = ""
 
         self._request = request if request is not None else QgsFeatureRequest()
         self._transform = QgsCoordinateTransform()
@@ -157,35 +163,32 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                 where_clause_list.append(feature_clause)
 
             self._expression = ""
-            # Apply the filter expression
+            # Apply the filter expression. The raw QGIS expression text is
+            # attacker-influenceable (persisted in project files), so it is
+            # compiled to SQL through a whitelist compiler; anything that does
+            # not fully compile is NOT pushed down (QGIS filters client-side).
             if self._request.filterType() == QgsFeatureRequest.FilterExpression:
                 expression = self._request.filterExpression().expression()
                 if expression:
-                    try:
-                        # Checks if the expression is valid
-                        query_verify_expression = (
-                            f"SELECT count(*)"
-                            f" FROM {self._provider._from_clause}"
-                            f" WHERE {expression}"
-                            " LIMIT 0"
+                    compiled = compile_expression_to_sql(
+                        expression, self._provider._fields
+                    )
+                    if compiled:
+                        self._expression = compiled
+                        where_clause_list.append(compiled)
+                    else:
+                        QgsMessageLog.logMessage(
+                            "Filter expression could not be safely compiled to "
+                            "SQL; running without pushdown.",
+                            "Snowflake Plugin",
+                            Qgis.MessageLevel.Info,
                         )
-                        cur_verify_expression = (
-                            self._provider.connection_manager.execute_query(
-                                connection_name=self._provider._connection_name,
-                                query=query_verify_expression,
-                                context_information=self._provider._context_information,
-                            )
-                        )
-                        cur_verify_expression.close()
-                        self._expression = expression
-                        where_clause_list.append(expression)
-                    except Exception:
-                        pass
 
-            # Apply the subset string filter
+            # Apply the subset string filter. setSubsetString() only stores a
+            # compiler-validated, fully-quoted predicate, so it is safe to
+            # append verbatim here.
             if self._provider.subsetString():
-                subset_clause = self._provider.subsetString().replace('"', "")
-                where_clause_list.append(subset_clause)
+                where_clause_list.append(self._provider.subsetString())
 
             # Apply the geometry filter
             quoted_geom = quote_identifier(geom_column)
@@ -263,29 +266,42 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                 self._provider._geometry_type
             )
 
-            filter_geo_type = f"ST_ASGEOJSON({quoted_geom}):type::string IN ('{self._provider._geometry_type}'"
+            filter_geo_type = f"ST_ASGEOJSON({quoted_geom}):type::string IN ({quote_literal(self._provider._geometry_type)}"  # nosec B608 - geometry_type escaped via quote_literal
             if mapped_type is not None:
-                filter_geo_type += f", '{mapped_type}'"
+                filter_geo_type += f", {quote_literal(mapped_type)}"
             filter_geo_type += ")"
             if self._provider._geo_column_type in ["NUMBER", "TEXT"]:
                 filter_geo_type = f'H3_IS_VALID_CELL({quoted_geom})'
 
-            order_limit_clause = ""
-            if self._provider._is_limited_unordered:
-                order_limit_clause = f" ORDER BY RANDOM() LIMIT {limit_size_for_type(self._provider._geo_column_type)}"
-
-            self.final_query = (
-                "select * from ("
+            base_query = (
+                "select * from ("  # nosec B608 - from_clause pre-quoted; fragments built from quoted identifiers and validated fragments
                 f"select {fields_name_for_query} "
                 f"{geom_query} {index} "
                 f"from {self._provider._from_clause} where {filter_geo_type} {filter_geom_clause}) "
-                f"{where_clause}{order_limit_clause}"
+                f"{where_clause}"
             )
+
+            if self._provider._is_limited_unordered:
+                # A7: let Snowflake's TABLESAMPLE do the random-sample work
+                # on the already-filtered set instead of sorting the entire
+                # resultset with ORDER BY RANDOM().
+                sample_n = limit_size_for_type(self._provider._geo_column_type)
+                self.final_query = (
+                    f"select * from ({base_query}) SAMPLE ({sample_n} ROWS)"  # nosec B608 - base_query is built from quoted identifiers / validated fragments; sample_n is an int
+                )
+            else:
+                self.final_query = base_query
 
             self._result = self._provider.connection_manager.execute_query(
                 connection_name=self._provider._connection_name,
                 query=self.final_query,
                 context_information=self._provider._context_information,
+                op_tag=build_op_tag(
+                    "layer-load",
+                    connection_name=self._provider._connection_name,
+                    schema=self._provider._schema_name,
+                    table=self._provider._table_name,
+                ),
             )
             self._col_index_by_name = {
                 desc.name: idx
@@ -488,4 +504,14 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
     def close(self) -> bool:
         """end of iterating: free the resources / lock"""
         self._index = -1
+        # SNOW-3712076: release the server-side cursor so an abandoned/cancelled
+        # render does not leak an open SnowflakeCursor on the singleton
+        # connection.
+        result = getattr(self, "_result", None)
+        if result is not None:
+            try:
+                result.close()
+            except Exception:
+                pass
+            self._result = None
         return True

@@ -146,7 +146,7 @@ class SFSpatialFilterDialog(QDialog):
         qt = quote_identifier(self.table)
         qg = quote_identifier(self.geo_column)
 
-        sql = f"SELECT * FROM {qs}.{qt}"
+        sql = f"SELECT * FROM {qs}.{qt}"  # nosec B608 - identifiers escaped via quote_identifier
 
         conditions = []
 

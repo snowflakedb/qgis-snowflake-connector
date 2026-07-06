@@ -1,8 +1,13 @@
+import threading
+import typing
+
 from ..helpers.data_base import (
     get_geo_column_type,
     get_srid_from_table_geo_column,
     get_type_from_table_geo_column,
 )
+from ..managers.sf_connection_manager import SFConnectionManager
+from ..helpers.utils import connection_uri_token
 from qgis.core import QgsProject, QgsTask, QgsVectorLayer
 from qgis.PyQt.QtCore import pyqtSignal
 
@@ -42,6 +47,7 @@ class SFConvertColumnToLayerTask(QgsTask):
             self.load_all_rows = load_all_rows
 
             self.path = path
+            self._run_thread_id: typing.Optional[int] = None
             super().__init__(
                 f"Snowflake Add Map Layer From {self.schema}.{self.table}.{self.column}",
                 QgsTask.CanCancel,
@@ -60,6 +66,7 @@ class SFConvertColumnToLayerTask(QgsTask):
             bool: True if the task is executed successfully, False otherwise.
         """
         try:
+            self._run_thread_id = threading.get_ident()
             geo_column_type = get_geo_column_type(
                 geo_column_name=self.column,
                 context_information=self.context_information,
@@ -85,7 +92,7 @@ class SFConvertColumnToLayerTask(QgsTask):
 
             for geo_type in geo_type_list:
                 uri = (
-                    f"connection_name={self.connection_name} sql_query= "
+                    f"{connection_uri_token(self.connection_name)} sql_query= "
                     f"schema_name={self.schema} "
                     f"table_name={self.table} srid={srid} "
                     f"geom_column={self.column} "
@@ -110,6 +117,14 @@ class SFConvertColumnToLayerTask(QgsTask):
                 f"Running snowflake convert column to layer task failed.\n\nExtended error information:\n{str(e)}",
             )
             return False
+
+    def cancel(self) -> None:
+        """Propagate user cancel to any in-flight Snowflake query (A9)."""
+        if self._run_thread_id is not None:
+            SFConnectionManager.get_instance().cancel_pending_on_thread(
+                self._run_thread_id
+            )
+        super().cancel()
 
     def finished(self, result: bool) -> None:
         """

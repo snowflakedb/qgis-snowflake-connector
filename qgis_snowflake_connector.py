@@ -114,10 +114,18 @@ class QGISSnowflakeConnectorPlugin(object):
                 "https://api.github.com/repos/"
                 "snowflakedb/qgis-snowflake-connector/releases/latest"
             )
+            # Defence-in-depth: the URL is a hardcoded constant, but validate
+            # scheme/host explicitly before opening it to satisfy static
+            # analysers (bandit B310) and protect against future refactors.
+            from urllib.parse import urlparse
+
+            parsed = urlparse(url)
+            if parsed.scheme != "https" or parsed.netloc != "api.github.com":
+                return
             req = urllib.request.Request(
                 url, headers={"Accept": "application/vnd.github.v3+json"}
             )
-            with urllib.request.urlopen(req, timeout=5) as resp:
+            with urllib.request.urlopen(req, timeout=5) as resp:  # nosec B310 - scheme/host validated to https://api.github.com above
                 data = json.loads(resp.read().decode())
             remote_tag = data.get("tag_name", "").lstrip("v")
             if not remote_tag:
@@ -133,7 +141,7 @@ class QGISSnowflakeConnectorPlugin(object):
                     "Snowflake Plugin",
                     Qgis.MessageLevel.Info,
                 )
-        except Exception:
+        except Exception:  # nosec B110 - update check runs in a daemon thread during plugin init; never block QGIS startup on network or version-parse errors
             pass
 
     def initGui(self):
@@ -146,7 +154,7 @@ class QGISSnowflakeConnectorPlugin(object):
             if iface:
                 iface.registerLocatorFilter(self.locator_filter)
                 self.iface = iface
-        except Exception:
+        except Exception:  # nosec B110 - locator filter is optional; missing iface or registration failure must not prevent plugin init
             pass
 
         register_sf_functions()

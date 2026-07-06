@@ -1,4 +1,5 @@
 import copy
+import re
 import typing
 from qgis.core import (
     Qgis,
@@ -22,8 +23,11 @@ from .sf_feature_iterator import SFFeatureIterator
 from ..helpers.data_base import (
     alter_table_add_columns,
     alter_table_drop_columns,
+    check_column_has_duplicates,
     check_from_clause_exceeds_size,
     delete_table_features,
+    get_cheap_row_count,
+    get_declared_primary_key,
     get_next_primary_key_value,
     insert_table_feature,
     limit_size_for_type,
@@ -33,13 +37,19 @@ from ..helpers.data_base import (
 
 from .sf_feature_source import SFFeatureSource
 
-from ..helpers.utils import get_authentification_information, get_qsettings
-from ..managers.sf_connection_manager import SFConnectionManager
+from ..helpers.utils import (
+    get_authentification_information,
+    get_or_create_connection_authcfg,
+    get_qsettings,
+)
+from ..managers.sf_connection_manager import SFConnectionManager, build_op_tag
 
 from ..helpers.wrapper import parse_uri
 from ..helpers.sql import quote_identifier, quote_literal
+from ..helpers.expression_compiler import compile_expression_to_sql
 from ..helpers.mappings import (
     SNOWFLAKE_METADATA_TYPE_CODE_DICT,
+    create_qgs_field,
     mapping_snowflake_qgis_geometry,
     mapping_snowflake_qgis_type,
 )
@@ -66,6 +76,9 @@ class SFVectorDataProvider(QgsVectorDataProvider):
         self._feature_count = None
         self.filter_where_clause = None
         self._load_all_rows = False
+        # SNOW-3712083: cache for the "is the URI-supplied primary_key actually
+        # unique?" check (None = not yet computed).
+        self._primary_key_is_valid = None
         try:
             (
                 self._connection_name,
@@ -113,16 +126,38 @@ class SFVectorDataProvider(QgsVectorDataProvider):
 
         if self._sql_query and not self._table_name:
             self._from_clause = f"({self._sql_query})"
+            # SNOW-3712076: a custom sql_query layer must still be row-capped so
+            # a malicious project file cannot force an unbounded fetch (client
+            # OOM + uncapped warehouse spend). There is no table to consult for
+            # a cheap ROW_COUNT, so probe the wrapped query directly.
+            if self._load_all_rows:
+                self._is_limited_unordered = False
+            else:
+                limit_size = limit_size_for_type(self._geo_column_type)
+                self._is_limited_unordered = check_from_clause_exceeds_size(
+                    from_clause=self._from_clause,
+                    context_information=self._context_information,
+                    limit_size=limit_size,
+                )
         else:
             self._from_clause = quote_identifier(self._table_name)
             if self._load_all_rows:
                 self._is_limited_unordered = False
             else:
-                self._is_limited_unordered = check_from_clause_exceeds_size(
-                    from_clause=self._from_clause,
-                    context_information=self._context_information,
-                    limit_size=limit_size_for_type(self._geo_column_type),
-                )
+                limit_size = limit_size_for_type(self._geo_column_type)
+                # A4: try the free INFORMATION_SCHEMA path before falling back
+                # to a blocking COUNT(*). For views / subqueries / tables that
+                # don't expose ROW_COUNT we still pay for the scan, but that's
+                # rare and unavoidable.
+                cheap = get_cheap_row_count(self._context_information)
+                if cheap is not None:
+                    self._is_limited_unordered = cheap > limit_size
+                else:
+                    self._is_limited_unordered = check_from_clause_exceeds_size(
+                        from_clause=self._from_clause,
+                        context_information=self._context_information,
+                        limit_size=limit_size,
+                    )
 
         self.get_geometry_column()
 
@@ -161,6 +196,40 @@ class SFVectorDataProvider(QgsVectorDataProvider):
         else:
             return base_provider
 
+    def _validate_primary_key(self) -> bool:
+        """Return True only if the URI-supplied primary_key is actually unique.
+
+        SNOW-3712083: the primary_key= URI component is persisted verbatim in
+        .qgs/.qgz project files and is never re-checked on load, so a malicious
+        project could point it at a non-unique column and turn a single-feature
+        edit into a mass UPDATE/DELETE. We re-validate here (cheap declared-PK
+        match first, duplicate-count fallback) and cache the result. Any failure
+        fails closed (treated as not-unique / read-only).
+        """
+        if self._primary_key_is_valid is not None:
+            return self._primary_key_is_valid
+
+        result = False
+        try:
+            if self._primary_key and self._table_name:
+                declared = get_declared_primary_key(self._context_information)
+                if declared and declared.upper() == self._primary_key.upper():
+                    result = True
+                else:
+                    result = not check_column_has_duplicates(
+                        self._context_information, self._primary_key
+                    )
+        except Exception as e:
+            QgsMessageLog.logMessage(
+                f"Primary key validation failed; treating layer as read-only: {e}",
+                "Snowflake Plugin",
+                Qgis.MessageLevel.Warning,
+            )
+            result = False
+
+        self._primary_key_is_valid = result
+        return result
+
     def capabilities(self) -> QgsVectorDataProvider.Capabilities:
         base_capabilities = (
             QgsVectorDataProvider.CreateSpatialIndex | QgsVectorDataProvider.SelectAtId
@@ -171,6 +240,8 @@ class SFVectorDataProvider(QgsVectorDataProvider):
             self._primary_key == ""
             or self._geo_column_type not in ("GEOGRAPHY", "GEOMETRY")
             or (self._sql_query is not None and self._sql_query != "")
+            or self._is_limited_unordered
+            or not self._validate_primary_key()
         ):
             reasons = []
             if self._primary_key == "":
@@ -179,6 +250,18 @@ class SFVectorDataProvider(QgsVectorDataProvider):
                 reasons.append(f"column type '{self._geo_column_type}' is not editable")
             if self._sql_query is not None and self._sql_query != "":
                 reasons.append("custom SQL query layer")
+            # SNOW-3712082: a randomly-sampled / unordered result set has no
+            # stable feature ids, so edits could hit the wrong rows.
+            if self._is_limited_unordered:
+                reasons.append("row-capped/unordered result (unstable feature ids)")
+            # SNOW-3712083: refuse edits when the declared primary key cannot be
+            # confirmed unique.
+            if (
+                self._primary_key != ""
+                and not self._is_limited_unordered
+                and not self._validate_primary_key()
+            ):
+                reasons.append("primary key is not verified unique")
             QgsMessageLog.logMessage(
                 f"Layer read-only: {', '.join(reasons)} "
                 f"(table={getattr(self, '_table_name', '?')})",
@@ -278,7 +361,7 @@ class SFVectorDataProvider(QgsVectorDataProvider):
                             f" {quote_literal(database_name)}"
                         )
                     query = (
-                        "SELECT DISTINCT column_name, data_type, ordinal_position"
+                        "SELECT DISTINCT column_name, data_type, ordinal_position"  # nosec B608 - values escaped via quote_literal; catalog_filter/schema_filter built with quote_literal above
                         " FROM information_schema.columns "
                         f"WHERE table_name ILIKE {quote_literal(self._table_name)}"
                         f"{catalog_filter}"
@@ -297,7 +380,7 @@ class SFVectorDataProvider(QgsVectorDataProvider):
                     cur.close()
                     for row in field_info:
                         field_name, field_type = row[0], row[1]
-                        qgs_field = QgsField(
+                        qgs_field = create_qgs_field(
                             field_name, mapping_snowflake_qgis_type[field_type]
                         )
                         self._fields.append(qgs_field)
@@ -314,7 +397,7 @@ class SFVectorDataProvider(QgsVectorDataProvider):
                     for data in description:
                         # it is already used to set the feature id
                         if data[1] not in [14, 15]:
-                            qgs_field = QgsField(
+                            qgs_field = create_qgs_field(
                                 data[0],
                                 SNOWFLAKE_METADATA_TYPE_CODE_DICT.get(
                                     data[1],
@@ -362,13 +445,46 @@ class SFVectorDataProvider(QgsVectorDataProvider):
             return ""
         return "Autogenerated"
 
-    def dataSourceUri(self, expandAuthConfig=False):
-        """Returns the data source specification: database path and
-        table name.
+    # URI keys used to find the boundary of the leading connection token.
+    _URI_TOKEN_KEYS = (
+        "connection_name", "authcfg", "sql_query", "sql", "schema_name",
+        "table_name", "srid", "geom_column", "geometry_type",
+        "geo_column_type", "primary_key", "load_all_rows",
+    )
 
-        :param bool expandAuthConfig: expand credentials (unused)
+    @classmethod
+    def _replace_connection_token(cls, uri: str, new_token: str) -> str:
+        """Swap the leading connection_name=/authcfg= token for new_token."""
+        pattern = r"(?:connection_name|authcfg)=.*?(?= (?:%s)=|$)" % "|".join(
+            cls._URI_TOKEN_KEYS
+        )
+        stripped = re.sub(pattern, "", uri, count=1, flags=re.DOTALL).strip()
+        return f"{new_token} {stripped}".strip()
+
+    def dataSourceUri(self, expandAuthConfig=False):
+        """Returns the data source specification.
+
+        SNOW-3712094: the URI is serialised verbatim into .qgs/.qgz/.qlr files.
+        When QGIS asks for the storable form (expandAuthConfig=False) we must
+        never emit the raw connection alias, so we swap it for the redacted
+        authcfg= token. Only when a caller explicitly requests the expanded
+        form do we return the alias.
+
+        :param bool expandAuthConfig: expand the auth config to the alias
         :returns: the data source uri
         """
+        if expandAuthConfig:
+            if "authcfg=" in self._uri and self._connection_name:
+                return self._replace_connection_token(
+                    self._uri, f"connection_name={self._connection_name}"
+                )
+            return self._uri
+
+        if "authcfg=" in self._uri:
+            return self._uri
+        config_id = get_or_create_connection_authcfg(self._connection_name)
+        if config_id:
+            return self._replace_connection_token(self._uri, f"authcfg={config_id}")
         return self._uri
 
     def crs(self):
@@ -415,11 +531,11 @@ class SFVectorDataProvider(QgsVectorDataProvider):
         results = set()
         quoted_col = quote_identifier(column_name)
         query = (
-            f"SELECT DISTINCT {quoted_col} FROM {self._from_clause} "
+            f"SELECT DISTINCT {quoted_col} FROM {self._from_clause} "  # nosec B608 - identifier escaped via quote_identifier; from_clause is pre-quoted
             f"ORDER BY {quoted_col}"
         )
         if limit >= 0:
-            query += f" LIMIT {limit}"
+            query += f" LIMIT {limit}"  # nosec B608 - limit is an int
 
         cur = self.connection_manager.execute_query(
             connection_name=self._connection_name,
@@ -444,20 +560,20 @@ class SFVectorDataProvider(QgsVectorDataProvider):
         self, subsetstring: str, updateFeatureCount: bool = True
     ) -> bool:
         if subsetstring:
-            # Check if the filter is valid
-            try:
-                cur = self.connection_manager.execute_query(
-                    connection_name=self._connection_name,
-                    query=(
-                        f"SELECT COUNT(*) FROM {self._from_clause} "
-                        f"WHERE {subsetstring} LIMIT 0"
-                    ),
-                    context_information=self._context_information,
+            # The subset string is persisted verbatim in project files, so it
+            # is compiled through the whitelist expression compiler rather than
+            # trusted as raw SQL. Only a fully-compiled, quoted predicate is
+            # stored; anything else is refused.
+            compiled = compile_expression_to_sql(subsetstring, self.fields())
+            if not compiled:
+                QgsMessageLog.logMessage(
+                    "Subset string could not be safely compiled to SQL; "
+                    "rejecting it.",
+                    "Snowflake Plugin",
+                    Qgis.MessageLevel.Warning,
                 )
-                cur.close()
-            except Exception as _:
                 return False
-            self.filter_where_clause = subsetstring
+            self.filter_where_clause = compiled
 
         if not subsetstring:
             self.filter_where_clause = None
@@ -718,14 +834,20 @@ class SFGeoVectorDataProvider(SFVectorDataProvider):
                 if self._is_limited_unordered:
                     self._feature_count = limit_size_for_type(self._geo_column_type)
                 else:
-                    query = f"SELECT COUNT(*) FROM {self._from_clause}"
+                    query = f"SELECT COUNT(*) FROM {self._from_clause}"  # nosec B608 - from_clause pre-quoted
                     if self.subsetString():
-                        query += f" WHERE {self.subsetString()}"
+                        query += f" WHERE {self.subsetString()}"  # nosec B608 - subsetString is compiler-validated & quoted in setSubsetString
 
                     cur = self.connection_manager.execute_query(
                         connection_name=self._connection_name,
                         query=query,
                         context_information=self._context_information,
+                        op_tag=build_op_tag(
+                            "featurecount",
+                            connection_name=self._connection_name,
+                            schema=self._schema_name,
+                            table=self._table_name,
+                        ),
                     )
 
                     self._feature_count = cur.fetchone()[0]
@@ -741,19 +863,25 @@ class SFGeoVectorDataProvider(SFVectorDataProvider):
             else:
                 qgeom = quote_identifier(self._column_geom)
                 query = (
-                    f'SELECT MIN(ST_XMIN({qgeom})), '
+                    f'SELECT MIN(ST_XMIN({qgeom})), '  # nosec B608 - identifier escaped via quote_identifier; from_clause pre-quoted; geometry_type escaped via quote_literal
                     f'MIN(ST_YMIN({qgeom})), '
                     f'MAX(ST_XMAX({qgeom})), '
                     f'MAX(ST_YMAX({qgeom})) '
                     f"FROM {self._from_clause} "
                     f'WHERE {qgeom} IS NOT NULL AND '
-                    f"ST_ASGEOJSON({qgeom}):type ILIKE '{self._geometry_type}'"
+                    f"ST_ASGEOJSON({qgeom}):type ILIKE {quote_literal(self._geometry_type)}"
                 )
 
                 cur = self.connection_manager.execute_query(
                     connection_name=self._connection_name,
                     query=query,
                     context_information=self._context_information,
+                    op_tag=build_op_tag(
+                        "extent",
+                        connection_name=self._connection_name,
+                        schema=self._schema_name,
+                        table=self._table_name,
+                    ),
                 )
 
                 extent_bounds = cur.fetchone()
@@ -775,7 +903,7 @@ class SFH3VectorDataProvider(SFVectorDataProvider):
     ):
         super().__init__(uri, providerOptions, flags)
         qgeom = quote_identifier(self._column_geom)
-        query = f'SELECT H3_IS_VALID_CELL({qgeom}) FROM {self._from_clause} WHERE {qgeom} IS NOT NULL LIMIT 1'
+        query = f'SELECT H3_IS_VALID_CELL({qgeom}) FROM {self._from_clause} WHERE {qgeom} IS NOT NULL LIMIT 1'  # nosec B608 - identifier escaped via quote_identifier; from_clause pre-quoted
 
         cur = self.connection_manager.execute_query(
             connection_name=self._connection_name,
@@ -795,15 +923,21 @@ class SFH3VectorDataProvider(SFVectorDataProvider):
                     self._feature_count = limit_size_for_type(self._geo_column_type)
                     return self._feature_count
 
-                query = f"SELECT COUNT(*) FROM {self._from_clause}"
-                query += f' WHERE H3_IS_VALID_CELL({quote_identifier(self._column_geom)})'
+                query = f"SELECT COUNT(*) FROM {self._from_clause}"  # nosec B608 - from_clause pre-quoted
+                query += f' WHERE H3_IS_VALID_CELL({quote_identifier(self._column_geom)})'  # nosec B608 - identifier escaped via quote_identifier
                 if self.subsetString():
-                    query += f" AND {self.subsetString()}"
+                    query += f" AND {self.subsetString()}"  # nosec B608 - subsetString is compiler-validated & quoted in setSubsetString
 
                 cur = self.connection_manager.execute_query(
                     connection_name=self._connection_name,
                     query=query,
                     context_information=self._context_information,
+                    op_tag=build_op_tag(
+                        "featurecount",
+                        connection_name=self._connection_name,
+                        schema=self._schema_name,
+                        table=self._table_name,
+                    ),
                 )
 
                 self._feature_count = cur.fetchone()[0]
@@ -819,7 +953,7 @@ class SFH3VectorDataProvider(SFVectorDataProvider):
             else:
                 qgeom = quote_identifier(self._column_geom)
                 query = (
-                    f'SELECT MIN(ST_XMIN(H3_CELL_TO_BOUNDARY({qgeom}))), '
+                    f'SELECT MIN(ST_XMIN(H3_CELL_TO_BOUNDARY({qgeom}))), '  # nosec B608 - identifier escaped via quote_identifier; from_clause pre-quoted
                     f'MIN(ST_YMIN(H3_CELL_TO_BOUNDARY({qgeom}))), '
                     f'MAX(ST_XMAX(H3_CELL_TO_BOUNDARY({qgeom}))), '
                     f'MAX(ST_YMAX(H3_CELL_TO_BOUNDARY({qgeom}))) '
@@ -831,6 +965,12 @@ class SFH3VectorDataProvider(SFVectorDataProvider):
                     connection_name=self._connection_name,
                     query=query,
                     context_information=self._context_information,
+                    op_tag=build_op_tag(
+                        "extent",
+                        connection_name=self._connection_name,
+                        schema=self._schema_name,
+                        table=self._table_name,
+                    ),
                 )
 
                 extent_bounds = cur.fetchone()

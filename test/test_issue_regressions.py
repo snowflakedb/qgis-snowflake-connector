@@ -1,8 +1,379 @@
 import pathlib
+import re
 import unittest
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+
+
+def _load_helpers_utils(testcase):
+    """Load helpers/utils.py against a self-contained qgis stub.
+
+    Registers/restores the qgis modules in sys.modules (via the testcase's
+    addCleanup) so it does not perturb the fragile shared stubs used by other
+    tests in this module.
+    """
+    import sys
+    import types
+    import importlib.util
+
+    names = (
+        "qgis", "qgis.core", "qgis.PyQt", "qgis.PyQt.QtCore",
+        "qgis.PyQt.QtWidgets",
+    )
+    saved = {n: sys.modules.get(n) for n in names}
+
+    def _restore():
+        for n, prev in saved.items():
+            if prev is None:
+                sys.modules.pop(n, None)
+            else:
+                sys.modules[n] = prev
+    testcase.addCleanup(_restore)
+
+    qgis = types.ModuleType("qgis")
+    core = types.ModuleType("qgis.core")
+    core.QgsApplication = type("QgsApplication", (), {})
+    core.QgsAuthMethodConfig = type("QgsAuthMethodConfig", (), {})
+    qgis.core = core
+    pyqt = types.ModuleType("qgis.PyQt")
+    qtcore = types.ModuleType("qgis.PyQt.QtCore")
+    qtcore.QSettings = type("QSettings", (), {})
+    pyqt.QtCore = qtcore
+    qtwidgets = types.ModuleType("qgis.PyQt.QtWidgets")
+    qtwidgets.QMessageBox = type("QMessageBox", (), {})
+    pyqt.QtWidgets = qtwidgets
+    qgis.PyQt = pyqt
+    sys.modules["qgis"] = qgis
+    sys.modules["qgis.core"] = core
+    sys.modules["qgis.PyQt"] = pyqt
+    sys.modules["qgis.PyQt.QtCore"] = qtcore
+    sys.modules["qgis.PyQt.QtWidgets"] = qtwidgets
+
+    spec = importlib.util.spec_from_file_location(
+        "sfc_utils_under_test", ROOT / "helpers" / "utils.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+# --- Fake QgsExpression AST node classes for the expression compiler tests ---
+# These duck-type the PyQGIS node API used by helpers/expression_compiler.py.
+# The SAME class objects are injected into the stubbed qgis.core so the
+# compiler's isinstance() checks match instances built here.
+
+
+class _FakeColumnRef:
+    def __init__(self, name):
+        self._name = name
+
+    def name(self):
+        return self._name
+
+
+class _FakeLiteral:
+    def __init__(self, value):
+        self._value = value
+
+    def value(self):
+        return self._value
+
+
+class _FakeBinaryOperator:
+    # Enum values mirror QgsExpressionNodeBinaryOperator (exact values are not
+    # important as long as they are consistent between here and the compiler).
+    boOr = 0
+    boAnd = 1
+    boEQ = 2
+    boNE = 3
+    boLE = 4
+    boGE = 5
+    boLT = 6
+    boGT = 7
+    boRegexp = 8
+    boLike = 9
+    boNotLike = 10
+    boILike = 11
+    boNotILike = 12
+    boIs = 13
+    boIsNot = 14
+    boPlus = 15
+    boMinus = 16
+    boMul = 17
+    boDiv = 18
+
+    def __init__(self, op, left, right):
+        self._op = op
+        self._left = left
+        self._right = right
+
+    def op(self):
+        return self._op
+
+    def opLeft(self):
+        return self._left
+
+    def opRight(self):
+        return self._right
+
+
+class _FakeUnaryOperator:
+    uoNot = 0
+    uoMinus = 1
+
+    def __init__(self, op, operand):
+        self._op = op
+        self._operand = operand
+
+    def op(self):
+        return self._op
+
+    def operand(self):
+        return self._operand
+
+
+class _FakeNodeList:
+    def __init__(self, nodes):
+        self._nodes = nodes
+
+    def list(self):
+        return self._nodes
+
+
+class _FakeInOperator:
+    def __init__(self, node, members, is_not=False):
+        self._node = node
+        self._list = _FakeNodeList(members)
+        self._is_not = is_not
+
+    def node(self):
+        return self._node
+
+    def list(self):
+        return self._list
+
+    def isNotIn(self):
+        return self._is_not
+
+
+class _FakeExpression:
+    def __init__(self, text):
+        self._text = text
+
+    def hasParserError(self):
+        return False
+
+    def rootNode(self):
+        return None
+
+
+class _FakeField:
+    def __init__(self, name):
+        self._name = name
+
+    def name(self):
+        return self._name
+
+
+class _FakeFields:
+    """Case-insensitive field lookup mirroring QgsFields."""
+
+    def __init__(self, names):
+        self._names = list(names)
+
+    def lookupField(self, name):
+        for idx, existing in enumerate(self._names):
+            if existing.lower() == name.lower():
+                return idx
+        return -1
+
+    def at(self, idx):
+        return _FakeField(self._names[idx])
+
+
+class _FakeUnsupportedNode:
+    """A node type outside the whitelist (e.g. a function)."""
+
+
+def _load_expression_compiler(testcase):
+    """Load the real helpers/expression_compiler.py against a stub qgis.core
+    that exposes the AST node classes (but NOT QgsSqlExpressionCompiler).
+
+    This exercises the module's real import list, so it guards against the
+    plugin-load crash that occurred when the module depended on the
+    unavailable QgsSqlExpressionCompiler binding.
+    """
+    import sys
+    import types
+    import importlib.util
+
+    names = ("qgis", "qgis.core", "helpers", "helpers.sql",
+             "helpers.expression_compiler")
+    saved = {n: sys.modules.get(n) for n in names}
+
+    def _restore():
+        for n, prev in saved.items():
+            if prev is None:
+                sys.modules.pop(n, None)
+            else:
+                sys.modules[n] = prev
+    testcase.addCleanup(_restore)
+
+    qgis = types.ModuleType("qgis")
+    core = types.ModuleType("qgis.core")
+    core.QgsExpression = _FakeExpression
+    core.QgsExpressionNodeBinaryOperator = _FakeBinaryOperator
+    core.QgsExpressionNodeColumnRef = _FakeColumnRef
+    core.QgsExpressionNodeInOperator = _FakeInOperator
+    core.QgsExpressionNodeLiteral = _FakeLiteral
+    core.QgsExpressionNodeUnaryOperator = _FakeUnaryOperator
+    core.QgsFields = _FakeFields
+    qgis.core = core
+    sys.modules["qgis"] = qgis
+    sys.modules["qgis.core"] = core
+
+    # Register a "helpers" package rooted at the real folder so the module's
+    # relative "from .sql import ..." resolves to the real (pure-Python) sql.py.
+    helpers_pkg = types.ModuleType("helpers")
+    helpers_pkg.__path__ = [str(ROOT / "helpers")]
+    sys.modules["helpers"] = helpers_pkg
+    sys.modules.pop("helpers.sql", None)
+
+    spec = importlib.util.spec_from_file_location(
+        "helpers.expression_compiler", ROOT / "helpers" / "expression_compiler.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["helpers.expression_compiler"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class TestExpressionCompilerCompilation(unittest.TestCase):
+    """Behavioral + import-safety tests for the pure-Python AST compiler."""
+
+    def setUp(self):
+        self.mod = _load_expression_compiler(self)
+        self.fields = _FakeFields(["POP", "NAME", "ID"])
+
+    def _compile(self, node):
+        return self.mod._compile_node(node, self.fields)
+
+    def test_module_imports_without_qgs_sql_expression_compiler(self):
+        # The mere fact setUp() loaded the module under a qgis.core that does
+        # NOT define QgsSqlExpressionCompiler proves the import bug is gone.
+        self.assertTrue(hasattr(self.mod, "compile_expression_to_sql"))
+
+    def test_equality_compiles_with_quoting(self):
+        node = _FakeBinaryOperator(
+            _FakeBinaryOperator.boEQ, _FakeColumnRef("POP"), _FakeLiteral(1000)
+        )
+        self.assertEqual(self._compile(node), "(POP = 1000)")
+
+    def test_and_of_predicates_compiles(self):
+        node = _FakeBinaryOperator(
+            _FakeBinaryOperator.boAnd,
+            _FakeBinaryOperator(
+                _FakeBinaryOperator.boGT, _FakeColumnRef("POP"), _FakeLiteral(1000)
+            ),
+            _FakeBinaryOperator(
+                _FakeBinaryOperator.boILike,
+                _FakeColumnRef("NAME"),
+                _FakeLiteral("A%"),
+            ),
+        )
+        self.assertEqual(
+            self._compile(node), "((POP > 1000) AND (NAME ILIKE 'A%'))"
+        )
+
+    def test_or_of_predicates_compiles(self):
+        node = _FakeBinaryOperator(
+            _FakeBinaryOperator.boOr,
+            _FakeBinaryOperator(
+                _FakeBinaryOperator.boEQ, _FakeColumnRef("ID"), _FakeLiteral(1)
+            ),
+            _FakeBinaryOperator(
+                _FakeBinaryOperator.boEQ, _FakeColumnRef("ID"), _FakeLiteral(2)
+            ),
+        )
+        self.assertEqual(
+            self._compile(node), "((ID = 1) OR (ID = 2))"
+        )
+
+    def test_in_operator_compiles(self):
+        node = _FakeInOperator(
+            _FakeColumnRef("ID"), [_FakeLiteral(1), _FakeLiteral(2)]
+        )
+        self.assertEqual(self._compile(node), "(ID IN (1, 2))")
+
+    def test_not_in_operator_compiles(self):
+        node = _FakeInOperator(
+            _FakeColumnRef("ID"), [_FakeLiteral(1)], is_not=True
+        )
+        self.assertEqual(self._compile(node), "(ID NOT IN (1))")
+
+    def test_not_unary_compiles(self):
+        node = _FakeUnaryOperator(
+            _FakeUnaryOperator.uoNot,
+            _FakeBinaryOperator(
+                _FakeBinaryOperator.boEQ, _FakeColumnRef("POP"), _FakeLiteral(1)
+            ),
+        )
+        self.assertEqual(self._compile(node), "(NOT (POP = 1))")
+
+    def test_string_literal_is_escaped(self):
+        node = _FakeBinaryOperator(
+            _FakeBinaryOperator.boEQ,
+            _FakeColumnRef("NAME"),
+            _FakeLiteral("x'); DROP TABLE t;--"),
+        )
+        compiled = self._compile(node)
+        self.assertEqual(compiled, "(NAME = 'x''); DROP TABLE t;--')")
+
+    def test_null_and_bool_literals(self):
+        is_null = _FakeBinaryOperator(
+            _FakeBinaryOperator.boIs, _FakeColumnRef("NAME"), _FakeLiteral(None)
+        )
+        self.assertEqual(self._compile(is_null), "(NAME IS NULL)")
+        is_true = _FakeBinaryOperator(
+            _FakeBinaryOperator.boEQ, _FakeColumnRef("ID"), _FakeLiteral(True)
+        )
+        self.assertEqual(self._compile(is_true), "(ID = TRUE)")
+
+    def test_unknown_column_returns_none(self):
+        node = _FakeBinaryOperator(
+            _FakeBinaryOperator.boEQ, _FakeColumnRef("SECRET"), _FakeLiteral(1)
+        )
+        self.assertIsNone(self._compile(node))
+
+    def test_unsupported_binary_operator_returns_none(self):
+        node = _FakeBinaryOperator(
+            _FakeBinaryOperator.boPlus, _FakeColumnRef("POP"), _FakeLiteral(1)
+        )
+        self.assertIsNone(self._compile(node))
+
+    def test_unsupported_node_type_returns_none(self):
+        self.assertIsNone(self._compile(_FakeUnsupportedNode()))
+
+    def test_unary_minus_returns_none(self):
+        node = _FakeUnaryOperator(
+            _FakeUnaryOperator.uoMinus, _FakeLiteral(1)
+        )
+        self.assertIsNone(self._compile(node))
+
+    def test_in_with_uncompilable_member_returns_none(self):
+        node = _FakeInOperator(
+            _FakeColumnRef("ID"), [_FakeLiteral(1), _FakeUnsupportedNode()]
+        )
+        self.assertIsNone(self._compile(node))
+
+    def test_compile_expression_to_sql_guards_empty_and_none(self):
+        self.assertIsNone(
+            self.mod.compile_expression_to_sql("", self.fields)
+        )
+        self.assertIsNone(
+            self.mod.compile_expression_to_sql("x", None)
+        )
 
 
 class TestIssueRegressions(unittest.TestCase):
@@ -62,7 +433,10 @@ class TestIssueRegressions(unittest.TestCase):
         content = (ROOT / "providers" / "sf_data_source_provider.py").read_text(
             encoding="utf-8"
         )
-        self.assertIn("qgsField.setSubType(subType)", content)
+        # The subtype is preserved via the version-compatible helper
+        # (issue #120): create_qgs_field applies setSubType internally.
+        self.assertIn("sub_type=subType", content)
+        self.assertIn("create_qgs_field(", content)
 
     def test_export_blocks_same_snowflake_table(self):
         """Export must refuse when target table matches the input layer's
@@ -119,6 +493,30 @@ class TestSQLSafety(unittest.TestCase):
         self.assertEqual(mod.quote_literal("foo"), "'foo'")
         self.assertEqual(mod.quote_literal("it's"), "'it''s'")
 
+    def test_quote_literal_escapes_backslash(self):
+        """SNOW-3712090 / SNOW-3712092: Snowflake treats backslash as an escape
+        character in string literals, so quote_literal must double backslashes
+        to stop a trailing-backslash / \\' breakout of the single-quoted
+        literal."""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "helpers.sql", ROOT / "helpers" / "sql.py"
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        # A lone backslash must be doubled.
+        self.assertEqual(mod.quote_literal("a\\b"), "'a\\\\b'")
+        # The classic breakout payload: \' UNION SELECT ... --
+        out = mod.quote_literal("\\' UNION SELECT CURRENT_ROLE() --")
+        self.assertEqual(out, "'\\\\'' UNION SELECT CURRENT_ROLE() --'")
+        # There must be no single backslash immediately before the closing
+        # quote (which Snowflake would read as an escaped, non-terminating
+        # quote). Every backslash in the interior must be doubled.
+        interior = out[1:-1]
+        self.assertNotIn("'", interior.replace("''", ""))
+        self.assertNotIn("\\", interior.replace("\\\\", ""))
+
     def test_quote_json_literal_for_parse_json_prefers_dollar_quotes(self):
         import importlib.util
         spec = importlib.util.spec_from_file_location(
@@ -144,6 +542,34 @@ class TestSQLSafety(unittest.TestCase):
         payload = '{"k":"contains $$ delimiter and it\'s ok"}'
         with self.assertRaises(ValueError):
             mod.quote_json_literal_for_parse_json(payload)
+
+    def test_predicate_has_statement_breakers(self):
+        """SNOW-3712086: the free-text WHERE-clause guard must flag comments,
+        statement terminators and set operators, while allowing a plain
+        boolean predicate."""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "helpers.sql", ROOT / "helpers" / "sql.py"
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        for bad in [
+            "1=0 UNION ALL SELECT SSN FROM PROD.HR.EMPLOYEES --",
+            "POP > 1 ; DROP TABLE T",
+            "POP > 1 /* comment */",
+            "a INTERSECT SELECT 1",
+            "a EXCEPT SELECT 1",
+        ]:
+            self.assertTrue(
+                mod.predicate_has_statement_breakers(bad),
+                f"should flag: {bad!r}",
+            )
+        for ok in ["POP > 1000", "STATE = 'CA' AND POP >= 100", "", None]:
+            self.assertFalse(
+                mod.predicate_has_statement_breakers(ok),
+                f"should allow: {ok!r}",
+            )
 
     def test_qualified_table_name(self):
         import importlib.util
@@ -215,6 +641,477 @@ class TestSQLSafety(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn("quote_identifier(", content_schema)
+
+
+class TestQuoteIdentifierInjection(unittest.TestCase):
+    """SNOW-3712084: quote_identifier() must never let an attacker-controlled
+    identifier break out of the quoted-identifier context.
+
+    Root cause: the original fast-path returned any value that merely started
+    and ended with a double quote VERBATIM, without verifying the interior was
+    a single well-formed quoted identifier. That allowed second-order SQL
+    injection through Snowflake object names and .qgs URI components
+    (SNOW-3712077 / 81 / 85 / 88 / 89 / 91 / 93 all flow through this helper).
+    """
+
+    @staticmethod
+    def _load_module():
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "helpers.sql", ROOT / "helpers" / "sql.py"
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    @staticmethod
+    def _is_safe_identifier(out):
+        """A safe result is either a bare simple identifier or a single,
+        well-formed quoted identifier (all interior quotes doubled)."""
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_$]*$", out):
+            return True
+        if len(out) >= 2 and out.startswith('"') and out.endswith('"'):
+            return '"' not in out[1:-1].replace('""', "")
+        return False
+
+    # Payloads lifted from the Mythos Zero findings; each begins and ends
+    # with a double quote but hides an un-doubled interior quote that breaks
+    # out of the identifier context (i.e. it is NOT a well-formed quoted
+    # identifier and must be re-escaped rather than passed through).
+    _MALICIOUS = [
+        '"X" AS SELECT * FROM SECRETS--"',
+        '"PUBLIC"."CUSTOMERS"(X INT)--"',
+        '"ALICE_LZ"."LOOT" AS SELECT * FROM PROD.SECRETS.KEYS--"',
+        '"X") FROM TABLE(GENERATOR(ROWCOUNT=>1e10)) --"',
+        '"X")) , (1) /*"',
+        '"G") IN (SELECT 1)) UNION ALL SELECT PASSWORD FROM USERS--"',
+    ]
+
+    def test_malicious_quoted_identifiers_are_neutralized(self):
+        mod = self._load_module()
+        for payload in self._MALICIOUS:
+            out = mod.quote_identifier(payload)
+            self.assertTrue(
+                self._is_safe_identifier(out),
+                f"quote_identifier failed to neutralize breakout payload "
+                f"{payload!r} -> {out!r}",
+            )
+            self.assertNotEqual(
+                out, payload,
+                f"quote_identifier passed malicious payload through "
+                f"verbatim: {payload!r}",
+            )
+
+    def test_wellformed_quoted_identifier_preserved(self):
+        """Legitimate, already-correctly-quoted identifiers must round-trip
+        unchanged so existing callers keep working."""
+        mod = self._load_module()
+        self.assertEqual(mod.quote_identifier('"already_quoted"'), '"already_quoted"')
+        self.assertEqual(mod.quote_identifier('"with""doubled"'), '"with""doubled"')
+        self.assertEqual(mod.quote_identifier('"col name"'), '"col name"')
+
+    def test_plain_identifiers_still_quote_correctly(self):
+        mod = self._load_module()
+        self.assertEqual(mod.quote_identifier("foo"), "foo")
+        self.assertEqual(mod.quote_identifier('foo"bar'), '"foo""bar"')
+
+
+class TestPhase2SQLInjectionCallSites(unittest.TestCase):
+    """Phase 2: individual call sites that fed attacker-controlled values into
+    SQL without routing them through the centralized quoting helpers."""
+
+    def test_get_type_from_table_geo_column_quotes_from_clause(self):
+        """SNOW-3712081: the table_name forwarded as the FROM clause must be
+        quoted, otherwise a stored TABLE_NAME can splice raw SQL into FROM."""
+        content = (ROOT / "helpers" / "data_base.py").read_text(encoding="utf-8")
+        idx = content.index("def get_type_from_table_geo_column(")
+        next_def = content.index("\ndef ", idx + 1)
+        body = content[idx:next_def]
+        self.assertIn("from_clause=quote_identifier(table_name)", body)
+        self.assertNotIn("from_clause=table_name", body)
+
+    def test_geometry_type_escaped_in_extent_query(self):
+        """SNOW-3712085: _geometry_type comes from the (project-file) URI and
+        must be escaped as a literal, not interpolated inside raw quotes."""
+        content = (ROOT / "providers" / "sf_vector_data_provider.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("quote_literal(self._geometry_type)", content)
+        self.assertNotIn("ILIKE '{self._geometry_type}'", content)
+
+    def test_geometry_type_escaped_in_feature_iterator(self):
+        """SNOW-3712085: same URI-controlled value reused in the iterator's
+        inner WHERE IN (...) list must be escaped via quote_literal."""
+        content = (ROOT / "providers" / "sf_feature_iterator.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("quote_literal(self._provider._geometry_type)", content)
+        self.assertNotIn("IN ('{self._provider._geometry_type}'", content)
+
+
+class TestPhase3PredicateInjection(unittest.TestCase):
+    """Phase 3: raw SQL predicates / QGIS expressions must not reach Snowflake
+    verbatim (SNOW-3712078 / SNOW-3712093 / SNOW-3712086)."""
+
+    def test_expression_compiler_is_fail_safe(self):
+        content = (ROOT / "helpers" / "expression_compiler.py").read_text(
+            encoding="utf-8"
+        )
+        # QgsSqlExpressionCompiler is NOT exposed in PyQGIS; the module must not
+        # depend on it (that dependency crashed plugin load).
+        self.assertNotIn("QgsSqlExpressionCompiler", content)
+        # Compilation walks the QgsExpression AST and fails closed to None.
+        self.assertIn("rootNode()", content)
+        self.assertIn("def compile_expression_to_sql(", content)
+        # Values/identifiers routed through the safe helpers.
+        self.assertIn("quote_identifier", content)
+        self.assertIn("quote_literal", content)
+
+    def test_feature_iterator_compiles_filter_expression(self):
+        """SNOW-3712078: the iterator must compile the filter expression and
+        must NOT run the old raw validation query or append raw expression."""
+        content = (ROOT / "providers" / "sf_feature_iterator.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("from ..helpers.expression_compiler import compile_expression_to_sql", content)
+        self.assertIn("compile_expression_to_sql(", content)
+        # The raw-text pushdown patterns must be gone.
+        self.assertNotIn("where_clause_list.append(expression)", content)
+        self.assertNotIn('.replace(\'"\', "")', content)
+
+    def test_provider_subset_string_is_compiled(self):
+        """SNOW-3712093: setSubsetString must compile/validate rather than
+        execute the raw predicate as a probe."""
+        content = (ROOT / "providers" / "sf_vector_data_provider.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("compile_expression_to_sql(", content)
+        idx = content.index("def setSubsetString(")
+        next_def = content.index("\n    def ", idx + 1)
+        body = content[idx:next_def]
+        self.assertIn("compile_expression_to_sql(subsetstring", body)
+        self.assertNotIn("WHERE {subsetstring} LIMIT 0", body)
+
+    def test_import_where_clause_is_guarded(self):
+        """SNOW-3712086: the free-text WHERE clause must be validated before it
+        is concatenated into the SELECT."""
+        content = (ROOT / "processing" / "import_from_snowflake.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("predicate_has_statement_breakers", content)
+        self.assertIn("QgsProcessingException", content)
+        guard_idx = content.index("predicate_has_statement_breakers(where)")
+        append_idx = content.index('sql += f" WHERE {where}"')
+        self.assertLess(
+            guard_idx, append_idx,
+            "WHERE clause must be validated before being appended",
+        )
+
+
+class TestPhase4ProjectFileTrust(unittest.TestCase):
+    """Phase 4: values restored verbatim from an (untrusted) .qgs/.qgz project
+    must be re-validated before they can cause harm."""
+
+    def test_sql_query_layer_is_row_capped(self):
+        """SNOW-3712076: the custom sql_query layer branch must also compute
+        _is_limited_unordered (row cap), not leave it at the default False."""
+        content = (ROOT / "providers" / "sf_vector_data_provider.py").read_text(
+            encoding="utf-8"
+        )
+        start = content.index("if self._sql_query and not self._table_name:")
+        end = content.index("self.get_geometry_column()", start)
+        block = content[start:end]
+        # Both the sql_query branch and the table branch must size-check.
+        self.assertEqual(
+            block.count("check_from_clause_exceeds_size"), 2,
+            "sql_query branch must also probe size via check_from_clause_exceeds_size",
+        )
+        self.assertIn("SNOW-3712076", block)
+
+    def test_iterator_close_releases_cursor(self):
+        """SNOW-3712076: close() must release the server-side cursor."""
+        content = (ROOT / "providers" / "sf_feature_iterator.py").read_text(
+            encoding="utf-8"
+        )
+        idx = content.index("def close(self)")
+        body = content[idx:idx + 500]
+        self.assertIn("result.close()", body)
+        self.assertIn("self._result = None", body)
+
+    def test_capabilities_gate_on_limited_unordered(self):
+        """SNOW-3712082: edit/SelectAtId capabilities must be withheld when the
+        result set is a random-sampled/unordered set (unstable feature ids)."""
+        content = (ROOT / "providers" / "sf_vector_data_provider.py").read_text(
+            encoding="utf-8"
+        )
+        idx = content.index("def capabilities(self)")
+        next_def = content.index("\n    def ", idx + 1)
+        body = content[idx:next_def]
+        self.assertIn("self._is_limited_unordered", body)
+
+    def test_capabilities_revalidate_primary_key(self):
+        """SNOW-3712083: capabilities must re-validate the URI primary key
+        uniqueness before granting edit capabilities."""
+        content = (ROOT / "providers" / "sf_vector_data_provider.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("def _validate_primary_key(self)", content)
+        self.assertIn("get_declared_primary_key", content)
+        self.assertIn("check_column_has_duplicates", content)
+        idx = content.index("def capabilities(self)")
+        next_def = content.index("\n    def ", idx + 1)
+        body = content[idx:next_def]
+        self.assertIn("_validate_primary_key()", body)
+
+
+class TestPhase4AuthcfgUri(unittest.TestCase):
+    """SNOW-3712094: the connection alias must be hidden behind an authcfg=
+    token in persisted URIs, and resolved back on load."""
+
+    def _load_utils(self):
+        return _load_helpers_utils(self)
+
+    def test_decode_uri_supports_legacy_connection_name(self):
+        mod = self._load_utils()
+        params = mod.decodeUri("connection_name=myconn table_name=T srid=4326")
+        self.assertEqual(params.get("connection_name"), "myconn")
+
+    def test_decode_uri_resolves_authcfg_to_connection_name(self):
+        mod = self._load_utils()
+        mod.resolve_authcfg_connection_name = (
+            lambda cid: "resolved_conn" if cid == "ABC1234" else None
+        )
+        params = mod.decodeUri("authcfg=ABC1234 table_name=T srid=4326")
+        self.assertEqual(params.get("authcfg"), "ABC1234")
+        self.assertEqual(params.get("connection_name"), "resolved_conn")
+
+    def test_decode_uri_authcfg_unresolvable_leaves_no_connection(self):
+        # A project opened on a foreign machine: the id does not resolve, so no
+        # connection_name is injected -> parse_uri will later reject it.
+        mod = self._load_utils()
+        mod.resolve_authcfg_connection_name = lambda cid: None
+        params = mod.decodeUri("authcfg=NOPE table_name=T srid=4326")
+        self.assertNotIn("connection_name", params)
+
+    def test_connection_uri_token_prefers_authcfg(self):
+        mod = self._load_utils()
+        mod.get_or_create_connection_authcfg = lambda name: "XYZ7890"
+        self.assertEqual(mod.connection_uri_token("myconn"), "authcfg=XYZ7890")
+
+    def test_connection_uri_token_falls_back_to_connection_name(self):
+        mod = self._load_utils()
+        mod.get_or_create_connection_authcfg = lambda name: None
+        self.assertEqual(
+            mod.connection_uri_token("myconn"), "connection_name=myconn"
+        )
+
+    def test_datasource_uri_honors_expand_auth_config(self):
+        content = (ROOT / "providers" / "sf_vector_data_provider.py").read_text(
+            encoding="utf-8"
+        )
+        idx = content.index("def dataSourceUri(self")
+        next_def = content.index("\n    def ", idx + 1)
+        body = content[idx:next_def]
+        self.assertIn("expandAuthConfig", body)
+        self.assertIn("authcfg=", body)
+        self.assertIn("get_or_create_connection_authcfg", body)
+        self.assertIn("_replace_connection_token", body)
+        # The redacted branch must be guarded by the expandAuthConfig flag
+        # rather than unconditionally returning the alias-bearing uri.
+        self.assertIn("if expandAuthConfig:", body)
+
+    def test_uri_builders_use_redacted_token(self):
+        task = (ROOT / "tasks" / "sf_convert_column_to_layer_task.py").read_text(
+            encoding="utf-8"
+        )
+        meta = (ROOT / "providers" / "sf_metadata_provider.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("connection_uri_token(", task)
+        self.assertIn("connection_uri_token(", meta)
+
+
+class TestPhase5Hardening(unittest.TestCase):
+    """Phase 5: cleartext credentials, forced-SMB rich text, arbitrary SQL."""
+
+    def test_no_geom_dialog_forces_plain_text(self):
+        """SNOW-3712087: the server-controlled table name must be shown as plain
+        text so a <img src=UNC> name cannot trigger an SMB/NTLM leak."""
+        content = (ROOT / "entities" / "sf_data_item.py").read_text(
+            encoding="utf-8"
+        )
+        idx = content.index('if self.item_type == "table_no_geom":')
+        block = content[idx:idx + 900]
+        self.assertIn("setTextFormat(Qt.TextFormat.PlainText)", block)
+        # The vulnerable auto-format static call must be gone from this branch.
+        self.assertNotIn("QMessageBox.information(", block)
+
+    def test_dialog_skips_cleartext_password_when_encrypted(self):
+        """SNOW-3712079: the dialog must not capture the Basic-tab password when
+        the encrypted Configurations tab is selected."""
+        content = (
+            ROOT / "dialogs" / "sf_connection_string_dialog.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            'if is_default_auth and not config_tab_selected:', content
+        )
+
+    def test_set_connection_settings_clears_password_when_encrypted(self):
+        """SNOW-3712079: saving an encrypted Default-Auth connection (no
+        password provided) must remove any stale cleartext password rather than
+        crash or leave it behind."""
+        mod = _load_helpers_utils(self)
+
+        class _FakeSettings:
+            def __init__(self):
+                self.values = {}
+                self.removed = []
+
+            def beginGroup(self, *_):
+                pass
+
+            def endGroup(self):
+                pass
+
+            def sync(self):
+                pass
+
+            def setValue(self, key, value):
+                self.values[key] = value
+
+            def remove(self, key):
+                self.removed.append(key)
+
+        fake = _FakeSettings()
+        mod.get_qsettings = lambda: fake
+        mod.set_connection_settings({
+            "name": "conn1",
+            "warehouse": "WH",
+            "account": "ACC",
+            "database": "DB",
+            "username": "user",
+            "connection_type": "Default Authentication",
+            "password_encrypted": True,
+            "config_id": "abc123",
+        })
+        self.assertNotIn("password", fake.values)
+        self.assertIn("password", fake.removed)
+
+    def test_set_connection_settings_writes_password_when_plaintext(self):
+        """Guard rail: legacy plaintext Default-Auth still stores the password."""
+        mod = _load_helpers_utils(self)
+
+        class _FakeSettings:
+            def __init__(self):
+                self.values = {}
+                self.removed = []
+
+            def beginGroup(self, *_):
+                pass
+
+            def endGroup(self):
+                pass
+
+            def sync(self):
+                pass
+
+            def setValue(self, key, value):
+                self.values[key] = value
+
+            def remove(self, key):
+                self.removed.append(key)
+
+        fake = _FakeSettings()
+        mod.get_qsettings = lambda: fake
+        mod.set_connection_settings({
+            "name": "conn1",
+            "warehouse": "WH",
+            "account": "ACC",
+            "database": "DB",
+            "username": "user",
+            "connection_type": "Default Authentication",
+            "password_encrypted": False,
+            "password": "s3cret",
+        })
+        self.assertEqual(fake.values.get("password"), "s3cret")
+
+    def _load_execute_sql(self, iface_value):
+        import sys
+        import types
+        import importlib.util
+
+        names = (
+            "qgis", "qgis.core", "qgis.PyQt", "qgis.PyQt.QtCore",
+            "qgis.PyQt.QtGui", "qgis.utils",
+        )
+        saved = {n: sys.modules.get(n) for n in names}
+
+        def _restore():
+            for n, prev in saved.items():
+                if prev is None:
+                    sys.modules.pop(n, None)
+                else:
+                    sys.modules[n] = prev
+        self.addCleanup(_restore)
+
+        qgis = types.ModuleType("qgis")
+        core = types.ModuleType("qgis.core")
+        for nm in (
+            "QgsProcessingAlgorithm", "QgsProcessingParameterString",
+            "QgsProcessingOutputString",
+        ):
+            setattr(core, nm, type(nm, (), {}))
+        core.QgsProcessingException = type(
+            "QgsProcessingException", (Exception,), {}
+        )
+        qgis.core = core
+        pyqt = types.ModuleType("qgis.PyQt")
+        qtcore = types.ModuleType("qgis.PyQt.QtCore")
+        qtcore.QCoreApplication = type("QCoreApplication", (), {})
+        qtgui = types.ModuleType("qgis.PyQt.QtGui")
+        qtgui.QIcon = type("QIcon", (), {})
+        pyqt.QtCore = qtcore
+        pyqt.QtGui = qtgui
+        qgis.PyQt = pyqt
+        utils = types.ModuleType("qgis.utils")
+        utils.iface = iface_value
+        sys.modules["qgis"] = qgis
+        sys.modules["qgis.core"] = core
+        sys.modules["qgis.PyQt"] = pyqt
+        sys.modules["qgis.PyQt.QtCore"] = qtcore
+        sys.modules["qgis.PyQt.QtGui"] = qtgui
+        sys.modules["qgis.utils"] = utils
+
+        spec = importlib.util.spec_from_file_location(
+            "sfc_execute_sql_under_test", ROOT / "processing" / "execute_sql.py"
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_execute_sql_headless_proceeds_without_prompt(self):
+        """SNOW-3712080: headless (no iface) runs are user-initiated and proceed."""
+        mod = self._load_execute_sql(iface_value=None)
+        alg = mod.ExecuteSQLAlgorithm()
+        self.assertTrue(alg._confirm_execution("conn", "SELECT 1"))
+
+    def test_execute_sql_requires_confirmation_before_execution(self):
+        """SNOW-3712080: the algorithm must gate execution on _confirm_execution
+        and abort with QgsProcessingException when declined."""
+        content = (ROOT / "processing" / "execute_sql.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("FlagNoThreading", content)
+        idx = content.index("def processAlgorithm(")
+        body = content[idx:]
+        confirm_pos = body.index("_confirm_execution(")
+        exec_pos = body.index("mgr.execute_query(")
+        self.assertLess(
+            confirm_pos, exec_pos,
+            "confirmation must happen before the SQL is executed",
+        )
+        self.assertIn("QgsProcessingException(", body)
+        self.assertIn("setTextFormat(Qt.TextFormat.PlainText)", content)
 
 
 class TestProviderLifecycle(unittest.TestCase):
@@ -898,6 +1795,62 @@ class TestGitHubIssuesFixes(unittest.TestCase):
         self.assertIn("QgsErrorItem", content)
 
 
+class TestOpenIssueFixes(unittest.TestCase):
+    """Fixes for the open tracker issues #120, #119 and #118."""
+
+    def test_qgsfield_helper_is_version_compatible(self):
+        """#120: QgsField must be built through a helper that falls back to
+        QVariant.Type on QGIS < 3.38 (the QMetaType.Type constructor is only
+        available from 3.38)."""
+        content = (ROOT / "helpers" / "mappings.py").read_text(encoding="utf-8")
+        self.assertIn("def create_qgs_field(", content)
+        self.assertIn("QGIS_VERSION_INT", content)
+        self.assertIn("33800", content)
+        self.assertIn("QVariant.Type(int(metatype))", content)
+
+    def test_qgsfield_construction_sites_use_helper(self):
+        """#120: every QgsField construction that takes a QMetaType.Type must
+        route through create_qgs_field."""
+        for rel in [
+            ("providers", "sf_data_source_provider.py"),
+            ("providers", "sf_vector_data_provider.py"),
+            ("processing", "import_from_snowflake.py"),
+            ("helpers", "layer_creation.py"),
+        ]:
+            content = (ROOT.joinpath(*rel)).read_text(encoding="utf-8")
+            self.assertIn(
+                "create_qgs_field(", content,
+                f"{'/'.join(rel)} must build fields via create_qgs_field",
+            )
+
+    def test_feature_iterator_initializes_expression_unconditionally(self):
+        """#119: self._expression must be set before the features-cached guard
+        so nextFeatureFilterExpression never hits an unset attribute."""
+        content = (ROOT / "providers" / "sf_feature_iterator.py").read_text(
+            encoding="utf-8"
+        )
+        init_expr = content.index('self._expression = ""')
+        guard = content.index("if not self._provider._features_loaded:")
+        self.assertLess(
+            init_expr, guard,
+            "self._expression must be initialized before the "
+            "_features_loaded guard",
+        )
+
+    def test_data_item_handles_table_group_and_no_geom(self):
+        """#118: expanding 'Tables (no geometry)' must not fall through to
+        _get_query_metadata with an unhandled item_type."""
+        content = (ROOT / "entities" / "sf_data_item.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("def create_table_group_item(", content)
+        self.assertIn('elif self.item_type == "table_group":', content)
+        self.assertIn('if self.item_type in ("field", "table_no_geom"):', content)
+        # Children are built lazily from a stashed list, not pre-added.
+        self.assertIn("group_item.non_geo_tables = sorted(non_geo_tables)", content)
+        self.assertNotIn("group_item.addChildItem(", content)
+
+
 class TestSpatialFilterPushdownGuard(unittest.TestCase):
     """Regression: the GEOGRAPHY / H3 spatial-filter pushdown must be skipped
     when the filter rect is outside the WGS84 lon/lat range, otherwise
@@ -999,6 +1952,13 @@ class TestSpatialFilterPushdownGuard(unittest.TestCase):
             "qgis_snowflake_connector.helpers.sql"
         )
         helpers_sql.quote_identifier = lambda n: n
+        helpers_sql.quote_literal = lambda v: "'" + str(v).replace("'", "''") + "'"
+        helpers_expression_compiler = types.ModuleType(
+            "qgis_snowflake_connector.helpers.expression_compiler"
+        )
+        helpers_expression_compiler.compile_expression_to_sql = (
+            lambda expr, fields: None
+        )
         helpers_mappings = types.ModuleType(
             "qgis_snowflake_connector.helpers.mappings"
         )
@@ -1011,9 +1971,19 @@ class TestSpatialFilterPushdownGuard(unittest.TestCase):
             "qgis_snowflake_connector.providers.sf_feature_source"
         )
         sf_feature_source.SFFeatureSource = type("SFFeatureSource", (), {})
+        managers_pkg = types.ModuleType(
+            "qgis_snowflake_connector.managers"
+        )
+        managers_pkg.__path__ = [str(ROOT / "managers")]
+        sf_connection_manager = types.ModuleType(
+            "qgis_snowflake_connector.managers.sf_connection_manager"
+        )
+        sf_connection_manager.build_op_tag = lambda *a, **k: ""
         for mod in (
             plugin_pkg, helpers_pkg, helpers_limits, helpers_sql,
+            helpers_expression_compiler,
             helpers_mappings, providers_pkg, sf_feature_source,
+            managers_pkg, sf_connection_manager,
         ):
             sys.modules.setdefault(mod.__name__, mod)
 

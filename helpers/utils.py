@@ -216,7 +216,13 @@ def set_connection_settings(connection_settings: dict) -> None:
     if "role" in connection_settings:
         settings.setValue("role", connection_settings["role"])
     if connection_settings["connection_type"] == "Default Authentication":
-        settings.setValue("password", connection_settings["password"])
+        # SNOW-3712079: when the encrypted (Configurations) tab is used no
+        # plaintext password is provided; make sure any previously stored
+        # cleartext password is removed rather than left behind in the INI.
+        if connection_settings.get("password"):
+            settings.setValue("password", connection_settings["password"])
+        else:
+            settings.remove("password")
     if connection_settings["connection_type"] == "Key Pair":
         settings.setValue(
             "private_key_file", connection_settings.get("private_key_file", "")
@@ -376,6 +382,7 @@ def decodeUri(uri: str) -> Dict[str, str]:
     """
     supported_keys = [
         "connection_name",
+        "authcfg",
         "sql_query",
         "schema_name",
         "table_name",
@@ -392,6 +399,13 @@ def decodeUri(uri: str) -> Dict[str, str]:
         flags=re.DOTALL,
     )
     params = {key: value for key, value in matches}
+    # SNOW-3712094: an authcfg= token is the redacted form of connection_name=.
+    # Resolve it back to the alias for internal use; the alias is authoritative
+    # so a stale connection_name= left in a hand-edited URI cannot override it.
+    if params.get("authcfg"):
+        resolved = resolve_authcfg_connection_name(params["authcfg"])
+        if resolved:
+            params["connection_name"] = resolved
     return params
 
 
@@ -444,6 +458,87 @@ def get_auth_method_config(config_id: str) -> QgsAuthMethodConfig:
     return method_config
 
 
+# --- SNOW-3712094: keep the connection alias out of persisted layer URIs -----
+# The layer datasource URI is stored verbatim inside .qgs/.qgz/.qlr files. To
+# avoid leaking the local connection alias (which enables a targeted
+# confused-deputy on project open) we hide it behind a QGIS auth-config id.
+# The auth DB is per-machine, so the id is meaningless on any other machine.
+_LAYER_AUTHCFG_MAP_KEY = "layer_authcfg"
+
+
+def get_or_create_connection_authcfg(connection_name: str):
+    """Return a QGIS auth-config id whose config-map hides ``connection_name``.
+
+    Reuses a previously created id (persisted under the connection's settings
+    group) when possible. Returns ``None`` on any failure so callers can fall
+    back to the legacy ``connection_name=`` token without breaking layer
+    creation.
+    """
+    if not connection_name:
+        return None
+    try:
+        settings = get_qsettings()
+        settings.beginGroup(f"connections/{connection_name}")
+        existing = settings.value(_LAYER_AUTHCFG_MAP_KEY, defaultValue="")
+        settings.endGroup()
+
+        auth_manager = QgsApplication.authManager()
+        if existing:
+            # full=True so the encrypted config map (connection_name) is
+            # actually loaded; otherwise probe.config(...) is empty and we would
+            # never reuse the stored id, leaking a new auth config every call.
+            probe = get_auth_method_config(existing)
+            if probe.isValid() and probe.config("connection_name") == connection_name:
+                return existing
+
+        method_config = QgsAuthMethodConfig()
+        method_config.setName(f"snowflakedb layer: {connection_name}")
+        method_config.setMethod("Basic")
+        method_config.setConfig("connection_name", connection_name)
+        if not auth_manager.storeAuthenticationConfig(method_config):
+            return None
+        config_id = method_config.id()
+        if not config_id:
+            return None
+
+        settings.beginGroup(f"connections/{connection_name}")
+        settings.setValue(_LAYER_AUTHCFG_MAP_KEY, config_id)
+        settings.endGroup()
+        settings.sync()
+        return config_id
+    except Exception:
+        return None
+
+
+def resolve_authcfg_connection_name(config_id: str):
+    """Recover the connection alias hidden behind an auth-config id.
+
+    Returns ``None`` when the id does not resolve (e.g. project opened on a
+    different machine), which correctly prevents silent auto-connection.
+    """
+    if not config_id:
+        return None
+    try:
+        method_config = get_auth_method_config(config_id)
+        if not method_config.isValid():
+            return None
+        return method_config.config("connection_name") or None
+    except Exception:
+        return None
+
+
+def connection_uri_token(connection_name: str) -> str:
+    """Return the connection token to embed in a persisted layer URI.
+
+    Prefers the redacted ``authcfg=<id>`` form; falls back to the legacy
+    ``connection_name=<alias>`` form when an auth config cannot be created.
+    """
+    config_id = get_or_create_connection_authcfg(connection_name)
+    if config_id:
+        return f"authcfg={config_id}"
+    return f"connection_name={connection_name}"
+
+
 def prompt_and_get_primary_key(context_information: dict, data_type: str) -> str:
     """Prompts the user to select a primary key for a table.
 
@@ -467,11 +562,32 @@ def prompt_and_get_primary_key(context_information: dict, data_type: str) -> str
         The name of the column selected as the primary key, or an empty
         string if no primary key is selected or the process is skipped.
     """
-    from ..helpers.data_base import get_table_columns, check_column_has_duplicates
+    from ..helpers.data_base import (
+        check_column_has_duplicates,
+        get_declared_primary_key,
+        get_table_columns,
+    )
     from ..helpers.messages import get_set_primary_key_message_box
 
     primary_key = ""
     if data_type not in ["H3GEO", "H3"]:
+        # C4: if the table has a single-column PK declared in Snowflake,
+        # use it directly instead of prompting. Composite PKs and tables
+        # with no PK still fall through to the interactive dialog.
+        # Snowflake PKs are informational (not enforced), so verify there
+        # are no duplicate values before silently auto-selecting; otherwise
+        # fall through so the user sees the duplicate warning dialog.
+        declared = get_declared_primary_key(context_information)
+        if declared:
+            try:
+                declared_has_dupes = check_column_has_duplicates(
+                    context_information, declared
+                )
+            except Exception:
+                declared_has_dupes = True
+            if not declared_has_dupes:
+                return declared
+
         message_box_accept, primary_key_selected = get_set_primary_key_message_box(
             "Set Primary Key",
             (

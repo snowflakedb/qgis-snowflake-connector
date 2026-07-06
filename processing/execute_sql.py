@@ -4,6 +4,7 @@ import os
 
 from qgis.core import (
     QgsProcessingAlgorithm,
+    QgsProcessingException,
     QgsProcessingParameterString,
     QgsProcessingOutputString,
 )
@@ -46,6 +47,50 @@ class ExecuteSQLAlgorithm(QgsProcessingAlgorithm):
     def createInstance(self):
         return ExecuteSQLAlgorithm()
 
+    def flags(self):
+        # SNOW-3712080: run on the main thread so the confirmation prompt below
+        # can be shown safely. This algorithm executes arbitrary SQL on the
+        # user's Snowflake connection and can be triggered by an untrusted
+        # Processing model (.model3), so it must not run unattended in the GUI
+        # without explicit consent.
+        return super().flags() | QgsProcessingAlgorithm.FlagNoThreading
+
+    def _confirm_execution(self, connection_name, sql):
+        """Require explicit user consent when a GUI is available.
+
+        Headless runs (qgis_process CLI / PyQGIS) are treated as user-initiated
+        and proceed without a prompt; interactive runs must be confirmed so a
+        malicious Processing model cannot silently run SQL as the victim.
+        """
+        try:
+            from qgis.utils import iface
+        except Exception:
+            iface = None
+        if iface is None:
+            return True
+
+        from qgis.PyQt.QtWidgets import QMessageBox
+        from qgis.PyQt.QtCore import Qt
+
+        preview = sql if len(sql) <= 2000 else sql[:2000] + "\n…(truncated)"
+        box = QMessageBox(iface.mainWindow())
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("Confirm SQL execution")
+        # Plain text so a crafted connection name / SQL cannot render rich text.
+        box.setTextFormat(Qt.TextFormat.PlainText)
+        box.setText(
+            "The Snowflake plugin is about to run a SQL statement on "
+            f"connection '{connection_name}'.\n\n"
+            "Only proceed if you trust the source of this statement (for "
+            "example a Processing model you did not author).\n\n"
+            f"{preview}"
+        )
+        box.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        box.setDefaultButton(QMessageBox.StandardButton.No)
+        return box.exec() == QMessageBox.StandardButton.Yes
+
     def initAlgorithm(self, config=None):
         self.addParameter(QgsProcessingParameterString(
             self.CONNECTION, self.tr("Connection name"),
@@ -63,6 +108,11 @@ class ExecuteSQLAlgorithm(QgsProcessingAlgorithm):
 
         connection_name = self.parameterAsString(parameters, self.CONNECTION, context)
         sql = self.parameterAsString(parameters, self.SQL, context)
+
+        if not self._confirm_execution(connection_name, sql):
+            raise QgsProcessingException(
+                "Execution of the SQL statement was cancelled by the user."
+            )
 
         auth = get_auth_information(connection_name)
         mgr = SFConnectionManager.get_instance()

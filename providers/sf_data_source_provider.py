@@ -10,6 +10,7 @@ from qgis.core import (
     QgsField,
     QgsFields,
 )
+from ..helpers.mappings import create_qgs_field
 import snowflake.connector
 
 
@@ -154,8 +155,7 @@ class SFDataProvider(QgsDataProvider):
                         type = QMetaType.Type.Double
                 if type in [QMetaType.Type.QDateTime, QMetaType.Type.QDate, QMetaType.Type.QTime]:
                     type = QMetaType.Type.QString
-                qgsField = QgsField(col[0], type, str(type))
-                qgsField.setSubType(subType)
+                qgsField = create_qgs_field(col[0], type, str(type), sub_type=subType)
                 fields.append(qgsField)
 
             # Create a QgsFeatureSource

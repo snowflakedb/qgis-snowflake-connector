@@ -137,7 +137,7 @@ class DynamicConnectionComboBoxWidget(WidgetWrapper):
             if not self._prefilled:
                 self._prefilled = True
                 self._prefill_from_snowflake_layer()
-        except Exception:
+        except Exception:  # nosec B110 - prefill is a UX convenience; must never prevent the dialog from opening if the layer metadata is unexpected
             pass
 
     def _prefill_from_snowflake_layer(self):

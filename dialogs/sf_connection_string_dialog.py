@@ -148,7 +148,7 @@ class SFConnectionStringDialog(QDialog, Ui_QgsPgNewConnectionBase):
                 method_to_call = getattr(widget, method_name)
                 if method_to_call() == "":
                     unfilled_required_fields.append(f"- {field_name}\n")
-            except Exception as _:
+            except Exception as _:  # nosec B110 - skipping a widget that does not expose the expected getter is intentional; field simply isn't treated as required
                 pass
 
         return unfilled_required_fields
@@ -179,7 +179,11 @@ class SFConnectionStringDialog(QDialog, Ui_QgsPgNewConnectionBase):
                 self.cbxConnectionType.currentText() == "Default Authentication"
             )
 
-            if is_default_auth:
+            # SNOW-3712079: only persist a cleartext password when the user is
+            # NOT using the encrypted (Configurations) tab. Capturing it
+            # unconditionally leaked the password into the world-readable INI
+            # even after the user opted into QgsAuthManager storage.
+            if is_default_auth and not config_tab_selected:
                 conn_settings["password"] = self.mAuthSettings.password()
 
             if config_tab_selected:
