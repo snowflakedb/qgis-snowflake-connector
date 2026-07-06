@@ -17,7 +17,7 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-PLUGIN_DIR_NAME = "qgis-snowflake-connector"
+PLUGIN_DIR_NAME = "qgis_snowflake_connector"
 
 EXCLUDE_ALWAYS = {
     ".git",
