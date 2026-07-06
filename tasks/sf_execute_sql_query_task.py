@@ -1,6 +1,8 @@
+import threading
 import typing
 
 from ..helpers.data_base import get_limit_sql_query
+from ..managers.sf_connection_manager import SFConnectionManager
 from qgis.core import QgsTask
 from qgis.PyQt.QtCore import pyqtSignal
 
@@ -34,6 +36,7 @@ class SFExecuteSQLQueryTask(QgsTask):
             )
             self.context_information = context_information
             self.limit = limit
+            self._run_thread_id: typing.Optional[int] = None
         except Exception as e:
             self.on_handle_error.emit(
                 "SFExecuteSQLQueryTask init failed",
@@ -51,6 +54,7 @@ class SFExecuteSQLQueryTask(QgsTask):
             Emits an error signal with detailed error information if an exception occurs.
         """
         try:
+            self._run_thread_id = threading.get_ident()
             self._result = get_limit_sql_query(
                 query=self.query,
                 context_information=self.context_information,
@@ -64,6 +68,14 @@ class SFExecuteSQLQueryTask(QgsTask):
                 f"Running snowflake convert column to layer task failed.\n\nExtended error information:\n{str(e)}",
             )
             return False
+
+    def cancel(self) -> None:
+        """Propagate user cancel to any in-flight Snowflake query (A9)."""
+        if self._run_thread_id is not None:
+            SFConnectionManager.get_instance().cancel_pending_on_thread(
+                self._run_thread_id
+            )
+        super().cancel()
 
     def finished(self, result: bool) -> None:
         """

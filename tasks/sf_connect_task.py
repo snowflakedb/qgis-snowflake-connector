@@ -1,8 +1,10 @@
+import threading
 import typing
 
 from ..helpers.data_base import get_geo_columns
 from ..helpers.sql import quote_literal
 from ..helpers.utils import get_authentification_information, get_qsettings
+from ..managers.sf_connection_manager import SFConnectionManager
 from ..providers.sf_data_source_provider import SFDataProvider
 from qgis.core import QgsTask
 from qgis.PyQt.QtCore import pyqtSignal
@@ -26,6 +28,7 @@ class SFConnectTask(QgsTask):
         """
         try:
             super().__init__("Snowflake Connection Task", QgsTask.CanCancel)
+            self._run_thread_id: typing.Optional[int] = None
             self.settings = get_qsettings()
             self.auth_information = get_authentification_information(
                 self.settings, connection_name
@@ -52,6 +55,7 @@ class SFConnectTask(QgsTask):
             bool: True if the task is executed successfully, False otherwise.
         """
         try:
+            self._run_thread_id = threading.get_ident()
             sf_data_provider = SFDataProvider(self.auth_information)
             columns = get_geo_columns(sf_data_provider, self.connection_name)
             columns.sort(
@@ -104,6 +108,14 @@ class SFConnectTask(QgsTask):
                 f"Running sf connect task failed.\n\nExtended error information:\n{str(e)}",
             )
             return False
+
+    def cancel(self) -> None:
+        """Propagate user cancel to any in-flight Snowflake query (A9)."""
+        if self._run_thread_id is not None:
+            SFConnectionManager.get_instance().cancel_pending_on_thread(
+                self._run_thread_id
+            )
+        super().cancel()
 
     def finished(self, result: bool) -> None:
         """

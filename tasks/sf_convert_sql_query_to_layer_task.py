@@ -1,3 +1,4 @@
+import threading
 import typing
 from ..enums.snowflake_metadata_type import SnowflakeMetadataType
 from ..helpers.data_base import (
@@ -5,6 +6,7 @@ from ..helpers.data_base import (
     get_srid_from_sql_query_geo_column,
     get_type_from_query_geo_column,
 )
+from ..managers.sf_connection_manager import SFConnectionManager
 from qgis.core import QgsProject, QgsTask, QgsVectorLayer
 from qgis.PyQt.QtCore import pyqtSignal
 
@@ -38,6 +40,7 @@ class SFConvertSQLQueryToLayerTask(QgsTask):
 
             self.query = query
             self.layer_name = layer_name
+            self._run_thread_id: typing.Optional[int] = None
             super().__init__(
                 f"Snowflake convert query to layer: {self.query}",
                 QgsTask.CanCancel,
@@ -56,6 +59,7 @@ class SFConvertSQLQueryToLayerTask(QgsTask):
             bool: True if the task is executed successfully, False otherwise.
         """
         try:
+            self._run_thread_id = threading.get_ident()
             if self.geo_column_type_is_h3:
                 geo_column_type = (
                     "TEXT" if self.h3_sf_col_type == SnowflakeMetadataType.TEXT.value
@@ -108,6 +112,14 @@ class SFConvertSQLQueryToLayerTask(QgsTask):
                 f"Running snowflake convert column to layer task failed.\n\nExtended error information:\n{str(e)}",
             )
             return False
+
+    def cancel(self) -> None:
+        """Propagate user cancel to any in-flight Snowflake query (A9)."""
+        if self._run_thread_id is not None:
+            SFConnectionManager.get_instance().cancel_pending_on_thread(
+                self._run_thread_id
+            )
+        super().cancel()
 
     def finished(self, result: bool) -> None:
         """

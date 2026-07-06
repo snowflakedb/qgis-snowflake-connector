@@ -1,4 +1,7 @@
-from typing import Dict
+from collections import defaultdict
+from typing import Dict, List, Optional
+import json
+import threading
 import typing
 import snowflake.connector
 
@@ -6,6 +9,31 @@ from qgis.core import Qgis, QgsMessageLog
 
 from ..helpers.utils import get_auth_information
 from ..helpers.sql import quote_identifier
+
+
+_BASE_QUERY_TAG = "qgis-snowflake-connector"
+
+
+def build_op_tag(
+    op: str,
+    connection_name: typing.Optional[str] = None,
+    schema: typing.Optional[str] = None,
+    table: typing.Optional[str] = None,
+) -> str:
+    """Build a JSON-encoded QUERY_TAG payload for cost attribution.
+
+    The resulting string is set as the Snowflake session QUERY_TAG so that
+    ACCOUNT_USAGE.QUERY_HISTORY rows issued by the plugin can be filtered by
+    operation type and target layer.
+    """
+    payload = {"app": _BASE_QUERY_TAG, "op": op}
+    if connection_name:
+        payload["conn"] = connection_name
+    if schema and table:
+        payload["layer"] = f"{schema}.{table}"
+    elif table:
+        payload["layer"] = table
+    return json.dumps(payload, separators=(",", ":"))
 
 
 class SFConnectionManager:
@@ -27,6 +55,18 @@ class SFConnectionManager:
         Initializes the SFConnectionManager object.
         """
         self.opened_connections: Dict[str, snowflake.connector.SnowflakeConnection] = {}
+        # A6: track the most recently-set active schema per connection so we
+        # can skip redundant `USE SCHEMA` round-trips on every execute_query.
+        self._active_schemas: Dict[str, str] = {}
+        # E3: track the most recently-set QUERY_TAG per connection so we only
+        # issue `ALTER SESSION SET QUERY_TAG` when the requested tag changes.
+        self._active_query_tags: Dict[str, str] = {}
+        # A9: track cursors currently executing, keyed by the thread that
+        # owns them, so tasks can cancel their own queries on task.cancel()
+        # without touching cursors running on other threads (e.g. the main
+        # thread's feature iterator).
+        self._active_cursors: Dict[int, List[snowflake.connector.cursor.SnowflakeCursor]] = defaultdict(list)
+        self._lock = threading.Lock()
 
     def create_snowflake_connection(
         self, conn_params: dict
@@ -64,7 +104,7 @@ class SFConnectionManager:
                 "login_timeout": 5,
                 "client_session_keep_alive": True,
                 "session_parameters": {
-                    "QUERY_TAG": "qgis-snowflake-connector",
+                    "QUERY_TAG": _BASE_QUERY_TAG,
                 },
             }
 
@@ -89,9 +129,15 @@ class SFConnectionManager:
             self.opened_connections[connection_name] = self.create_snowflake_connection(
                 conn_params
             )
+            # Fresh session: forget whatever schema / query tag we thought was
+            # active on the previous socket.
+            self._active_schemas.pop(connection_name, None)
+            self._active_query_tags[connection_name] = _BASE_QUERY_TAG
         except Exception as e:
             if connection_name in self.opened_connections:
                 del self.opened_connections[connection_name]
+            self._active_schemas.pop(connection_name, None)
+            self._active_query_tags.pop(connection_name, None)
             raise e
 
     def get_connection(
@@ -128,6 +174,8 @@ class SFConnectionManager:
                 connection = self.opened_connections[connection_name]
                 connection.close()
                 del connection
+            self._active_schemas.pop(connection_name, None)
+            self._active_query_tags.pop(connection_name, None)
         except Exception as e:
             raise e
 
@@ -157,11 +205,116 @@ class SFConnectionManager:
         except Exception as e:
             raise e
 
+    def _apply_schema_if_changed(
+        self,
+        cursor: snowflake.connector.cursor.SnowflakeCursor,
+        connection_name: str,
+        schema_name: Optional[str],
+    ) -> None:
+        """Issue `USE SCHEMA` only when the target differs from the cached
+        active schema for this connection (A6).
+        """
+        if not schema_name:
+            return
+        active = self._active_schemas.get(connection_name)
+        if active == schema_name:
+            return
+        cursor.execute(f'USE SCHEMA {quote_identifier(schema_name)}')
+        self._active_schemas[connection_name] = schema_name
+
+    def _apply_query_tag_if_changed(
+        self,
+        cursor: snowflake.connector.cursor.SnowflakeCursor,
+        connection_name: str,
+        op_tag: Optional[str],
+    ) -> None:
+        """Issue `ALTER SESSION SET QUERY_TAG` only when the tag changes (E3).
+
+        ``op_tag=None`` means "no operation-specific tag", which we map to the
+        base plugin tag so untagged queries don't inherit whatever operation
+        tag the previous query set on the session.
+        """
+        effective = op_tag or _BASE_QUERY_TAG
+        active = self._active_query_tags.get(connection_name)
+        if active == effective:
+            return
+        # effective is either the base tag constant or a build_op_tag() JSON
+        # payload of short string fields, so the only character we need to
+        # escape for a Snowflake string literal is the single quote.
+        escaped = effective.replace("'", "''")
+        cursor.execute(f"ALTER SESSION SET QUERY_TAG = '{escaped}'")
+        self._active_query_tags[connection_name] = effective
+
+    def _register_cursor(
+        self, cursor: snowflake.connector.cursor.SnowflakeCursor
+    ) -> int:
+        tid = threading.get_ident()
+        with self._lock:
+            self._active_cursors[tid].append(cursor)
+        return tid
+
+    def _unregister_cursor(
+        self,
+        tid: int,
+        cursor: snowflake.connector.cursor.SnowflakeCursor,
+    ) -> None:
+        with self._lock:
+            lst = self._active_cursors.get(tid)
+            if not lst:
+                return
+            try:
+                lst.remove(cursor)
+            except ValueError:
+                pass
+            if not lst:
+                self._active_cursors.pop(tid, None)
+
+    def _wire_close_to_unregister(
+        self,
+        cursor: snowflake.connector.cursor.SnowflakeCursor,
+        tid: int,
+    ) -> None:
+        """Unregister the cursor when the caller closes it, so it remains
+        cancellable across the whole fetch lifetime instead of only during
+        ``cursor.execute()`` (A9).
+        """
+        _orig_close = cursor.close
+
+        def _close_and_unregister(*args, **kwargs):
+            self._unregister_cursor(tid, cursor)
+            return _orig_close(*args, **kwargs)
+
+        cursor.close = _close_and_unregister
+
+    def cancel_pending_on_thread(self, thread_id: int) -> int:
+        """Cancel every Snowflake query currently executing on `thread_id`.
+
+        Called from another thread (typically the main UI thread when the
+        user hits Cancel on a QgsTask running on a worker thread).
+
+        Returns the number of cursors whose `cancel()` was invoked.
+        """
+        with self._lock:
+            cursors = list(self._active_cursors.get(thread_id, ()))
+        cancelled = 0
+        for cursor in cursors:
+            try:
+                cursor.cancel()
+                cancelled += 1
+            except Exception as e:
+                QgsMessageLog.logMessage(
+                    f"cursor.cancel() failed: {e}",
+                    "Snowflake Plugin",
+                    Qgis.MessageLevel.Warning,
+                )
+        return cancelled
+
     def execute_query(
         self,
         connection_name: str,
         query: str,
         context_information: Dict[str, typing.Union[str, None]] = None,
+        op_tag: Optional[str] = None,
     ) -> snowflake.connector.cursor.SnowflakeCursor:
         """
         Executes the given query on the specified connection.
@@ -169,6 +322,9 @@ class SFConnectionManager:
         Args:
             connection_name (str): The name of the connection to use.
             query (str): The SQL query to execute.
+            op_tag (str, optional): A QUERY_TAG value (built via
+                ``build_op_tag``) for Snowflake cost attribution. Only applied
+                when different from the tag cached for this connection.
 
         Returns:
             snowflake.connector.cursor.SnowflakeCursor: The cursor object used to execute the query.
@@ -176,17 +332,17 @@ class SFConnectionManager:
         Raises:
             Exception: If an error occurs while executing the query.
         """
+        cursor = self.create_cursor(connection_name)
+        schema_name = None
+        if context_information is not None:
+            schema_name = context_information.get("schema_name")
+        tid = self._register_cursor(cursor)
         try:
-            cursor = self.create_cursor(connection_name)
-            if context_information is not None:
-                if (
-                    "schema_name" in context_information
-                    and context_information["schema_name"] is not None
-                ):
-                    cursor.execute(f'USE SCHEMA {quote_identifier(context_information["schema_name"])}')
+            self._apply_schema_if_changed(cursor, connection_name, schema_name)
+            self._apply_query_tag_if_changed(cursor, connection_name, op_tag)
             cursor.execute(query)
-            return cursor
         except Exception as e:
+            self._unregister_cursor(tid, cursor)
             QgsMessageLog.logMessage(
                 f"execute_query failed: {e}\n"
                 f"Query (first 2000 chars): {query[:2000]}",
@@ -194,6 +350,8 @@ class SFConnectionManager:
                 Qgis.MessageLevel.Critical,
             )
             raise e
+        self._wire_close_to_unregister(cursor, tid)
+        return cursor
 
     def execute_query_with_params(
         self,
@@ -201,6 +359,7 @@ class SFConnectionManager:
         query: str,
         params: Dict[str, typing.Union[str, None]] = None,
         context_information: Dict[str, typing.Union[str, None]] = None,
+        op_tag: Optional[str] = None,
     ) -> snowflake.connector.cursor.SnowflakeCursor:
         """Executes a SQL query with parameters on a specified Snowflake connection.
 
@@ -227,20 +386,20 @@ class SFConnectionManager:
             Exception: Propagates any exception raised by the underlying
                 Snowflake connector during cursor creation or query execution.
         """
+        cursor = self.create_cursor(connection_name)
+        schema_name = None
+        if context_information is not None:
+            schema_name = context_information.get("schema_name")
+        tid = self._register_cursor(cursor)
         try:
-            cursor = self.create_cursor(connection_name)
-            if context_information is not None:
-                if (
-                    "schema_name" in context_information
-                    and context_information["schema_name"] is not None
-                ):
-                    cursor.execute(f'USE SCHEMA {quote_identifier(context_information["schema_name"])}')
-
+            self._apply_schema_if_changed(cursor, connection_name, schema_name)
+            self._apply_query_tag_if_changed(cursor, connection_name, op_tag)
             cursor.execute(query, params=params)
-
-            return cursor
         except Exception as e:
+            self._unregister_cursor(tid, cursor)
             raise e
+        self._wire_close_to_unregister(cursor, tid)
+        return cursor
 
     def reconnect(self, connection_name: str) -> None:
         """
