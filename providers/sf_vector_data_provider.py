@@ -49,6 +49,7 @@ from ..helpers.sql import quote_identifier, quote_literal
 from ..helpers.expression_compiler import compile_expression_to_sql
 from ..helpers.mappings import (
     SNOWFLAKE_METADATA_TYPE_CODE_DICT,
+    create_qgs_field,
     mapping_snowflake_qgis_geometry,
     mapping_snowflake_qgis_type,
 )
@@ -379,7 +380,7 @@ class SFVectorDataProvider(QgsVectorDataProvider):
                     cur.close()
                     for row in field_info:
                         field_name, field_type = row[0], row[1]
-                        qgs_field = QgsField(
+                        qgs_field = create_qgs_field(
                             field_name, mapping_snowflake_qgis_type[field_type]
                         )
                         self._fields.append(qgs_field)
@@ -396,7 +397,7 @@ class SFVectorDataProvider(QgsVectorDataProvider):
                     for data in description:
                         # it is already used to set the feature id
                         if data[1] not in [14, 15]:
-                            qgs_field = QgsField(
+                            qgs_field = create_qgs_field(
                                 data[0],
                                 SNOWFLAKE_METADATA_TYPE_CODE_DICT.get(
                                     data[1],

@@ -133,6 +133,7 @@ class ImportFromSnowflakeAlgorithm(QgsProcessingAlgorithm):
             quote_literal,
             predicate_has_statement_breakers,
         )
+        from ..helpers.mappings import create_qgs_field
         from ..managers.sf_connection_manager import SFConnectionManager
 
         connection_name = self.parameterAsString(parameters, self.CONNECTION, context)
@@ -207,7 +208,7 @@ class ImportFromSnowflakeAlgorithm(QgsProcessingAlgorithm):
             if col_name.upper() == geo_col.upper():
                 continue
             qt_type = type_map.get(col_type, QMetaType.Type.QString)
-            fields.append(QgsField(col_name, qt_type))
+            fields.append(create_qgs_field(col_name, qt_type))
             col_names.append(col_name)
 
         crs = QgsCoordinateReferenceSystem.fromEpsgId(int(srid))

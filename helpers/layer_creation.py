@@ -1,6 +1,7 @@
 import typing
 from ..providers.sf_data_source_provider import SFDataProvider
 from ..helpers.sql import qualified_table_name, quote_identifier
+from ..helpers.mappings import create_qgs_field
 from qgis.core import (
     QgsFeature,
     QgsField,
@@ -218,7 +219,11 @@ def add_features_attributes_to_layer(
         if layer_field.name() == geo_column_name:
             continue
         layer_fields.append(
-            QgsField(layer_field.name(), QMetaType.Type.QString, subType=layer_field.subType())
+            create_qgs_field(
+                layer_field.name(),
+                QMetaType.Type.QString,
+                sub_type=layer_field.subType(),
+            )
         )
 
     for layer_type in layer_dict:

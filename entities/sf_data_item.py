@@ -97,7 +97,7 @@ class SFDataItem(QgsDataItem):
         """
         children: typing.List["SFDataItem"] = []
         try:
-            if self.item_type == "field":
+            if self.item_type in ("field", "table_no_geom"):
                 pass
             elif self.item_type == "root":
                 self.create_root_item(children)
@@ -106,6 +106,9 @@ class SFDataItem(QgsDataItem):
 
             elif self.item_type == "table":
                 self.create_table_item(children)
+
+            elif self.item_type == "table_group":
+                self.create_table_group_item(children)
 
             elif self.item_type == "fields":
                 self.create_fields_item(children)
@@ -254,20 +257,14 @@ class SFDataItem(QgsDataItem):
                 clean_name="",
                 geom_type="",
             )
+            # Stash the table names so the group builds its children lazily in
+            # createChildren(). Adding them eagerly via addChildItem() left the
+            # group unpopulated, so expanding it re-ran createChildren() and fell
+            # through to _get_query_metadata() with an unhandled item_type. See
+            # issue #118.
+            group_item.non_geo_tables = sorted(non_geo_tables)
             children.append(group_item)
-            
-            # Add individual non-geo tables as children of the group
-            for table_name in sorted(non_geo_tables):
-                item = self._create_data_item(
-                    name=table_name,
-                    type="table_no_geom",
-                    connection_name=self.connection_name,
-                    clean_name=table_name,
-                    geom_type="",
-                )
-                item.geom_column = None
-                group_item.addChildItem(item, refresh=False)
-        
+
         # If no tables found at all, show informative message
         if not geo_table_names and not non_geo_tables:
             error_item = QgsErrorItem(
@@ -276,6 +273,32 @@ class SFDataItem(QgsDataItem):
                 f"{self.path()}/error"
             )
             children.append(error_item)
+
+    def create_table_group_item(self, children: typing.List["SFDataItem"]) -> None:
+        """
+        Creates the child items for the "Tables (no geometry)" group.
+
+        The non-geometry table names are stashed on the group item by
+        create_schema_item so they can be built lazily here, avoiding the
+        _get_query_metadata() path that does not handle this item type.
+
+        Args:
+            children (typing.List["SFDataItem"]): A list to which the created
+                                                  table items will be appended.
+
+        Returns:
+            None
+        """
+        for table_name in getattr(self, "non_geo_tables", []):
+            item = self._create_data_item(
+                name=table_name,
+                type="table_no_geom",
+                connection_name=self.connection_name,
+                clean_name=table_name,
+                geom_type="",
+            )
+            item.geom_column = None
+            children.append(item)
 
     def create_table_item(self, children: typing.List["SFDataItem"]) -> None:
         """

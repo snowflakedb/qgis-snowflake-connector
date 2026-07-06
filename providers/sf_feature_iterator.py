@@ -48,6 +48,10 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
         self._cursor_batch_rows = []
         super().__init__(request)
         self._provider = source.get_provider()
+        # Initialized unconditionally: nextFeatureFilterExpression() reads
+        # self._expression even when the provider's features are already cached
+        # (the block below that would otherwise set it is skipped). See issue #119.
+        self._expression = ""
 
         self._request = request if request is not None else QgsFeatureRequest()
         self._transform = QgsCoordinateTransform()

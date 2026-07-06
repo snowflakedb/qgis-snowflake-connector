@@ -115,7 +115,10 @@ class TestIssueRegressions(unittest.TestCase):
         content = (ROOT / "providers" / "sf_data_source_provider.py").read_text(
             encoding="utf-8"
         )
-        self.assertIn("qgsField.setSubType(subType)", content)
+        # The subtype is preserved via the version-compatible helper
+        # (issue #120): create_qgs_field applies setSubType internally.
+        self.assertIn("sub_type=subType", content)
+        self.assertIn("create_qgs_field(", content)
 
     def test_export_blocks_same_snowflake_table(self):
         """Export must refuse when target table matches the input layer's
@@ -1470,6 +1473,62 @@ class TestGitHubIssuesFixes(unittest.TestCase):
         content = (ROOT / "entities" / "sf_data_item.py").read_text(encoding="utf-8")
         self.assertIn("No accessible tables found", content)
         self.assertIn("QgsErrorItem", content)
+
+
+class TestOpenIssueFixes(unittest.TestCase):
+    """Fixes for the open tracker issues #120, #119 and #118."""
+
+    def test_qgsfield_helper_is_version_compatible(self):
+        """#120: QgsField must be built through a helper that falls back to
+        QVariant.Type on QGIS < 3.38 (the QMetaType.Type constructor is only
+        available from 3.38)."""
+        content = (ROOT / "helpers" / "mappings.py").read_text(encoding="utf-8")
+        self.assertIn("def create_qgs_field(", content)
+        self.assertIn("QGIS_VERSION_INT", content)
+        self.assertIn("33800", content)
+        self.assertIn("QVariant.Type(int(metatype))", content)
+
+    def test_qgsfield_construction_sites_use_helper(self):
+        """#120: every QgsField construction that takes a QMetaType.Type must
+        route through create_qgs_field."""
+        for rel in [
+            ("providers", "sf_data_source_provider.py"),
+            ("providers", "sf_vector_data_provider.py"),
+            ("processing", "import_from_snowflake.py"),
+            ("helpers", "layer_creation.py"),
+        ]:
+            content = (ROOT.joinpath(*rel)).read_text(encoding="utf-8")
+            self.assertIn(
+                "create_qgs_field(", content,
+                f"{'/'.join(rel)} must build fields via create_qgs_field",
+            )
+
+    def test_feature_iterator_initializes_expression_unconditionally(self):
+        """#119: self._expression must be set before the features-cached guard
+        so nextFeatureFilterExpression never hits an unset attribute."""
+        content = (ROOT / "providers" / "sf_feature_iterator.py").read_text(
+            encoding="utf-8"
+        )
+        init_expr = content.index('self._expression = ""')
+        guard = content.index("if not self._provider._features_loaded:")
+        self.assertLess(
+            init_expr, guard,
+            "self._expression must be initialized before the "
+            "_features_loaded guard",
+        )
+
+    def test_data_item_handles_table_group_and_no_geom(self):
+        """#118: expanding 'Tables (no geometry)' must not fall through to
+        _get_query_metadata with an unhandled item_type."""
+        content = (ROOT / "entities" / "sf_data_item.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("def create_table_group_item(", content)
+        self.assertIn('elif self.item_type == "table_group":', content)
+        self.assertIn('if self.item_type in ("field", "table_no_geom"):', content)
+        # Children are built lazily from a stashed list, not pre-added.
+        self.assertIn("group_item.non_geo_tables = sorted(non_geo_tables)", content)
+        self.assertNotIn("group_item.addChildItem(", content)
 
 
 class TestSpatialFilterPushdownGuard(unittest.TestCase):
