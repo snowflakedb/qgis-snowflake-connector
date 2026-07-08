@@ -102,7 +102,11 @@ class BufferTableAlgorithm(QgsProcessingAlgorithm):
 
         auth = get_auth_information(connection_name)
         mgr = SFConnectionManager.get_instance()
-        mgr.connect(connection_name, auth)
+        # Reuse an existing open connection; connect() force-closes and rebuilds
+        # the shared session, which disrupts already-loaded layers and can freeze
+        # the UI thread when run synchronously.
+        if mgr.get_connection(connection_name) is None:
+            mgr.connect(connection_name, auth)
 
         qs = quote_identifier(schema)
         qt = quote_identifier(table)
@@ -141,27 +145,47 @@ class BufferTableAlgorithm(QgsProcessingAlgorithm):
             type_cursor.close()
         col_type = type_row[0] if type_row else "GEOGRAPHY"
 
-        if col_type == "GEOGRAPHY":
-            buffer_expr = (
-                f"TO_GEOGRAPHY(ST_TRANSFORM(ST_BUFFER("
-                f"ST_TRANSFORM(ST_SETSRID(TO_GEOMETRY({qg}), 4326), 3857)"
-                f", {distance}), 4326))"
-            )
-        else:
-            buffer_expr = f"ST_BUFFER({qg}, {distance})"
-
         create_verb = "CREATE OR REPLACE TABLE" if overwrite else "CREATE TABLE"
-        sql = (
-            f"{create_verb} {qs}.{qo} AS "  # nosec B608 - create_verb is a constant; identifiers escaped via quote_identifier; buffer_expr uses quoted identifiers and numeric distance
-            f"SELECT * EXCLUDE ({qg}), "
-            f"{buffer_expr} AS {qg} "
-            f"FROM {qs}.{qt}"
-        )
 
-        feedback.pushInfo(f"Running buffer ({col_type}): {sql}")
+        temp_tables = []
+        if col_type == "GEOGRAPHY":
+            # Snowflake has no native GEOGRAPHY buffer, so we reproject to a
+            # metric CRS (EPSG:3857), buffer there, then reproject back.
+            # CRITICAL: ST_TRANSFORM and ST_BUFFER must not be combined in a
+            # single expression -- the Snowflake optimizer then produces a
+            # pathological plan that effectively never returns (freezing the
+            # UI). We force a materialization boundary between each geometry
+            # operation via temporary tables so no statement fuses a transform
+            # with a buffer.
+            qtmp1 = quote_identifier(f"{output}__QGIS_BUF_S1")
+            qtmp2 = quote_identifier(f"{output}__QGIS_BUF_S2")
+            temp_tables = [qtmp1, qtmp2]
+            steps = [
+                f"CREATE OR REPLACE TEMPORARY TABLE {qs}.{qtmp1} AS "  # nosec B608 - identifiers escaped via quote_identifier
+                f"SELECT * EXCLUDE ({qg}), "
+                f"ST_TRANSFORM(ST_SETSRID(TO_GEOMETRY({qg}), 4326), 3857) AS {qg} "
+                f"FROM {qs}.{qt}",
+                f"CREATE OR REPLACE TEMPORARY TABLE {qs}.{qtmp2} AS "  # nosec B608 - identifiers escaped via quote_identifier; distance is numeric
+                f"SELECT * EXCLUDE ({qg}), "
+                f"ST_BUFFER({qg}, {distance}) AS {qg} "
+                f"FROM {qs}.{qtmp1}",
+                f"{create_verb} {qs}.{qo} AS "  # nosec B608 - create_verb is a constant; identifiers escaped via quote_identifier
+                f"SELECT * EXCLUDE ({qg}), "
+                f"TO_GEOGRAPHY(ST_TRANSFORM(ST_SETSRID({qg}, 3857), 4326)) AS {qg} "
+                f"FROM {qs}.{qtmp2}",
+            ]
+        else:
+            steps = [
+                f"{create_verb} {qs}.{qo} AS "  # nosec B608 - create_verb is a constant; identifiers escaped via quote_identifier; distance is numeric
+                f"SELECT * EXCLUDE ({qg}), "
+                f"ST_BUFFER({qg}, {distance}) AS {qg} "
+                f"FROM {qs}.{qt}"
+            ]
 
         try:
-            mgr.execute_query(connection_name, sql, ctx)
+            for step_sql in steps:
+                feedback.pushInfo(f"Running buffer ({col_type}): {step_sql}")
+                mgr.execute_query(connection_name, step_sql, ctx)
             count_cursor = mgr.execute_query(
                 connection_name,
                 f"SELECT COUNT(*) FROM {qs}.{qo}",  # nosec B608 - identifiers escaped via quote_identifier
@@ -176,5 +200,15 @@ class BufferTableAlgorithm(QgsProcessingAlgorithm):
         except Exception as e:
             summary = f"Error: {e}"
             feedback.reportError(summary)
+        finally:
+            for qtmp in temp_tables:
+                try:
+                    mgr.execute_query(
+                        connection_name,
+                        f"DROP TABLE IF EXISTS {qs}.{qtmp}",  # nosec B608 - identifiers escaped via quote_identifier
+                        ctx,
+                    )
+                except Exception:
+                    pass
 
         return {self.OUTPUT: summary}

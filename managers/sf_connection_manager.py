@@ -13,6 +13,13 @@ from ..helpers.sql import quote_identifier
 
 _BASE_QUERY_TAG = "qgis-snowflake-connector"
 
+# Upper bound (seconds) for any single statement on a plugin connection. Acts
+# as a safety net so a pathological/stuck query (e.g. a bad server-side spatial
+# expression) can never block the QGIS main thread indefinitely; it aborts with
+# a recoverable error instead of freezing the UI. Generous enough not to affect
+# normal loads/exports.
+_STATEMENT_TIMEOUT_SECONDS = 900
+
 
 def build_op_tag(
     op: str,
@@ -105,6 +112,7 @@ class SFConnectionManager:
                 "client_session_keep_alive": True,
                 "session_parameters": {
                     "QUERY_TAG": _BASE_QUERY_TAG,
+                    "STATEMENT_TIMEOUT_IN_SECONDS": _STATEMENT_TIMEOUT_SECONDS,
                 },
             }
 

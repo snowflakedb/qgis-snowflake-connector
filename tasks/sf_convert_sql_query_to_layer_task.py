@@ -97,6 +97,10 @@ class SFConvertSQLQueryToLayerTask(QgsTask):
                     f"geo_column_type={geo_column_type} "
                     f"primary_key={self.primary_key}"
                 )
+                # Single geometry family -> the layer covers every row, so
+                # featureCount()/extent() can skip the per-row type predicate.
+                if len(geo_type_list) == 1:
+                    uri += " single_geom_layer=1"
 
                 layer_name = (
                     self.layer_name

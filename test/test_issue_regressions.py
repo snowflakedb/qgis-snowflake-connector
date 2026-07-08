@@ -732,11 +732,17 @@ class TestPhase2SQLInjectionCallSites(unittest.TestCase):
 
     def test_geometry_type_escaped_in_extent_query(self):
         """SNOW-3712085: _geometry_type comes from the (project-file) URI and
-        must be escaped as a literal, not interpolated inside raw quotes."""
+        must be escaped as a literal, not interpolated inside raw quotes. The
+        escaping now lives in the shared _geometry_type_filter() helper, which
+        both featureCount() and extent() delegate to."""
         content = (ROOT / "providers" / "sf_vector_data_provider.py").read_text(
             encoding="utf-8"
         )
-        self.assertIn("quote_literal(self._geometry_type)", content)
+        idx = content.index("def _geometry_type_filter(self)")
+        next_def = content.index("\n    def ", idx + 1)
+        helper_body = content[idx:next_def]
+        self.assertIn("self._geometry_type", helper_body)
+        self.assertIn("quote_literal(", helper_body)
         self.assertNotIn("ILIKE '{self._geometry_type}'", content)
 
     def test_geometry_type_escaped_in_feature_iterator(self):
@@ -2029,6 +2035,326 @@ class TestQualityBaseline(unittest.TestCase):
         self.assertIn("class TestProviderLifecycle", content)
         self.assertIn("class TestUIBoundary", content)
         self.assertIn("class TestQualityBaseline", content)
+
+
+class TestFeatureCachePoisoning(unittest.TestCase):
+    """Regression: a per-request-filtered query (spatial rect, fid, or pushed-
+    down expression) must NOT populate the provider-shared feature cache or
+    mark the layer fully loaded. Otherwise the first filtered render caps the
+    layer to that subset for every later full-extent request.
+    """
+
+    def _iterator_content(self):
+        return (ROOT / "providers" / "sf_feature_iterator.py").read_text(
+            encoding="utf-8"
+        )
+
+    def test_should_cache_features_flag_defined(self):
+        content = self._iterator_content()
+        self.assertIn("self._should_cache_features", content)
+        self.assertIn("self._should_cache_features = (", content)
+
+    def test_cache_gate_condition(self):
+        """The gate must fail closed for any per-request filter."""
+        content = self._iterator_content()
+        idx = content.index("self._should_cache_features = (")
+        block = content[idx:idx + 300]
+        self.assertIn(
+            'not getattr(self._provider, "_load_all_rows", False)', block
+        )
+        self.assertIn("and feature_id_list is None", block)
+        self.assertIn('and self._expression == ""', block)
+        self.assertIn('and filter_geom_clause == ""', block)
+
+    def test_features_loaded_gated_on_flag(self):
+        content = self._iterator_content()
+        self.assertIn(
+            "if self._should_cache_features:\n"
+            "                        self._provider._features_loaded = True",
+            content,
+        )
+        # The old load_all_rows-only guard must no longer wrap this write.
+        self.assertNotIn(
+            'if not getattr(self._provider, "_load_all_rows", False):\n'
+            "                        self._provider._features_loaded = True",
+            content,
+        )
+
+    def test_features_append_gated_on_flag(self):
+        content = self._iterator_content()
+        self.assertIn(
+            "if self._should_cache_features:\n"
+            "                    self._provider._features.append(QgsFeature(f))",
+            content,
+        )
+        self.assertNotIn(
+            'if not getattr(self._provider, "_load_all_rows", False):\n'
+            "                    self._provider._features.append(QgsFeature(f))",
+            content,
+        )
+
+
+class TestGeometryTypeCountFilter(unittest.TestCase):
+    """Regression: featureCount() and extent() must restrict to the layer's
+    geometry type (plus its single/multi partner) so a geometry column that
+    mixes families does not over-count or compute the wrong extent.
+    """
+
+    def _provider_content(self):
+        return (ROOT / "providers" / "sf_vector_data_provider.py").read_text(
+            encoding="utf-8"
+        )
+
+    def test_geometry_type_filter_helper_exists(self):
+        content = self._provider_content()
+        self.assertIn("def _geometry_type_filter(self)", content)
+        idx = content.index("def _geometry_type_filter(self)")
+        next_def = content.index("\n    def ", idx + 1)
+        body = content[idx:next_def]
+        self.assertIn("mapping_multi_single_to_geometry_type", body)
+        self.assertIn("quote_identifier(self._column_geom)", body)
+        self.assertIn("quote_literal(", body)
+        self.assertIn("ST_ASGEOJSON(", body)
+        self.assertIn("IN (", body)
+
+    def test_helper_imported(self):
+        content = self._provider_content()
+        self.assertIn("mapping_multi_single_to_geometry_type", content)
+
+    def test_feature_count_uses_geometry_type_filter(self):
+        content = self._provider_content()
+        # SFGeoVectorDataProvider.featureCount applies the geometry-type filter
+        # (unless the single-geom fast path is active) and builds COUNT(*).
+        self.assertIn("SELECT COUNT(*) FROM {self._from_clause}", content)
+        self.assertIn("where_parts.append(self._geometry_type_filter())", content)
+
+    def test_extent_uses_geometry_type_filter_not_ilike(self):
+        content = self._provider_content()
+        self.assertIn("{self._geometry_type_filter()}", content)
+        # The old single-type ILIKE form must be gone.
+        self.assertNotIn(":type ILIKE ", content)
+
+
+class TestIntegerColumnMapping(unittest.TestCase):
+    """Regression: NUMBER/DECIMAL columns with scale 0 (including primary keys)
+    must map to an integer QMetaType, not Double (which renders 1.0)."""
+
+    def _mappings(self):
+        return (ROOT / "helpers" / "mappings.py").read_text(encoding="utf-8")
+
+    def _provider(self):
+        return (ROOT / "providers" / "sf_vector_data_provider.py").read_text(
+            encoding="utf-8"
+        )
+
+    def test_map_numeric_type_helper_exists(self):
+        content = self._mappings()
+        self.assertIn("def map_numeric_type(", content)
+        idx = content.index("def map_numeric_type(")
+        body = content[idx:idx + 900]
+        self.assertIn("QMetaType.Type.LongLong", body)
+        self.assertIn("NUMBER", body)
+        self.assertIn("DECIMAL", body)
+
+    def test_table_branch_uses_scale_and_helper(self):
+        content = self._provider()
+        self.assertIn("map_numeric_type", content)
+        # The information_schema query must fetch numeric_scale.
+        self.assertIn("numeric_scale", content)
+        self.assertIn("map_numeric_type(field_type, numeric_scale)", content)
+
+    def test_sql_query_branch_detects_fixed_scale_zero(self):
+        content = self._provider()
+        # description scale is index 5; FIXED with scale 0 -> LongLong.
+        self.assertIn("data[5]", content)
+        self.assertIn('meta.get("name") == "FIXED"', content)
+        self.assertIn("QMetaType.Type.LongLong", content)
+
+    def test_longlong_roundtrips_in_addAttributes_map(self):
+        content = self._provider()
+        self.assertIn('QMetaType.Type.LongLong: "NUMBER"', content)
+
+
+class TestSchemaQualifiedFromClause(unittest.TestCase):
+    """Regression: the table-branch from_clause must be fully qualified so
+    COUNT/extent/iteration do not depend on the session's current schema."""
+
+    def _provider(self):
+        return (ROOT / "providers" / "sf_vector_data_provider.py").read_text(
+            encoding="utf-8"
+        )
+
+    def test_imports_qualified_helper(self):
+        content = self._provider()
+        self.assertIn("qualified_table_name", content)
+
+    def test_table_branch_qualifies(self):
+        content = self._provider()
+        self.assertIn(
+            "qualified_table_name(\n"
+            "                    database_name, self._schema_name, self._table_name\n"
+            "                )",
+            content,
+        )
+        # Bare-name fallback is still present for the db/schema-unknown case.
+        self.assertIn(
+            "self._from_clause = quote_identifier(self._table_name)", content
+        )
+
+
+class TestSingleGeomCountFastPath(unittest.TestCase):
+    """Regression: a single-geometry-family layer must skip the per-row
+    ST_ASGEOJSON type predicate so featureCount() uses a metadata COUNT(*)."""
+
+    def _provider(self):
+        return (ROOT / "providers" / "sf_vector_data_provider.py").read_text(
+            encoding="utf-8"
+        )
+
+    def test_uri_key_supported(self):
+        utils = (ROOT / "helpers" / "utils.py").read_text(encoding="utf-8")
+        self.assertIn('"single_geom_layer"', utils)
+
+    def test_parse_uri_returns_flag(self):
+        wrapper = (ROOT / "helpers" / "wrapper.py").read_text(encoding="utf-8")
+        self.assertIn(
+            'single_geom_layer = parsed_uri.get("single_geom_layer", "") == "1"',
+            wrapper,
+        )
+        self.assertIn("single_geom_layer,", wrapper)
+
+    def test_featurecount_and_extent_branch_on_flag(self):
+        content = self._provider()
+        self.assertEqual(content.count('getattr(self, "_single_geom_layer", False)'), 2)
+
+    def test_tasks_set_flag_when_single_type(self):
+        col = (ROOT / "tasks" / "sf_convert_column_to_layer_task.py").read_text(
+            encoding="utf-8"
+        )
+        sql = (ROOT / "tasks" / "sf_convert_sql_query_to_layer_task.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("single_geom_layer=1", col)
+        self.assertIn("single_geom_layer=1", sql)
+
+
+class TestFeatureCountCacheSentinel(unittest.TestCase):
+    """Regression: an empty layer (count 0) must not re-run COUNT every call."""
+
+    def test_uses_is_none_sentinel(self):
+        content = (ROOT / "providers" / "sf_vector_data_provider.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("if self._feature_count is None:", content)
+        # The old truthiness check must be gone from the count getters.
+        self.assertNotIn("if not self._feature_count:", content)
+
+
+class TestEditCacheGuards(unittest.TestCase):
+    """Regression: edit methods must not IndexError when the fid-indexed
+    feature cache is empty (e.g. right after a commit's reloadData())."""
+
+    def _provider(self):
+        return (ROOT / "providers" / "sf_vector_data_provider.py").read_text(
+            encoding="utf-8"
+        )
+
+    def test_ensure_features_loaded_helper_exists(self):
+        content = self._provider()
+        self.assertIn("def _ensure_features_loaded(self)", content)
+
+    def test_edit_methods_call_ensure_and_guard(self):
+        content = self._provider()
+        # All three edit methods repopulate the cache before indexing it.
+        self.assertEqual(content.count("self._ensure_features_loaded()"), 3)
+        # changeGeometryValues bounds-checks the key it indexes.
+        self.assertIn("if f_key < 0 or f_key >= len(self._features):", content)
+        # deleteFeatures bounds-checks each fid too.
+        self.assertEqual(
+            content.count("if fid < 0 or fid >= len(self._features):"), 2
+        )
+
+
+class TestProcessingConnectionReuse(unittest.TestCase):
+    """Regression: processing algorithms must reuse an existing open connection.
+
+    SFConnectionManager.connect() force-closes and rebuilds the shared session,
+    which disrupts already-loaded layers and can freeze the UI thread. Every
+    algorithm must guard the call with `get_connection(...) is None`.
+    """
+
+    def test_no_unguarded_connect_in_processing(self):
+        processing_dir = ROOT / "processing"
+        offenders = []
+        for path in sorted(processing_dir.glob("*.py")):
+            lines = path.read_text(encoding="utf-8").splitlines()
+            for i, line in enumerate(lines):
+                stripped = line.strip()
+                if not stripped.startswith("mgr.connect("):
+                    continue
+                # The two preceding non-blank lines must contain the guard.
+                window = "\n".join(lines[max(0, i - 3):i])
+                if "get_connection(" not in window:
+                    offenders.append(f"{path.name}:{i + 1}")
+        self.assertEqual(
+            offenders,
+            [],
+            f"Unguarded mgr.connect() in processing algorithms: {offenders}",
+        )
+
+
+class TestBufferTransformNotFused(unittest.TestCase):
+    """Regression: the GEOGRAPHY buffer must not fuse ST_TRANSFORM with
+    ST_BUFFER in one SQL expression.
+
+    Snowflake's optimizer produces a pathological plan for
+    ST_TRANSFORM(ST_BUFFER(...)) / ST_BUFFER(ST_TRANSFORM(...)) that never
+    returns and freezes the QGIS UI. The algorithm must materialize each
+    geometry operation into a separate (temporary) table so no single
+    statement combines a transform with a buffer.
+    """
+
+    def _source(self):
+        return (ROOT / "processing" / "buffer_table.py").read_text(encoding="utf-8")
+
+    def test_no_transform_buffer_fusion(self):
+        src = self._source()
+        # Collapse whitespace so multi-line f-strings are matched too.
+        flat = re.sub(r"\s+", "", src)
+        self.assertNotIn("ST_TRANSFORM(ST_BUFFER", flat)
+        self.assertNotIn("ST_BUFFER(ST_TRANSFORM", flat)
+
+    def test_uses_temporary_materialization(self):
+        src = self._source()
+        self.assertIn("CREATE OR REPLACE TEMPORARY TABLE", src)
+
+
+class TestStatementTimeoutSafetyNet(unittest.TestCase):
+    """Regression: connections must set a bounded STATEMENT_TIMEOUT so a stuck
+    query can never block the QGIS main thread indefinitely.
+    """
+
+    def test_statement_timeout_in_session_parameters(self):
+        src = (
+            ROOT / "managers" / "sf_connection_manager.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("STATEMENT_TIMEOUT_IN_SECONDS", src)
+
+
+class TestImportDecimalCoercion(unittest.TestCase):
+    """Regression: imported Snowflake NUMBER values arrive as Decimal, which
+    the memory/OGR providers cannot store into a double field (the feature is
+    silently rejected). The import loop must coerce Decimal to float.
+    """
+
+    def test_decimal_coerced_to_float(self):
+        src = (
+            ROOT / "processing" / "import_from_snowflake.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("Decimal", src)
+        flat = re.sub(r"\s+", "", src)
+        self.assertIn("isinstance(val,Decimal)", flat)
+        self.assertIn("float(val)", flat)
 
 
 if __name__ == "__main__":

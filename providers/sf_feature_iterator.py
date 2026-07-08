@@ -52,6 +52,11 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
         # self._expression even when the provider's features are already cached
         # (the block below that would otherwise set it is skipped). See issue #119.
         self._expression = ""
+        # Only a full, unfiltered load may populate the provider-shared cache
+        # and mark the layer loaded. A per-request filter (spatial rect, fid,
+        # pushed-down expression) must stream one-shot, otherwise the first
+        # filtered render would permanently cap the layer to that subset.
+        self._should_cache_features = False
 
         self._request = request if request is not None else QgsFeatureRequest()
         self._transform = QgsCoordinateTransform()
@@ -234,6 +239,19 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                 if filter_geom_clause != "":
                     filter_geom_clause = f"and {filter_geom_clause}"
 
+            # A query is only safe to cache into the provider-shared feature
+            # list when it carried no per-request row filter. Otherwise a
+            # filtered render/identify would poison the cache and cap every
+            # later full-extent request to that subset. subsetString() is a
+            # stable provider-level filter (reloadData() clears the cache when
+            # it changes), so it is intentionally not part of this check.
+            self._should_cache_features = (
+                not getattr(self._provider, "_load_all_rows", False)
+                and feature_id_list is None
+                and self._expression == ""
+                and filter_geom_clause == ""
+            )
+
             # build the complete where clause
             where_clause = ""
             if where_clause_list:
@@ -369,7 +387,7 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
 
                 if not next_result or not self._provider.isValid():
                     f.setValid(False)
-                    if not getattr(self._provider, "_load_all_rows", False):
+                    if self._should_cache_features:
                         self._provider._features_loaded = True
                     return False
 
@@ -381,6 +399,10 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                     f.setGeometry(geometry)
                     self.geometryToDestinationCrs(f, self._transform)
 
+                # Feature ids are the 0-based iteration order of this result
+                # set, NOT the table primary key. QGIS selection/editing use
+                # these fids to index the provider's cached feature list; edits
+                # then map fid -> cached feature -> primary key for the DML.
                 f.setId(self._index)
 
                 col_index_by_name = self._col_index_by_name
@@ -449,7 +471,7 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                                 continue
                             f.setAttribute(indx, next_result[col_idx])
                 f.setValid(True)
-                if not getattr(self._provider, "_load_all_rows", False):
+                if self._should_cache_features:
                     self._provider._features.append(QgsFeature(f))
 
             self._index += 1

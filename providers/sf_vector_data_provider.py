@@ -45,13 +45,14 @@ from ..helpers.utils import (
 from ..managers.sf_connection_manager import SFConnectionManager, build_op_tag
 
 from ..helpers.wrapper import parse_uri
-from ..helpers.sql import quote_identifier, quote_literal
+from ..helpers.sql import quote_identifier, quote_literal, qualified_table_name
 from ..helpers.expression_compiler import compile_expression_to_sql
 from ..helpers.mappings import (
     SNOWFLAKE_METADATA_TYPE_CODE_DICT,
     create_qgs_field,
+    map_numeric_type,
+    mapping_multi_single_to_geometry_type,
     mapping_snowflake_qgis_geometry,
-    mapping_snowflake_qgis_type,
 )
 
 
@@ -91,6 +92,7 @@ class SFVectorDataProvider(QgsVectorDataProvider):
                 self._geo_column_type,
                 self._primary_key,
                 self._load_all_rows,
+                self._single_geom_layer,
             ) = parse_uri(uri)
 
         except Exception as e:
@@ -140,7 +142,18 @@ class SFVectorDataProvider(QgsVectorDataProvider):
                     limit_size=limit_size,
                 )
         else:
-            self._from_clause = quote_identifier(self._table_name)
+            # SNOW-3712xxx: fully-qualify the table so COUNT/extent/iteration
+            # target the layer's own database.schema.table instead of relying on
+            # the session's current schema (a shared connection can be pointed
+            # at another schema by a concurrent layer between USE SCHEMA and the
+            # SELECT). Fall back to the bare quoted name when db/schema unknown.
+            database_name = self._context_information.get("database_name")
+            if database_name and self._schema_name:
+                self._from_clause = qualified_table_name(
+                    database_name, self._schema_name, self._table_name
+                )
+            else:
+                self._from_clause = quote_identifier(self._table_name)
             if self._load_all_rows:
                 self._is_limited_unordered = False
             else:
@@ -255,10 +268,17 @@ class SFVectorDataProvider(QgsVectorDataProvider):
             if self._is_limited_unordered:
                 reasons.append("row-capped/unordered result (unstable feature ids)")
             # SNOW-3712083: refuse edits when the declared primary key cannot be
-            # confirmed unique.
+            # confirmed unique. Skip this reason for custom SQL query layers
+            # (there is no base table to validate against, so it would only add
+            # a misleading "primary key is not verified unique" to a layer whose
+            # real blocker is already "custom SQL query layer").
+            is_sql_query_layer = (
+                self._sql_query is not None and self._sql_query != ""
+            )
             if (
                 self._primary_key != ""
                 and not self._is_limited_unordered
+                and not is_sql_query_layer
                 and not self._validate_primary_key()
             ):
                 reasons.append("primary key is not verified unique")
@@ -361,7 +381,7 @@ class SFVectorDataProvider(QgsVectorDataProvider):
                             f" {quote_literal(database_name)}"
                         )
                     query = (
-                        "SELECT DISTINCT column_name, data_type, ordinal_position"  # nosec B608 - values escaped via quote_literal; catalog_filter/schema_filter built with quote_literal above
+                        "SELECT DISTINCT column_name, data_type, numeric_scale, ordinal_position"  # nosec B608 - values escaped via quote_literal; catalog_filter/schema_filter built with quote_literal above
                         " FROM information_schema.columns "
                         f"WHERE table_name ILIKE {quote_literal(self._table_name)}"
                         f"{catalog_filter}"
@@ -379,9 +399,11 @@ class SFVectorDataProvider(QgsVectorDataProvider):
                     field_info = cur.fetchall()
                     cur.close()
                     for row in field_info:
-                        field_name, field_type = row[0], row[1]
+                        field_name, field_type, numeric_scale = row[0], row[1], row[2]
                         qgs_field = create_qgs_field(
-                            field_name, mapping_snowflake_qgis_type[field_type]
+                            field_name,
+                            map_numeric_type(field_type, numeric_scale),
+                            type_name=field_type,
                         )
                         self._fields.append(qgs_field)
                 else:
@@ -397,12 +419,23 @@ class SFVectorDataProvider(QgsVectorDataProvider):
                     for data in description:
                         # it is already used to set the feature id
                         if data[1] not in [14, 15]:
+                            meta = SNOWFLAKE_METADATA_TYPE_CODE_DICT.get(
+                                data[1],
+                                SNOWFLAKE_METADATA_TYPE_CODE_DICT[2],
+                            )
+                            qvariant_type = meta.get("qvariant_type")
+                            # description scale is at index 5; a FIXED (NUMBER)
+                            # column with scale 0 is an integer, not a Double.
+                            scale = data[5] if len(data) > 5 else None
+                            if meta.get("name") == "FIXED" and str(scale) in (
+                                "0",
+                                "0.0",
+                            ):
+                                qvariant_type = QMetaType.Type.LongLong
                             qgs_field = create_qgs_field(
                                 data[0],
-                                SNOWFLAKE_METADATA_TYPE_CODE_DICT.get(
-                                    data[1],
-                                    SNOWFLAKE_METADATA_TYPE_CODE_DICT[2],
-                                ).get("qvariant_type"),
+                                qvariant_type,
+                                type_name=meta.get("name", ""),
                             )
                             self._fields.append(qgs_field)
 
@@ -620,6 +653,7 @@ class SFVectorDataProvider(QgsVectorDataProvider):
     _QGIS_TO_SF_TYPE = {
         QMetaType.Type.QString: "TEXT",
         QMetaType.Type.Int: "INTEGER",
+        QMetaType.Type.LongLong: "NUMBER",
         QMetaType.Type.Double: "DOUBLE",
         QMetaType.Type.QDate: "DATE",
         QMetaType.Type.QTime: "TIME",
@@ -627,11 +661,28 @@ class SFVectorDataProvider(QgsVectorDataProvider):
         QMetaType.Type.Bool: "BOOLEAN",
     }
 
+    def _ensure_features_loaded(self) -> None:
+        """Populate the fid-indexed feature cache if it is empty.
+
+        The edit methods map a QGIS feature id to its row via self._features,
+        which reloadData() clears after every commit. In the normal UI flow
+        QGIS re-reads features (repopulating the cache) before the next edit,
+        but consecutive programmatic edits can index an empty cache and crash.
+        A full getFeatures() pass rebuilds the cache with the same 0-based fids.
+        """
+        if not self._features:
+            for _ in self.getFeatures():
+                pass
+
     def changeGeometryValues(self, geometry_map: typing.Any) -> bool:
         if isinstance(geometry_map, dict) and geometry_map:
+            self._ensure_features_loaded()
             all_ok = True
             for f_key, geometry in geometry_map.items():
                 geometry: QgsGeometry
+                if f_key < 0 or f_key >= len(self._features):
+                    all_ok = False
+                    continue
                 feature: QgsFeature = self._features[f_key]
                 context = copy.deepcopy(self._context_information)
                 context["geometry_wkt"] = geometry.asWkt()
@@ -656,6 +707,7 @@ class SFVectorDataProvider(QgsVectorDataProvider):
         if not isinstance(attr_map, dict) or not attr_map:
             return False
         try:
+            self._ensure_features_loaded()
             all_ok = True
             fields = self.fields()
             pk_name = self.primary_key()
@@ -725,10 +777,19 @@ class SFVectorDataProvider(QgsVectorDataProvider):
         if not fids:
             return False
         try:
+            self._ensure_features_loaded()
             pk_values = []
             for fid in fids:
+                if fid < 0 or fid >= len(self._features):
+                    self.pushError(
+                        f"deleteFeatures: feature id {fid} is not in the current "
+                        "feature cache; skipping."
+                    )
+                    continue
                 feature: QgsFeature = self._features[fid]
                 pk_values.append(self._unwrap_value(feature.attribute(self.primary_key())))
+            if not pk_values:
+                return False
             context = copy.deepcopy(self._context_information)
             context["primary_key_name"] = self.primary_key()
             context["table_name"] = self._table_name
@@ -824,19 +885,51 @@ class SFGeoVectorDataProvider(SFVectorDataProvider):
     ):
         super().__init__(uri, providerOptions, flags)
 
+    def _geometry_type_filter(self) -> str:
+        """Return the geometry-type predicate the feature iterator uses so
+        COUNT/extent match the rows the layer actually shows.
+
+        A GEOGRAPHY/GEOMETRY column can mix geometry families; the plugin
+        splits those into one layer per type, so featureCount()/extent() must
+        restrict to this layer's type (plus its single/multi partner) instead
+        of counting the whole table.
+        """
+        qgeom = quote_identifier(self._column_geom)
+        types = [self._geometry_type]
+        mapped = mapping_multi_single_to_geometry_type.get(self._geometry_type)
+        if mapped:
+            types.append(mapped)
+        in_list = ", ".join(quote_literal(t) for t in types)
+        return f"ST_ASGEOJSON({qgeom}):type::string IN ({in_list})"  # nosec B608 - identifier escaped via quote_identifier; types escaped via quote_literal
+
     def featureCount(self) -> int:
         """returns the number of entities in the table"""
 
-        if not self._feature_count:
+        if self._feature_count is None:
             if not self._is_valid:
                 self._feature_count = 0
             else:
                 if self._is_limited_unordered:
                     self._feature_count = limit_size_for_type(self._geo_column_type)
                 else:
-                    query = f"SELECT COUNT(*) FROM {self._from_clause}"  # nosec B608 - from_clause pre-quoted
+                    # The feature iterator always restricts rows to this layer's
+                    # geometry type (which also drops NULL geometries), so COUNT
+                    # must match. For a single-geometry-family layer every
+                    # non-null row is that one type, so a cheap "geom IS NOT
+                    # NULL" is an exact equivalent that avoids the per-row
+                    # ST_ASGEOJSON parse the type predicate would cost.
+                    where_parts = []
+                    if getattr(self, "_single_geom_layer", False):
+                        where_parts.append(
+                            f"{quote_identifier(self._column_geom)} IS NOT NULL"  # nosec B608 - identifier escaped via quote_identifier
+                        )
+                    else:
+                        where_parts.append(self._geometry_type_filter())
                     if self.subsetString():
-                        query += f" WHERE {self.subsetString()}"  # nosec B608 - subsetString is compiler-validated & quoted in setSubsetString
+                        where_parts.append(self.subsetString())  # nosec B608 - subsetString is compiler-validated & quoted in setSubsetString
+                    query = f"SELECT COUNT(*) FROM {self._from_clause}"  # nosec B608 - from_clause pre-quoted; geometry-type filter escaped in _geometry_type_filter
+                    if where_parts:
+                        query += " WHERE " + " AND ".join(where_parts)
 
                     cur = self.connection_manager.execute_query(
                         connection_name=self._connection_name,
@@ -862,14 +955,16 @@ class SFGeoVectorDataProvider(SFVectorDataProvider):
                 self._extent = QgsRectangle()
             else:
                 qgeom = quote_identifier(self._column_geom)
+                where_clause = f"{qgeom} IS NOT NULL"
+                if not getattr(self, "_single_geom_layer", False):
+                    where_clause += f" AND {self._geometry_type_filter()}"
                 query = (
-                    f'SELECT MIN(ST_XMIN({qgeom})), '  # nosec B608 - identifier escaped via quote_identifier; from_clause pre-quoted; geometry_type escaped via quote_literal
+                    f'SELECT MIN(ST_XMIN({qgeom})), '  # nosec B608 - identifier escaped via quote_identifier; from_clause pre-quoted; geometry-type filter escaped in _geometry_type_filter
                     f'MIN(ST_YMIN({qgeom})), '
                     f'MAX(ST_XMAX({qgeom})), '
                     f'MAX(ST_YMAX({qgeom})) '
                     f"FROM {self._from_clause} "
-                    f'WHERE {qgeom} IS NOT NULL AND '
-                    f"ST_ASGEOJSON({qgeom}):type ILIKE {quote_literal(self._geometry_type)}"
+                    f"WHERE {where_clause}"
                 )
 
                 cur = self.connection_manager.execute_query(
@@ -915,7 +1010,7 @@ class SFH3VectorDataProvider(SFVectorDataProvider):
 
     def featureCount(self) -> int:
         """returns the number of entities in the table"""
-        if not self._feature_count:
+        if self._feature_count is None:
             if not self._is_valid:
                 self._feature_count = 0
             else:
