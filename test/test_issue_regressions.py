@@ -2062,7 +2062,7 @@ class TestFeatureCachePoisoning(unittest.TestCase):
         self.assertIn(
             'not getattr(self._provider, "_load_all_rows", False)', block
         )
-        self.assertIn("and feature_id_list is None", block)
+        self.assertIn("and self._target_fids is None", block)
         self.assertIn('and self._expression == ""', block)
         self.assertIn('and filter_geom_clause == ""', block)
 
