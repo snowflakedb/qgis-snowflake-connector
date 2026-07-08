@@ -7,7 +7,7 @@ name=Snowflake Connector for QGIS
 qgisMinimumVersion=3.34.1
 qgisMaximumVersion=4.99
 description=This package includes the Snowflake Connector for QGIS.
-version=1.0.19
+version=1.0.20
 author=Snowflake Inc.
 email=erick.cuberojimenez@snowflake.com
 
@@ -20,7 +20,13 @@ repository=https://github.com/snowflakedb/qgis-snowflake-connector/
 # Recommended items:
 
 hasProcessingProvider=yes
-changelog=1.0.19 - Fixes from end-to-end processing testing:
+changelog=1.0.20 - Fix from end-to-end processing testing: Import from
+ Snowflake now stores TIMESTAMP/DATE/TIME columns correctly instead of
+ silently dropping every feature. Snowflake returns temporal values as
+ Python datetime objects, which the memory/OGR sink cannot store directly;
+ they are now coerced to QDateTime/QDate/QTime, mirroring the existing
+ NUMBER (Decimal) handling.
+ 1.0.19 - Fixes from end-to-end processing testing:
  * Buffer (server-side) on GEOGRAPHY no longer freezes QGIS. Snowflake's
    optimizer produced a never-returning plan when ST_TRANSFORM and ST_BUFFER
    were fused in one expression; the reproject/buffer/reproject steps are now
