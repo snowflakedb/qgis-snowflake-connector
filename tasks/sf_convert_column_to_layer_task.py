@@ -102,6 +102,11 @@ class SFConvertColumnToLayerTask(QgsTask):
                 )
                 if self.load_all_rows:
                     uri += " load_all_rows=1"
+                # When the column has a single geometry family the layer covers
+                # every row, so featureCount()/extent() can skip the per-row
+                # geometry-type predicate and use a fast metadata COUNT(*).
+                if len(geo_type_list) == 1:
+                    uri += " single_geom_layer=1"
 
                 layer_name = (
                     self.table

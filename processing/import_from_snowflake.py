@@ -1,6 +1,7 @@
 """Import from Snowflake -- download a Snowflake table to a local vector layer."""
 
 import os
+from decimal import Decimal
 
 from qgis.core import (
     QgsProcessingAlgorithm,
@@ -247,6 +248,11 @@ class ImportFromSnowflakeAlgorithm(QgsProcessingAlgorithm):
 
             feat = QgsFeature(fields)
             for j, val in enumerate(row[:-1]):
+                # Snowflake NUMBER columns come back as Decimal, which the
+                # memory/OGR providers cannot store into a double field
+                # (the feature is silently rejected). Coerce to float.
+                if isinstance(val, Decimal):
+                    val = float(val)
                 feat.setAttribute(j, val)
 
             wkb = row[-1]

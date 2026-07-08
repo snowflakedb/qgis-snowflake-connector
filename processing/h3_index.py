@@ -100,7 +100,11 @@ class H3IndexAlgorithm(QgsProcessingAlgorithm):
 
         auth = get_auth_information(connection_name)
         mgr = SFConnectionManager.get_instance()
-        mgr.connect(connection_name, auth)
+        # Reuse an existing open connection; connect() force-closes and rebuilds
+        # the shared session, which disrupts already-loaded layers and can freeze
+        # the UI thread when run synchronously.
+        if mgr.get_connection(connection_name) is None:
+            mgr.connect(connection_name, auth)
 
         qs = quote_identifier(schema)
         qt = quote_identifier(table)

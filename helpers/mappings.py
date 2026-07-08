@@ -23,6 +23,22 @@ def create_qgs_field(name, metatype, type_name="", sub_type=None):
     return field
 
 
+def map_numeric_type(data_type: str, numeric_scale):
+    """Map a Snowflake numeric column to a QMetaType, honoring scale.
+
+    A ``NUMBER``/``DECIMAL``/``NUMERIC`` column declared with scale 0 is an
+    integer (including primary keys); mapping it to ``Double`` makes QGIS show
+    values like ``1.0`` and breaks integer joins. Anything with a fractional
+    scale (or an unknown scale) falls back to the type table.
+    """
+    if data_type in ("NUMBER", "DECIMAL", "NUMERIC") and str(numeric_scale) in (
+        "0",
+        "0.0",
+    ):
+        return QMetaType.Type.LongLong
+    return mapping_snowflake_qgis_type[data_type]
+
+
 mapping_single_to_multi_geometry_type = {
     "Point": "MultiPoint",
     "LineString": "MultiLineString",

@@ -7,7 +7,7 @@ name=Snowflake Connector for QGIS
 qgisMinimumVersion=3.34.1
 qgisMaximumVersion=4.99
 description=This package includes the Snowflake Connector for QGIS.
-version=1.0.16
+version=1.0.19
 author=Snowflake Inc.
 email=erick.cuberojimenez@snowflake.com
 
@@ -20,7 +20,27 @@ repository=https://github.com/snowflakedb/qgis-snowflake-connector/
 # Recommended items:
 
 hasProcessingProvider=yes
-changelog=1.0.16 - Packaging/metadata cleanup for the QGIS plugin repository:
+changelog=1.0.19 - Fixes from end-to-end processing testing:
+ * Buffer (server-side) on GEOGRAPHY no longer freezes QGIS. Snowflake's
+   optimizer produced a never-returning plan when ST_TRANSFORM and ST_BUFFER
+   were fused in one expression; the reproject/buffer/reproject steps are now
+   materialized into separate temporary tables.
+ * Import from Snowflake now stores numeric (NUMBER) values correctly instead
+   of silently dropping every feature (Decimal values are coerced to float).
+ * Connections set a bounded STATEMENT_TIMEOUT_IN_SECONDS so a stuck query can
+   no longer block the UI indefinitely.
+ 1.0.18 - Processing algorithms (Buffer, H3 index, Spatial join,
+ Execute SQL) now reuse the existing Snowflake connection instead of
+ force-closing and rebuilding it, fixing a UI freeze and the disruption of
+ already-loaded layers when running an algorithm.
+ 1.0.17 - Correctness and performance fixes from end-to-end testing:
+ integer/NUMBER columns (including primary keys) now display as integers instead
+ of decimals; table layers reference their fully-qualified database.schema.table
+ so counts/extent/queries no longer depend on the session's current schema;
+ single-geometry layers use a cheaper feature count; field type names now show
+ the Snowflake source type; and custom SQL-query layers no longer log a
+ misleading "primary key not verified" read-only reason.
+ 1.0.16 - Packaging/metadata cleanup for the QGIS plugin repository:
  remove the deprecated supportsQt6 flag (QGIS 4 compatibility is set via
  qgisMaximumVersion) and exclude the Sphinx help/make.bat from the package so
  it no longer trips the repository's suspicious-file scan.
