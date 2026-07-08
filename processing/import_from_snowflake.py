@@ -1,5 +1,6 @@
 """Import from Snowflake -- download a Snowflake table to a local vector layer."""
 
+import datetime
 import os
 from decimal import Decimal
 
@@ -16,7 +17,7 @@ from qgis.core import (
     QgsWkbTypes,
     QgsCoordinateReferenceSystem,
 )
-from qgis.PyQt.QtCore import QCoreApplication, QMetaType
+from qgis.PyQt.QtCore import QCoreApplication, QDate, QDateTime, QMetaType, QTime
 from qgis.PyQt.QtGui import QIcon
 
 _IMAGES_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "ui", "images")
@@ -248,11 +249,24 @@ class ImportFromSnowflakeAlgorithm(QgsProcessingAlgorithm):
 
             feat = QgsFeature(fields)
             for j, val in enumerate(row[:-1]):
-                # Snowflake NUMBER columns come back as Decimal, which the
-                # memory/OGR providers cannot store into a double field
-                # (the feature is silently rejected). Coerce to float.
+                # Snowflake NUMBER columns come back as Decimal, and TIMESTAMP/
+                # DATE/TIME columns come back as Python datetime objects. The
+                # memory/OGR providers cannot store either raw Python type into
+                # their target field (the whole feature is silently rejected),
+                # so coerce them to the matching Qt type first.
                 if isinstance(val, Decimal):
                     val = float(val)
+                elif isinstance(val, datetime.datetime):
+                    val = QDateTime(
+                        QDate(val.year, val.month, val.day),
+                        QTime(val.hour, val.minute, val.second,
+                              val.microsecond // 1000),
+                    )
+                elif isinstance(val, datetime.date):
+                    val = QDate(val.year, val.month, val.day)
+                elif isinstance(val, datetime.time):
+                    val = QTime(val.hour, val.minute, val.second,
+                                val.microsecond // 1000)
                 feat.setAttribute(j, val)
 
             wkb = row[-1]

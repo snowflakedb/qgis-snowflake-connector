@@ -13,7 +13,7 @@ _REGISTERED_FUNCTIONS = []
 
 
 @qgsfunction(args=1, group="Snowflake", register=False)
-def sf_h3_resolution(values, context, parent, node):
+def sf_h3_resolution(values, context, parent):
     """Returns the resolution of an H3 index (integer 0-15).
 
     <h4>Syntax</h4>
@@ -35,7 +35,7 @@ def sf_h3_resolution(values, context, parent, node):
 
 
 @qgsfunction(args=1, group="Snowflake", register=False)
-def sf_h3_is_valid(values, context, parent, node):
+def sf_h3_is_valid(values, context, parent):
     """Returns True if the value is a valid H3 hex string.
 
     <h4>Syntax</h4>
@@ -55,7 +55,7 @@ def sf_h3_is_valid(values, context, parent, node):
 
 
 @qgsfunction(args=1, group="Snowflake", register=False)
-def sf_h3_to_string(values, context, parent, node):
+def sf_h3_to_string(values, context, parent):
     """Converts a numeric H3 index to its hex string representation.
 
     <h4>Syntax</h4>
