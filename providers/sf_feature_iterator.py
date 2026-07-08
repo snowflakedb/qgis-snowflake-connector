@@ -57,6 +57,9 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
         # pushed-down expression) must stream one-shot, otherwise the first
         # filtered render would permanently cap the layer to that subset.
         self._should_cache_features = False
+        # Initialized unconditionally: fetchFeature() reads self._target_fids
+        # even when __init__ returns early (invalid provider / CRS exception).
+        self._target_fids = None
 
         self._request = request if request is not None else QgsFeatureRequest()
         self._transform = QgsCoordinateTransform()
@@ -83,6 +86,24 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
         if getattr(self._provider, "_load_all_rows", False):
             self._provider._features_loaded = False
             self._provider._features = []
+
+        # FilterFid/FilterFids cannot be resolved in SQL: feature ids are the
+        # 0-based fetch order of the result set (f.setId(self._index)), not the
+        # primary key. Capture the requested fids and make sure the in-memory
+        # cache exists so fetchFeature() can resolve them locally.
+        ftype = self._request.filterType()
+        if ftype in (
+            QgsFeatureRequest.FilterFid,
+            QgsFeatureRequest.FilterFids,
+        ):
+            self._target_fids = (
+                [self._request.filterFid()]
+                if ftype == QgsFeatureRequest.FilterFid
+                else list(self._request.filterFids())
+            )
+            if not self._provider._features_loaded:
+                for _ in self._provider.getFeatures(QgsFeatureRequest()):
+                    pass
 
         if not self._provider._features_loaded:
             geom_column = self._provider.get_geometry_column()
@@ -142,30 +163,10 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                 fields_name_for_query += ","
             self.index_geom_column = len(list_field_names)
 
-            # Create fid/fids list
-            feature_id_list = None
-            if (
-                self._request.filterType() == QgsFeatureRequest.FilterFid
-                or self._request.filterType() == QgsFeatureRequest.FilterFids
-            ):
-                feature_id_list = (
-                    [self._request.filterFid()]
-                    if self._request.filterType() == QgsFeatureRequest.FilterFid
-                    else self._request.filterFids()
-                )
-
+            # FilterFid/FilterFids are handled from the in-memory cache (see the
+            # top of __init__), never pushed down to SQL, because feature ids are
+            # fetch-order positions rather than primary-key values.
             where_clause_list = []
-            if feature_id_list is not None:
-                list_feature_id_string = ", ".join(str(x) for x in feature_id_list)
-                if self._provider.primary_key() == "":
-                    feature_clause = (
-                        f"sfindexsfrownumberauto in ({list_feature_id_string})"
-                    )
-                else:
-                    primary_key_name = list_field_names[self._provider.primary_key()]
-                    feature_clause = f"{quote_identifier(primary_key_name)} in ({list_feature_id_string})"
-
-                where_clause_list.append(feature_clause)
 
             self._expression = ""
             # Apply the filter expression. The raw QGIS expression text is
@@ -247,7 +248,7 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
             # it changes), so it is intentionally not part of this check.
             self._should_cache_features = (
                 not getattr(self._provider, "_load_all_rows", False)
-                and feature_id_list is None
+                and self._target_fids is None
                 and self._expression == ""
                 and filter_geom_clause == ""
             )
@@ -342,32 +343,55 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
         """
         try:
             if self._provider._features_loaded:
-                if (
-                    self._index < 0
-                    or self._index >= len(self._provider._features)
-                    or not self._provider.isValid()
-                ):
+                if not self._provider.isValid():
                     f.setValid(False)
                     return False
 
-                if self._request.filterType() == QgsFeatureRequest.FilterFid:
-                    _indx = self._request.filterFid()
-                else:
-                    _indx = self._index
-                local_feature: QgsFeature = self._provider._features[_indx]
+                features = self._provider._features
+                filter_rect = self._request.filterRect()
+
+                # FilterFid/FilterFids: feature ids are fetch-order positions
+                # into the cached feature list, so resolve them directly. This
+                # path manages its own index and returns immediately (it must
+                # not fall through to the sequential increment below).
+                if self._target_fids is not None:
+                    while self._index < len(self._target_fids):
+                        fid = self._target_fids[self._index]
+                        self._index += 1
+                        if fid < 0 or fid >= len(features):
+                            continue
+                        local_feature: QgsFeature = features[fid]
+                        if (
+                            filter_rect
+                            and not filter_rect.isNull()
+                            and not local_feature.geometry().intersects(filter_rect)
+                        ):
+                            continue
+                        f.setFields(self._provider.fields())
+                        f.setGeometry(local_feature.geometry())
+                        f.setId(local_feature.id())
+                        f.setAttributes(local_feature.attributes())
+                        f.setValid(True)
+                        return True
+                    f.setValid(False)
+                    return False
+
+                if self._index < 0 or self._index >= len(features):
+                    f.setValid(False)
+                    return False
+
+                local_feature: QgsFeature = features[self._index]
 
                 while (
-                    self._request.filterRect()
-                    and not self._request.filterRect().isNull()
-                    and not local_feature.geometry().intersects(
-                        self._request.filterRect()
-                    )
+                    filter_rect
+                    and not filter_rect.isNull()
+                    and not local_feature.geometry().intersects(filter_rect)
                 ):
                     self._index += 1
-                    if self._index >= len(self._provider._features):
+                    if self._index >= len(features):
                         f.setValid(False)
                         return False
-                    local_feature = self._provider._features[self._index]
+                    local_feature = features[self._index]
 
                 f.setFields(self._provider.fields())
                 f.setGeometry(local_feature.geometry())
