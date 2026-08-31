@@ -1308,11 +1308,18 @@ class TestStartupReliability(unittest.TestCase):
         self.assertIn("return _StubPlugin()", content)
 
     def test_init_catches_import_errors(self):
-        """classFactory must catch ImportError during plugin load and return stub."""
+        """classFactory must catch load errors during plugin load and return stub.
+
+        The handler is broadened to ``except Exception`` because the
+        cryptography/pyOpenSSL mismatch surfaces as an AttributeError
+        ("module 'lib' has no attribute 'GEN_EMAIL'"), not an ImportError.
+        """
         content = (ROOT / "__init__.py").read_text(encoding="utf-8")
-        self.assertIn("except ImportError as imp_err:", content)
+        self.assertIn("except Exception as load_err:", content)
         self.assertIn("cryptography", content)
         self.assertIn("ExtensionOID", content)
+        self.assertIn("module 'lib' has no attribute", content)
+        self.assertIn("_dependency_diagnostics", content)
 
     def test_check_install_package_returns_bool(self):
         content = (ROOT / "helpers" / "utils.py").read_text(encoding="utf-8")
