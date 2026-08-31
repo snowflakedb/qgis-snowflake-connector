@@ -840,7 +840,10 @@ class TestPhase4ProjectFileTrust(unittest.TestCase):
             encoding="utf-8"
         )
         idx = content.index("def close(self)")
-        body = content[idx:idx + 500]
+        # close() is the last method in the file, so read to EOF instead of a
+        # brittle fixed-width window (which broke when a documented `# nosec`
+        # annotation was added to the except line).
+        body = content[idx:]
         self.assertIn("result.close()", body)
         self.assertIn("self._result = None", body)
 
