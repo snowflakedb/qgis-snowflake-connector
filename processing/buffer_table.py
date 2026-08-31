@@ -208,7 +208,7 @@ class BufferTableAlgorithm(QgsProcessingAlgorithm):
                         f"DROP TABLE IF EXISTS {qs}.{qtmp}",  # nosec B608 - identifiers escaped via quote_identifier
                         ctx,
                     )
-                except Exception:
+                except Exception:  # nosec B110 - best-effort temp-table cleanup in finally; a failed DROP IF EXISTS must not mask the original error or abort teardown
                     pass
 
         return {self.OUTPUT: summary}

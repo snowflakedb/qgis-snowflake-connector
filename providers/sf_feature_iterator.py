@@ -557,7 +557,7 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
         if result is not None:
             try:
                 result.close()
-            except Exception:
+            except Exception:  # nosec B110 - best-effort release of a server-side cursor during close(); a failure here must not raise from iterator teardown
                 pass
             self._result = None
         return True
