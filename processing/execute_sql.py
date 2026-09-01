@@ -53,7 +53,7 @@ class ExecuteSQLAlgorithm(QgsProcessingAlgorithm):
         # user's Snowflake connection and can be triggered by an untrusted
         # Processing model (.model3), so it must not run unattended in the GUI
         # without explicit consent.
-        return super().flags() | QgsProcessingAlgorithm.FlagNoThreading
+        return super().flags() | QgsProcessingAlgorithm.Flag.FlagNoThreading
 
     def _confirm_execution(self, connection_name, sql):
         """Require explicit user consent when a GUI is available.

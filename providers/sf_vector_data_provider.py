@@ -2,6 +2,7 @@ import copy
 import re
 import typing
 from qgis.core import (
+    NULL,
     Qgis,
     QgsCoordinateReferenceSystem,
     QgsDataProvider,
@@ -245,7 +246,8 @@ class SFVectorDataProvider(QgsVectorDataProvider):
 
     def capabilities(self) -> QgsVectorDataProvider.Capabilities:
         base_capabilities = (
-            QgsVectorDataProvider.CreateSpatialIndex | QgsVectorDataProvider.SelectAtId
+            QgsVectorDataProvider.Capability.CreateSpatialIndex
+            | QgsVectorDataProvider.Capability.SelectAtId
         )
 
         # An empty string used as a primary key signifies the absence of a defined primary key.
@@ -292,12 +294,12 @@ class SFVectorDataProvider(QgsVectorDataProvider):
 
         return (
             base_capabilities
-            | QgsVectorDataProvider.AddFeatures
-            | QgsVectorDataProvider.DeleteFeatures
-            | QgsVectorDataProvider.ChangeAttributeValues
-            | QgsVectorDataProvider.AddAttributes
-            | QgsVectorDataProvider.DeleteAttributes
-            | QgsVectorDataProvider.ChangeGeometries
+            | QgsVectorDataProvider.Capability.AddFeatures
+            | QgsVectorDataProvider.Capability.DeleteFeatures
+            | QgsVectorDataProvider.Capability.ChangeAttributeValues
+            | QgsVectorDataProvider.Capability.AddAttributes
+            | QgsVectorDataProvider.Capability.DeleteAttributes
+            | QgsVectorDataProvider.Capability.ChangeGeometries
         )
 
     def name(self) -> str:
@@ -326,15 +328,15 @@ class SFVectorDataProvider(QgsVectorDataProvider):
         QgsWkbTypes.
         """
         if not self._column_geom:
-            return QgsWkbTypes.NoGeometry
+            return QgsWkbTypes.Type.NoGeometry
         if not self._wkb_type:
             if not self._is_valid:
-                self._wkb_type = QgsWkbTypes.Unknown
+                self._wkb_type = QgsWkbTypes.Type.Unknown
             else:
                 if self._geometry_type in mapping_snowflake_qgis_geometry:
                     geometry_type = mapping_snowflake_qgis_geometry[self._geometry_type]
                 else:
-                    self._wkb_type = QgsWkbTypes.Unknown
+                    self._wkb_type = QgsWkbTypes.Type.Unknown
                     return self._wkb_type
 
                 self._wkb_type = geometry_type
@@ -445,12 +447,12 @@ class SFVectorDataProvider(QgsVectorDataProvider):
         """Auto-generate the next sequential value for numeric primary key columns."""
         fields = self.fields()
         if fieldIndex < 0 or fieldIndex >= fields.count():
-            return QVariant()
+            return NULL
         field = fields.field(fieldIndex)
         if field.name() != self._primary_key:
-            return QVariant()
+            return NULL
         if field.type() not in (QMetaType.Type.Int, QMetaType.Type.Double, QMetaType.Type.LongLong):
-            return QVariant()
+            return NULL
         next_val = get_next_primary_key_value(
             self._context_information, self._table_name, self._primary_key,
         )
@@ -459,7 +461,7 @@ class SFVectorDataProvider(QgsVectorDataProvider):
             # QVariant.isNull() and reject raw Python ints when a null-check
             # is expected.
             return QVariant(next_val)
-        return QVariant()
+        return NULL
 
     def defaultValueClause(self, fieldIndex):
         """Advertise an auto-increment default for the PK column.

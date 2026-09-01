@@ -72,7 +72,7 @@ class BufferTableAlgorithm(QgsProcessingAlgorithm):
         ))
         self.addParameter(QgsProcessingParameterNumber(
             self.DISTANCE, self.tr("Buffer distance (meters)"),
-            type=QgsProcessingParameterNumber.Double,
+            type=QgsProcessingParameterNumber.Type.Double,
             defaultValue=1000.0, minValue=0.0,
         ))
         self.addParameter(QgsProcessingParameterString(

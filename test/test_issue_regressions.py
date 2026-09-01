@@ -1822,7 +1822,8 @@ class TestOpenIssueFixes(unittest.TestCase):
         self.assertIn("def create_qgs_field(", content)
         self.assertIn("QGIS_VERSION_INT", content)
         self.assertIn("33800", content)
-        self.assertIn("QVariant.Type(int(metatype))", content)
+        self.assertIn('getattr(QVariant, "Type")', content)
+        self.assertIn("qvariant_type(int(metatype))", content)
 
     def test_qgsfield_construction_sites_use_helper(self):
         """#120: every QgsField construction that takes a QMetaType.Type must

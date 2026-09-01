@@ -27,7 +27,7 @@ class SFConnectTask(QgsTask):
             Exception: If the initialization fails.
         """
         try:
-            super().__init__("Snowflake Connection Task", QgsTask.CanCancel)
+            super().__init__("Snowflake Connection Task", QgsTask.Flag.CanCancel)
             self._run_thread_id: typing.Optional[int] = None
             self.settings = get_qsettings()
             self.auth_information = get_authentification_information(

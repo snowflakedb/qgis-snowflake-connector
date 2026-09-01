@@ -70,7 +70,7 @@ class H3IndexAlgorithm(QgsProcessingAlgorithm):
         ))
         self.addParameter(QgsProcessingParameterNumber(
             self.RESOLUTION, self.tr("H3 resolution (0-15)"),
-            type=QgsProcessingParameterNumber.Integer,
+            type=QgsProcessingParameterNumber.Type.Integer,
             defaultValue=7, minValue=0, maxValue=15,
         ))
         self.addParameter(QgsProcessingParameterString(
