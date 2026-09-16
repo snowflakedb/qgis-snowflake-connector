@@ -7,7 +7,7 @@ name=Snowflake Connector for QGIS
 qgisMinimumVersion=3.34.1
 qgisMaximumVersion=4.99
 description=This package includes the Snowflake Connector for QGIS.
-version=1.0.22
+version=1.0.25
 author=Snowflake Inc.
 email=erick.cuberojimenez@snowflake.com
 
@@ -20,7 +20,32 @@ repository=https://github.com/snowflakedb/qgis-snowflake-connector/
 # Recommended items:
 
 hasProcessingProvider=yes
-changelog=1.0.22 - Fix from end-to-end feature testing: editing a feature on a
+changelog=1.0.25 - Fix the Qt6 compatibility issues reported by the QGIS
+ Plugin Repository scan. Every flagged enum member is now accessed through
+ its enum scope (QgsWkbTypes.Type, QgsTask.Flag, QgsFeatureRequest.FilterType,
+ QgsVectorDataProvider.Capability, QgsProcessingParameterNumber.Type,
+ QgsProcessingAlgorithm.Flag, QDialogButtonBox.StandardButton), the provider's
+ defaultValue() returns qgis.core NULL instead of a bare QVariant(), and the
+ QGIS < 3.38 QVariant.Type fallback in create_qgs_field is resolved
+ dynamically because that attribute only exists on PyQt5. Scoped access is
+ value-identical on Qt5, so there is no behaviour change on QGIS 3.34-3.44.
+ 1.0.24 - Packaging/security fixes for the QGIS Plugin Repository
+ validation scan: annotate two best-effort cleanup try/except blocks (the
+ Buffer algorithm's temp-table teardown and the feature iterator's cursor
+ close) with documented bandit B110 suppressions, matching the convention
+ already used elsewhere, and remove the Sphinx help/make.bat Windows helper
+ so it no longer trips the suspicious-file check. No user-visible behaviour
+ change.
+ 1.0.23 - Fix plugin load failure ("AttributeError: module 'lib'
+ has no attribute 'GEN_EMAIL'"): this is a cryptography/pyOpenSSL version
+ mismatch in the QGIS Python environment (cryptography 49+ removed OpenSSL
+ bindings that older pyOpenSSL still references), not a QGIS version issue.
+ classFactory now catches any load-time exception (not just ImportError) so
+ the plugin degrades to a no-op stub with an actionable message instead of a
+ raw traceback dialog, and logs the resolved versions and paths of
+ snowflake-connector-python, cryptography and pyOpenSSL to help diagnose
+ per-user site-packages shadowing.
+ 1.0.22 - Fix from end-to-end feature testing: editing a feature on a
  Snowflake layer crashed with "TypeError: list indices must be integers or
  slices, not str" because FilterFid/FilterFids requests were pushed down to SQL
  using a column name as a list index. Feature ids are fetch-order positions, not

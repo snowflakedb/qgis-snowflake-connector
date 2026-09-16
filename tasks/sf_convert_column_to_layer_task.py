@@ -50,7 +50,7 @@ class SFConvertColumnToLayerTask(QgsTask):
             self._run_thread_id: typing.Optional[int] = None
             super().__init__(
                 f"Snowflake Add Map Layer From {self.schema}.{self.table}.{self.column}",
-                QgsTask.CanCancel,
+                QgsTask.Flag.CanCancel,
             )
         except Exception as e:
             self.on_handle_error.emit(

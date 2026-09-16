@@ -140,6 +140,20 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
     CONNECTION_DYN_CB = "CONNECTION_DYN_CB"
     GEOMETRY_COLUMN = "GEOMETRY_COLUMN"
 
+    def flags(self):
+        return super().flags() | QgsProcessingAlgorithm.Flag.FlagNoThreading
+
+    def _confirm_export(self, connection_name, database, schema, table):
+        from .helpers.trust_policy import require_trusted_action_consent
+
+        return require_trusted_action_consent(
+            "Confirm Snowflake export",
+            "The Snowflake plugin is about to export features to "
+            f"'{database}.{schema}.{table}' using connection "
+            f"'{connection_name}'.\n\n"
+            "Only proceed if you trust the source of this export workflow.",
+        )
+
     def initAlgorithm(self, config):
         """
         Here we define the inputs and output of the algorithm, along
@@ -212,6 +226,8 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
                 self.parameterAsString(parameters, self.CONNECTION_DYN_CB, context)
             )
         )
+        schema_was_empty = selected_schema == ""
+        table_was_empty = selected_table == ""
 
         if self._targets_same_snowflake_table(
             parameters,
@@ -223,12 +239,28 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
         ):
             raise QgsProcessingException(SAME_TABLE_EXPORT_MESSAGE)
 
+        if selected_schema == "":
+            selected_schema = "PUBLIC"
+        if selected_table == "":
+            selected_table = self.parameterAsSource(
+                parameters, self.INPUT, context
+            ).sourceName()
+
+        if not self._confirm_export(
+            selected_connection,
+            selected_database,
+            selected_schema,
+            selected_table,
+        ):
+            raise QgsProcessingException(
+                "Export to Snowflake was cancelled by the user."
+            )
+
         auth_information = get_authentification_information(
             self.settings, selected_connection
         )
         self.sf_data_provider = SFDataProvider(auth_information)
-        if selected_schema == "":
-            selected_schema = "PUBLIC"
+        if schema_was_empty:
             count_schemas = get_count_schemas(
                 settings=self.settings,
                 connection_name=selected_connection,
@@ -243,11 +275,7 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
                     schema_name=selected_schema,
                 )
 
-        if selected_table == "":
-            selected_table = self.parameterAsSource(
-                parameters, self.INPUT, context
-            ).sourceName()
-
+        if table_was_empty:
             count_table = get_count_tables(
                 connection_name=selected_connection,
                 database_name=selected_database,
@@ -345,18 +373,9 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
         query_values_alias = f" AS v({','.join(value_aliases)})"
         query = query_base
         first = True
-        executed = False
+        rows_in_batch = 0
+        rows_inserted = 0
         for current, feature in enumerate(features):
-            if current != 0 and current % 5000 == 0:
-                cur = self.sf_data_provider.execute_query(
-                    query + query_values_alias, selected_connection
-                )
-                cur.close()
-                query = query_base
-                first = True
-                executed = True
-            executed = False
-            # Stop the algorithm if cancel button has been clicked
             if feedback.isCanceled():
                 break
 
@@ -422,15 +441,27 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
                         else:
                             query += _sql_literal_from_value(feat_val)
             query += ")"
+            rows_in_batch += 1
+
+            if rows_in_batch >= 5000:
+                cur = self.sf_data_provider.execute_query(
+                    query + query_values_alias, selected_connection
+                )
+                cur.close()
+                rows_inserted += rows_in_batch
+                rows_in_batch = 0
+                query = query_base
+                first = True
 
             # Update the progress bar
             feedback.setProgress(int(current * total))
 
-        if not executed:
+        if not feedback.isCanceled() and rows_in_batch > 0:
             cur = self.sf_data_provider.execute_query(
                 query + query_values_alias, selected_connection
             )
             cur.close()
+            rows_inserted += rows_in_batch
 
         # Return the results of the algorithm. In this case our only result is
         # the feature sink which contains the processed features, but some
@@ -439,7 +470,7 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
         # dictionary, with keys matching the feature corresponding parameter
         # or output names.
         # return {self.OUTPUT: dest_id}
-        return {"Rows Inserted": source.featureCount()}
+        return {"Rows Inserted": rows_inserted}
 
     def get_field_type_from_code_type(self, code_type: int) -> str:
         """

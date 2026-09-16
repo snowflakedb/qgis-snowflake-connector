@@ -69,6 +69,30 @@ _SQL_STATEMENT_BREAKERS = re.compile(
     re.IGNORECASE,
 )
 
+_READ_ONLY_SQL_START = re.compile(
+    r"^\s*(WITH|SELECT|SHOW|DESCRIBE|DESC)\b",
+    re.IGNORECASE,
+)
+
+_FORBIDDEN_SQL_VERBS = re.compile(
+    r"\b(INSERT|UPDATE|DELETE|MERGE|CREATE|DROP|ALTER|TRUNCATE|COPY|"
+    r"GRANT|REVOKE|CALL|EXECUTE|PUT|REMOVE|UNDROP)\b",
+    re.IGNORECASE,
+)
+
+
+def sql_statement_is_read_only(sql: str) -> bool:
+    """Return True when ``sql`` is a single read-only Snowflake statement.
+
+    Custom SQL query layers embedded in project files are expected to be
+    SELECT-style reads. Anything else is rejected before execution.
+    """
+    if not sql or predicate_has_statement_breakers(sql):
+        return False
+    if not _READ_ONLY_SQL_START.match(sql):
+        return False
+    return _FORBIDDEN_SQL_VERBS.search(sql) is None
+
 
 def predicate_has_statement_breakers(predicate: str) -> bool:
     """Heuristic guard for a free-text SQL predicate (e.g. a Processing

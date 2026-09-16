@@ -93,12 +93,12 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
         # cache exists so fetchFeature() can resolve them locally.
         ftype = self._request.filterType()
         if ftype in (
-            QgsFeatureRequest.FilterFid,
-            QgsFeatureRequest.FilterFids,
+            QgsFeatureRequest.FilterType.FilterFid,
+            QgsFeatureRequest.FilterType.FilterFids,
         ):
             self._target_fids = (
                 [self._request.filterFid()]
-                if ftype == QgsFeatureRequest.FilterFid
+                if ftype == QgsFeatureRequest.FilterType.FilterFid
                 else list(self._request.filterFids())
             )
             if not self._provider._features_loaded:
@@ -173,7 +173,7 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
             # attacker-influenceable (persisted in project files), so it is
             # compiled to SQL through a whitelist compiler; anything that does
             # not fully compile is NOT pushed down (QGIS filters client-side).
-            if self._request.filterType() == QgsFeatureRequest.FilterExpression:
+            if self._request.filterType() == QgsFeatureRequest.FilterType.FilterExpression:
                 expression = self._request.filterExpression().expression()
                 if expression:
                     compiled = compile_expression_to_sql(
@@ -557,7 +557,7 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
         if result is not None:
             try:
                 result.close()
-            except Exception:
+            except Exception:  # nosec B110 - best-effort release of a server-side cursor during close(); a failure here must not raise from iterator teardown
                 pass
             self._result = None
         return True

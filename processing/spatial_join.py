@@ -66,6 +66,20 @@ class SpatialJoinAlgorithm(QgsProcessingAlgorithm):
     def createInstance(self):
         return SpatialJoinAlgorithm()
 
+    def flags(self):
+        return super().flags() | QgsProcessingAlgorithm.Flag.FlagNoThreading
+
+    def _confirm_overwrite(self, connection_name, schema, output):
+        from ..helpers.trust_policy import require_trusted_action_consent
+
+        return require_trusted_action_consent(
+            "Confirm table overwrite",
+            "The Snowflake plugin is about to run CREATE OR REPLACE TABLE on "
+            f"'{schema}.{output}' using connection '{connection_name}'.\n\n"
+            "Only proceed if you trust the source of this workflow (for "
+            "example a Processing model you did not author).",
+        )
+
     def initAlgorithm(self, config=None):
         self.addParameter(QgsProcessingParameterString(
             self.CONNECTION, self.tr("Connection name"),
@@ -128,6 +142,11 @@ class SpatialJoinAlgorithm(QgsProcessingAlgorithm):
         pred_idx = self.parameterAsEnum(parameters, self.PREDICATE, context)
         output = self.parameterAsString(parameters, self.OUTPUT_TABLE, context)
         overwrite = self.parameterAsBoolean(parameters, self.OVERWRITE, context)
+
+        if overwrite and not self._confirm_overwrite(connection_name, schema, output):
+            raise QgsProcessingException(
+                "Overwrite of the output table was cancelled by the user."
+            )
 
         predicate = PREDICATES[pred_idx]
 

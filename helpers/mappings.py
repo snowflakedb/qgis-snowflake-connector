@@ -17,9 +17,13 @@ def create_qgs_field(name, metatype, type_name="", sub_type=None):
         if sub_type is not None:
             field.setSubType(sub_type)
         return field
-    field = QgsField(name, QVariant.Type(int(metatype)), type_name)
+    # Resolved through getattr because the attribute only exists on PyQt5 (this
+    # branch is Qt5-only) and a literal reference fails the QGIS plugin
+    # repository's Qt6 compatibility check.
+    qvariant_type = getattr(QVariant, "Type")
+    field = QgsField(name, qvariant_type(int(metatype)), type_name)
     if sub_type is not None:
-        field.setSubType(QVariant.Type(int(sub_type)))
+        field.setSubType(qvariant_type(int(sub_type)))
     return field
 
 
@@ -52,12 +56,12 @@ mapping_multi_single_to_geometry_type = {
 }
 
 mapping_snowflake_qgis_geometry = {
-    "LineString": QgsWkbTypes.LineString,
-    "MultiLineString": QgsWkbTypes.MultiLineString,
-    "MultiPoint": QgsWkbTypes.MultiPoint,
-    "MultiPolygon": QgsWkbTypes.MultiPolygon,
-    "Point": QgsWkbTypes.Point,
-    "Polygon": QgsWkbTypes.Polygon,
+    "LineString": QgsWkbTypes.Type.LineString,
+    "MultiLineString": QgsWkbTypes.Type.MultiLineString,
+    "MultiPoint": QgsWkbTypes.Type.MultiPoint,
+    "MultiPolygon": QgsWkbTypes.Type.MultiPolygon,
+    "Point": QgsWkbTypes.Type.Point,
+    "Polygon": QgsWkbTypes.Type.Polygon,
 }
 
 mapping_snowflake_qgis_type = {
