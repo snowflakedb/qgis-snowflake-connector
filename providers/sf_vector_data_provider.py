@@ -46,7 +46,12 @@ from ..helpers.utils import (
 from ..managers.sf_connection_manager import SFConnectionManager, build_op_tag
 
 from ..helpers.wrapper import parse_uri
-from ..helpers.sql import quote_identifier, quote_literal, qualified_table_name
+from ..helpers.sql import (
+    quote_identifier,
+    quote_literal,
+    qualified_table_name,
+    sql_statement_is_read_only,
+)
 from ..helpers.expression_compiler import compile_expression_to_sql
 from ..helpers.mappings import (
     SNOWFLAKE_METADATA_TYPE_CODE_DICT,
@@ -128,6 +133,15 @@ class SFVectorDataProvider(QgsVectorDataProvider):
         self._is_limited_unordered = False
 
         if self._sql_query and not self._table_name:
+            if not sql_statement_is_read_only(self._sql_query):
+                QgsMessageLog.logMessage(
+                    "Custom SQL query layers must be read-only SELECT-style "
+                    "statements; refusing to load the layer.",
+                    "Snowflake Plugin",
+                    Qgis.MessageLevel.Critical,
+                )
+                self._is_valid = False
+                return
             self._from_clause = f"({self._sql_query})"
             # SNOW-3712076: a custom sql_query layer must still be row-capped so
             # a malicious project file cannot force an unbounded fetch (client
@@ -409,6 +423,14 @@ class SFVectorDataProvider(QgsVectorDataProvider):
                         )
                         self._fields.append(qgs_field)
                 else:
+                    if not sql_statement_is_read_only(self._sql_query):
+                        QgsMessageLog.logMessage(
+                            "Custom SQL query layers must be read-only "
+                            "SELECT-style statements.",
+                            "Snowflake Plugin",
+                            Qgis.MessageLevel.Critical,
+                        )
+                        return self._fields
                     field_info = []
                     cur = self.connection_manager.execute_query(
                         connection_name=self._connection_name,

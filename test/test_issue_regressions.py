@@ -543,6 +543,20 @@ class TestSQLSafety(unittest.TestCase):
         with self.assertRaises(ValueError):
             mod.quote_json_literal_for_parse_json(payload)
 
+    def test_sql_statement_is_read_only(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "helpers.sql", ROOT / "helpers" / "sql.py"
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        self.assertTrue(mod.sql_statement_is_read_only("SELECT * FROM T"))
+        self.assertTrue(mod.sql_statement_is_read_only("WITH cte AS (SELECT 1) SELECT * FROM cte"))
+        self.assertFalse(mod.sql_statement_is_read_only("DROP TABLE T"))
+        self.assertFalse(mod.sql_statement_is_read_only("SELECT 1; DELETE FROM T"))
+        self.assertFalse(mod.sql_statement_is_read_only("INSERT INTO T VALUES (1)"))
+
     def test_predicate_has_statement_breakers(self):
         """SNOW-3712086: the free-text WHERE-clause guard must flag comments,
         statement terminators and set operators, while allowing a plain
@@ -1084,6 +1098,22 @@ class TestPhase5Hardening(unittest.TestCase):
         qgis.PyQt = pyqt
         utils = types.ModuleType("qgis.utils")
         utils.iface = iface_value
+        root_pkg = types.ModuleType("sfc_root")
+        processing_pkg = types.ModuleType("sfc_root.processing")
+        helpers_pkg = types.ModuleType("sfc_root.helpers")
+        trust_policy_mod = types.ModuleType("sfc_root.helpers.trust_policy")
+
+        def _require_trusted_action_consent(_title, _message):
+            return iface_value is not None
+
+        trust_policy_mod.require_trusted_action_consent = _require_trusted_action_consent
+        helpers_pkg.trust_policy = trust_policy_mod
+        root_pkg.processing = processing_pkg
+        root_pkg.helpers = helpers_pkg
+        sys.modules["sfc_root"] = root_pkg
+        sys.modules["sfc_root.processing"] = processing_pkg
+        sys.modules["sfc_root.helpers"] = helpers_pkg
+        sys.modules["sfc_root.helpers.trust_policy"] = trust_policy_mod
         sys.modules["qgis"] = qgis
         sys.modules["qgis.core"] = core
         sys.modules["qgis.PyQt"] = pyqt
@@ -1092,17 +1122,22 @@ class TestPhase5Hardening(unittest.TestCase):
         sys.modules["qgis.utils"] = utils
 
         spec = importlib.util.spec_from_file_location(
-            "sfc_execute_sql_under_test", ROOT / "processing" / "execute_sql.py"
+            "sfc_root.processing.execute_sql",
+            ROOT / "processing" / "execute_sql.py",
+            submodule_search_locations=[str(ROOT / "processing")],
         )
         mod = importlib.util.module_from_spec(spec)
+        mod.__package__ = "sfc_root.processing"
+        processing_pkg.execute_sql = mod
+        sys.modules["sfc_root.processing.execute_sql"] = mod
         spec.loader.exec_module(mod)
         return mod
 
-    def test_execute_sql_headless_proceeds_without_prompt(self):
-        """SNOW-3712080: headless (no iface) runs are user-initiated and proceed."""
+    def test_execute_sql_headless_requires_opt_in(self):
+        """SNOW-4068892: headless runs must not auto-trust model-supplied SQL."""
         mod = self._load_execute_sql(iface_value=None)
         alg = mod.ExecuteSQLAlgorithm()
-        self.assertTrue(alg._confirm_execution("conn", "SELECT 1"))
+        self.assertFalse(alg._confirm_execution("conn", "SELECT 1"))
 
     def test_execute_sql_requires_confirmation_before_execution(self):
         """SNOW-3712080: the algorithm must gate execution on _confirm_execution
@@ -1120,7 +1155,7 @@ class TestPhase5Hardening(unittest.TestCase):
             "confirmation must happen before the SQL is executed",
         )
         self.assertIn("QgsProcessingException(", body)
-        self.assertIn("setTextFormat(Qt.TextFormat.PlainText)", content)
+        self.assertIn("require_trusted_action_consent", content)
 
 
 class TestProviderLifecycle(unittest.TestCase):
@@ -2350,6 +2385,170 @@ class TestStatementTimeoutSafetyNet(unittest.TestCase):
             ROOT / "managers" / "sf_connection_manager.py"
         ).read_text(encoding="utf-8")
         self.assertIn("STATEMENT_TIMEOUT_IN_SECONDS", src)
+
+
+class TestGlasswingTrustPolicy(unittest.TestCase):
+    """CWE-441 remediation: untrusted workflows must not auto-run destructive SQL."""
+
+    def _load_trust_policy(self, iface_value=None, settings_value=False, env_value=None):
+        import os
+        import sys
+        import types
+        import importlib.util
+
+        env_key = "SNOWFLAKE_QGIS_ALLOW_HEADLESS_TRUSTED_ACTIONS"
+        prior_env = os.environ.get(env_key)
+        if env_value is None:
+            os.environ.pop(env_key, None)
+        else:
+            os.environ[env_key] = env_value
+
+        def _restore_env():
+            if prior_env is None:
+                os.environ.pop(env_key, None)
+            else:
+                os.environ[env_key] = prior_env
+        self.addCleanup(_restore_env)
+
+        names = (
+            "qgis", "qgis.core", "qgis.PyQt", "qgis.PyQt.QtCore",
+            "qgis.PyQt.QtWidgets", "qgis.utils",
+        )
+        saved = {n: sys.modules.get(n) for n in names}
+
+        def _restore_modules():
+            for n, prev in saved.items():
+                if prev is None:
+                    sys.modules.pop(n, None)
+                else:
+                    sys.modules[n] = prev
+        self.addCleanup(_restore_modules)
+
+        qgis = types.ModuleType("qgis")
+        core = types.ModuleType("qgis.core")
+        qgis.core = core
+        pyqt = types.ModuleType("qgis.PyQt")
+        qtcore = types.ModuleType("qgis.PyQt.QtCore")
+        qtcore.Qt = type("Qt", (), {"TextFormat": type("TextFormat", (), {"PlainText": 0})})
+        pyqt.QtCore = qtcore
+        qtwidgets = types.ModuleType("qgis.PyQt.QtWidgets")
+
+        class _FakeMessageBox:
+            Icon = type("Icon", (), {"Warning": 0})
+            StandardButton = type(
+                "StandardButton", (), {"Yes": 1, "No": 0}
+            )
+
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def setIcon(self, *_args, **_kwargs):
+                pass
+
+            def setWindowTitle(self, *_args, **_kwargs):
+                pass
+
+            def setTextFormat(self, *_args, **_kwargs):
+                pass
+
+            def setText(self, *_args, **_kwargs):
+                pass
+
+            def setStandardButtons(self, *_args, **_kwargs):
+                pass
+
+            def setDefaultButton(self, *_args, **_kwargs):
+                pass
+
+            def exec(self):
+                return self.StandardButton.No
+
+        qtwidgets.QMessageBox = _FakeMessageBox
+        pyqt.QtWidgets = qtwidgets
+        qgis.PyQt = pyqt
+        utils = types.ModuleType("qgis.utils")
+        utils.iface = iface_value
+        sys.modules["qgis"] = qgis
+        sys.modules["qgis.core"] = core
+        sys.modules["qgis.PyQt"] = pyqt
+        sys.modules["qgis.PyQt.QtCore"] = qtcore
+        sys.modules["qgis.PyQt.QtWidgets"] = qtwidgets
+        sys.modules["qgis.utils"] = utils
+
+        utils_mod = _load_helpers_utils(self)
+        sys.modules["qgis.PyQt.QtCore"].Qt = type(
+            "Qt", (), {"TextFormat": type("TextFormat", (), {"PlainText": 0})}
+        )
+
+        class _FakeSettings:
+            def value(self, key, defaultValue=False):
+                if key == "security/allow_headless_trusted_actions":
+                    return settings_value
+                return defaultValue
+
+        utils_mod.get_qsettings = lambda: _FakeSettings()
+
+        helpers_pkg = types.ModuleType("helpers")
+        helpers_pkg.utils = utils_mod
+        sys.modules["helpers"] = helpers_pkg
+        sys.modules["helpers.utils"] = utils_mod
+
+        spec = importlib.util.spec_from_file_location(
+            "helpers.trust_policy",
+            ROOT / "helpers" / "trust_policy.py",
+            submodule_search_locations=[str(ROOT / "helpers")],
+        )
+        mod = importlib.util.module_from_spec(spec)
+        mod.__package__ = "helpers"
+        helpers_pkg.trust_policy = mod
+        sys.modules["helpers.trust_policy"] = mod
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_headless_denies_without_opt_in(self):
+        mod = self._load_trust_policy(iface_value=None, settings_value=False)
+        self.assertFalse(mod.require_trusted_action_consent("t", "m"))
+
+    def test_headless_allows_with_env_opt_in(self):
+        mod = self._load_trust_policy(iface_value=None, env_value="1")
+        self.assertTrue(mod.require_trusted_action_consent("t", "m"))
+
+    def test_overwrite_algorithms_require_consent_before_execute(self):
+        for filename in [
+            "processing/buffer_table.py",
+            "processing/spatial_join.py",
+            "processing/h3_index.py",
+        ]:
+            content = (ROOT / filename).read_text(encoding="utf-8")
+            self.assertIn("FlagNoThreading", content)
+            self.assertIn("_confirm_overwrite", content)
+            idx = content.index("def processAlgorithm(")
+            body = content[idx:]
+            confirm_pos = body.index("_confirm_overwrite(")
+            exec_pos = body.index("mgr.execute_query(")
+            self.assertLess(confirm_pos, exec_pos, filename)
+
+    def test_custom_sql_layers_must_be_read_only(self):
+        content = (ROOT / "providers" / "sf_vector_data_provider.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("sql_statement_is_read_only", content)
+        start = content.index("if self._sql_query and not self._table_name:")
+        end = content.index("self.get_geometry_column()", start)
+        block = content[start:end]
+        self.assertIn("sql_statement_is_read_only(self._sql_query)", block)
+
+    def test_export_requires_consent_and_skips_final_batch_on_cancel(self):
+        content = (ROOT / "qgis_snowflake_connector_algorithm.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("def _confirm_export(", content)
+        self.assertIn("FlagNoThreading", content)
+        idx = content.index("def processAlgorithm(")
+        body = content[idx:]
+        self.assertIn("_confirm_export(", body)
+        self.assertIn("if not feedback.isCanceled() and rows_in_batch > 0:", body)
+        self.assertIn('return {"Rows Inserted": rows_inserted}', body)
 
 
 class TestImportDecimalCoercion(unittest.TestCase):

@@ -56,40 +56,18 @@ class ExecuteSQLAlgorithm(QgsProcessingAlgorithm):
         return super().flags() | QgsProcessingAlgorithm.Flag.FlagNoThreading
 
     def _confirm_execution(self, connection_name, sql):
-        """Require explicit user consent when a GUI is available.
-
-        Headless runs (qgis_process CLI / PyQGIS) are treated as user-initiated
-        and proceed without a prompt; interactive runs must be confirmed so a
-        malicious Processing model cannot silently run SQL as the victim.
-        """
-        try:
-            from qgis.utils import iface
-        except Exception:
-            iface = None
-        if iface is None:
-            return True
-
-        from qgis.PyQt.QtWidgets import QMessageBox
-        from qgis.PyQt.QtCore import Qt
+        """Require explicit consent before running attacker-supplied SQL."""
+        from ..helpers.trust_policy import require_trusted_action_consent
 
         preview = sql if len(sql) <= 2000 else sql[:2000] + "\n…(truncated)"
-        box = QMessageBox(iface.mainWindow())
-        box.setIcon(QMessageBox.Icon.Warning)
-        box.setWindowTitle("Confirm SQL execution")
-        # Plain text so a crafted connection name / SQL cannot render rich text.
-        box.setTextFormat(Qt.TextFormat.PlainText)
-        box.setText(
+        return require_trusted_action_consent(
+            "Confirm SQL execution",
             "The Snowflake plugin is about to run a SQL statement on "
             f"connection '{connection_name}'.\n\n"
             "Only proceed if you trust the source of this statement (for "
             "example a Processing model you did not author).\n\n"
-            f"{preview}"
+            f"{preview}",
         )
-        box.setStandardButtons(
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        )
-        box.setDefaultButton(QMessageBox.StandardButton.No)
-        return box.exec() == QMessageBox.StandardButton.Yes
 
     def initAlgorithm(self, config=None):
         self.addParameter(QgsProcessingParameterString(
