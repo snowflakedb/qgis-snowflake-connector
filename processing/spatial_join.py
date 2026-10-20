@@ -8,6 +8,7 @@ from qgis.core import (
     QgsProcessingParameterBoolean,
     QgsProcessingParameterString,
     QgsProcessingParameterEnum,
+    QgsProcessingParameterNumber,
     QgsProcessingOutputString,
 )
 from qgis.PyQt.QtCore import QCoreApplication
@@ -32,6 +33,7 @@ class SpatialJoinAlgorithm(QgsProcessingAlgorithm):
     RIGHT_TABLE = "RIGHT_TABLE"
     RIGHT_GEO = "RIGHT_GEO"
     PREDICATE = "PREDICATE"
+    DISTANCE = "DISTANCE"
     OUTPUT_TABLE = "OUTPUT_TABLE"
     OVERWRITE = "OVERWRITE"
     OUTPUT = "OUTPUT"
@@ -103,6 +105,14 @@ class SpatialJoinAlgorithm(QgsProcessingAlgorithm):
             self.PREDICATE, self.tr("Spatial predicate"),
             options=PREDICATES, defaultValue=0,
         ))
+        distance_param = QgsProcessingParameterNumber(
+            self.DISTANCE,
+            self.tr("Distance (meters, required for ST_DWITHIN)"),
+            type=QgsProcessingParameterNumber.Type.Double,
+            minValue=0,
+            optional=True,
+        )
+        self.addParameter(distance_param)
         self.addParameter(QgsProcessingParameterString(
             self.OUTPUT_TABLE, self.tr("Output table name"),
         ))
@@ -149,6 +159,20 @@ class SpatialJoinAlgorithm(QgsProcessingAlgorithm):
             )
 
         predicate = PREDICATES[pred_idx]
+
+        # ST_DWITHIN requires a distance argument; the other predicates take
+        # none. Validate up front so we never emit invalid SQL.
+        distance = None
+        if predicate == "ST_DWITHIN":
+            if parameters.get(self.DISTANCE) is None:
+                raise QgsProcessingException(
+                    "ST_DWITHIN requires a Distance (meters) value."
+                )
+            distance = self.parameterAsDouble(parameters, self.DISTANCE, context)
+            if distance < 0:
+                raise QgsProcessingException(
+                    "Distance must be a non-negative value."
+                )
 
         auth = get_auth_information(connection_name)
         mgr = SFConnectionManager.get_instance()
@@ -202,13 +226,18 @@ class SpatialJoinAlgorithm(QgsProcessingAlgorithm):
         else:
             select_clause = "a.*"
 
+        if distance is not None:
+            on_clause = f"{predicate}(a.{qlg}, b.{qrg}, {distance})"
+        else:
+            on_clause = f"{predicate}(a.{qlg}, b.{qrg})"
+
         create_verb = "CREATE OR REPLACE TABLE" if overwrite else "CREATE TABLE"
         sql = (
-            f"{create_verb} {qs}.{qo} AS "  # nosec B608 - create_verb and predicate are constants; identifiers escaped via quote_identifier; select_clause built from quoted identifiers
+            f"{create_verb} {qs}.{qo} AS "  # nosec B608 - create_verb and predicate are constants; distance is a validated float; identifiers escaped via quote_identifier; select_clause built from quoted identifiers
             f"SELECT {select_clause} "
             f"FROM {qs}.{ql} a "
             f"JOIN {qs}.{qr} b "
-            f"ON {predicate}(a.{qlg}, b.{qrg})"
+            f"ON {on_clause}"
         )
 
         feedback.pushInfo(f"Running spatial join: {sql}")

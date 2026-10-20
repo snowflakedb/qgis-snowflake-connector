@@ -2550,6 +2550,44 @@ class TestGlasswingTrustPolicy(unittest.TestCase):
         self.assertIn("if not feedback.isCanceled() and rows_in_batch > 0:", body)
         self.assertIn('return {"Rows Inserted": rows_inserted}', body)
 
+    def test_check_parameter_values_creates_no_table(self):
+        """F2: checkParameterValues runs during parameter validation, before the
+        user consents to the export. It must perform no DDL / no write."""
+        content = (ROOT / "qgis_snowflake_connector_algorithm.py").read_text(
+            encoding="utf-8"
+        )
+        idx = content.index("def checkParameterValues(")
+        end = content.index("\n    def ", idx + 1)
+        body = content[idx:end]
+        self.assertNotIn(
+            "create_table(",
+            body,
+            "checkParameterValues must not create the target table before "
+            "consent (F2)",
+        )
+        self.assertNotIn(
+            "get_create_table_query(",
+            body,
+            "checkParameterValues must not build a CREATE TABLE statement (F2)",
+        )
+
+    def test_table_created_only_after_consent(self):
+        """F2: in processAlgorithm the target table creation must happen after
+        _confirm_export() so a cancelled export leaves no table behind."""
+        content = (ROOT / "qgis_snowflake_connector_algorithm.py").read_text(
+            encoding="utf-8"
+        )
+        idx = content.index("def processAlgorithm(")
+        body = content[idx:]
+        confirm_pos = body.index("_confirm_export(")
+        create_pos = body.index("create_table(")
+        self.assertLess(
+            confirm_pos,
+            create_pos,
+            "create_table must be called after _confirm_export in "
+            "processAlgorithm (F2)",
+        )
+
 
 class TestImportDecimalCoercion(unittest.TestCase):
     """Regression: imported Snowflake NUMBER values arrive as Decimal, which
@@ -2633,6 +2671,156 @@ class TestCaseCollidingPrimaryKey(unittest.TestCase):
         )
         self.assertIn("identifiers_equal(declared, self._primary_key)", body)
         self.assertIn("identifiers_equal", content)
+
+
+class TestPrimaryKeyFilterProjection(unittest.TestCase):
+    """F1: filtering a layer by its primary-key column must not fail with
+    "ambiguous column name".
+
+    The iterator used to select the full field list (which already contains the
+    primary key) AND re-append the primary key as a trailing ``index`` column,
+    so the inner subquery produced two columns named e.g. ``ID``. A plain
+    ``select *`` fetch tolerated the duplicate, but the subset-string / filter
+    pushdown wraps the subquery in an outer ``WHERE <pk> = ...`` which then
+    failed to compile. The projection is now assembled as a list that includes
+    the primary key exactly once; a synthetic row column is emitted only for a
+    key-less layer.
+    """
+
+    def _iterator_content(self):
+        return (ROOT / "providers" / "sf_feature_iterator.py").read_text(
+            encoding="utf-8"
+        )
+
+    def test_primary_key_not_reselected_as_trailing_column(self):
+        content = self._iterator_content()
+        self.assertNotIn(
+            "index = self._provider._fields[self._provider.primary_key()].name()",
+            content,
+            "the primary key must not be re-selected as a separate output "
+            "column (it is already in the field projection) -- the duplicate "
+            "made an outer WHERE <pk> ambiguous (F1)",
+        )
+
+    def test_projection_assembled_as_list_with_single_pk(self):
+        content = self._iterator_content()
+        self.assertIn("inner_select = \", \".join(", content)
+        self.assertIn(
+            "[quote_identifier(n) for n in list_field_names]", content
+        )
+        self.assertIn("f\"select {inner_select} \"", content)
+
+    def test_synthetic_row_column_only_without_primary_key(self):
+        content = self._iterator_content()
+        idx = content.index("index_select_parts = []")
+        # The synthetic ROW_NUMBER column is guarded by the empty-PK check that
+        # immediately precedes/follows the list initialisation.
+        window = content[idx - 200 : idx + 200]
+        self.assertIn('self._provider.primary_key() == ""', window)
+        self.assertIn("sfindexsfrownumberauto", content)
+
+
+class TestSpatialJoinDWithin(unittest.TestCase):
+    """F3: the spatial-join ST_DWITHIN predicate requires a distance argument.
+
+    The algorithm built every predicate as ``PREDICATE(a.geo, b.geo)``, so
+    choosing ST_DWITHIN produced ``ST_DWITHIN(a.geo, b.geo)`` which Snowflake
+    rejects (missing distance). A validated, optional Distance parameter is now
+    added and the distance is appended only for ST_DWITHIN.
+    """
+
+    def _content(self):
+        return (ROOT / "processing" / "spatial_join.py").read_text(
+            encoding="utf-8"
+        )
+
+    def test_distance_parameter_added(self):
+        content = self._content()
+        self.assertIn("QgsProcessingParameterNumber", content)
+        self.assertIn('DISTANCE = "DISTANCE"', content)
+        self.assertIn("self.DISTANCE", content)
+
+    def test_dwithin_requires_distance(self):
+        content = self._content()
+        idx = content.index("def processAlgorithm(")
+        body = content[idx:]
+        self.assertIn('if predicate == "ST_DWITHIN":', body)
+        self.assertIn("ST_DWITHIN requires a Distance", body)
+        self.assertIn("Distance must be a non-negative value.", body)
+
+    def test_distance_appended_only_for_dwithin(self):
+        content = self._content()
+        self.assertIn(
+            "on_clause = f\"{predicate}(a.{qlg}, b.{qrg}, {distance})\"", content
+        )
+        self.assertIn(
+            "on_clause = f\"{predicate}(a.{qlg}, b.{qrg})\"", content
+        )
+        self.assertIn("ON {on_clause}", content)
+
+
+class TestStaleProviderDetection(unittest.TestCase):
+    """F4: QGIS registers the Snowflake vector provider once per process and
+    never unregisters it, so an in-place upgrade cannot replace the running
+    provider code. The plugin must detect a stale registration and tell the
+    user to restart QGIS instead of silently serving old code.
+    """
+
+    def test_metadata_provider_has_version_marker(self):
+        content = (ROOT / "providers" / "sf_metadata_provider.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("def __init__(self, plugin_version", content)
+        self.assertIn("self.plugin_version = plugin_version", content)
+
+    def test_plugin_has_version_helper(self):
+        content = (ROOT / "qgis_snowflake_connector.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("def get_plugin_version(", content)
+
+    def test_register_inspects_existing_metadata_and_warns(self):
+        content = (ROOT / "qgis_snowflake_connector.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("def _register_vector_provider(self)", content)
+        idx = content.index("def _register_vector_provider(self)")
+        end = content.index("\n    def ", idx + 1)
+        body = content[idx:end]
+        self.assertIn('registry.providerMetadata("snowflakedb")', body)
+        self.assertIn('getattr(existing, "plugin_version", None)', body)
+        self.assertIn("Please restart QGIS to finish the", body)
+        self.assertIn("Qgis.MessageLevel.Warning", body)
+        # The provider is still registered with its version on first load.
+        self.assertIn("SFMetadataProvider(current_version)", body)
+
+    def test_register_warns_on_unmarked_previous_provider(self):
+        """An in-place upgrade from <= 1.0.25 leaves a provider whose
+        plugin_version marker is None. That is still an older provider running
+        stale code, so it must trigger the restart warning, not a benign
+        "already registered" info message."""
+        content = (ROOT / "qgis_snowflake_connector.py").read_text(
+            encoding="utf-8"
+        )
+        idx = content.index("def _register_vector_provider(self)")
+        end = content.index("\n    def ", idx + 1)
+        body = content[idx:end]
+        # The warning fires on any mismatch, including the unmarked (None) case.
+        self.assertIn("if existing_version != current_version:", body)
+        # The old guard that suppressed the warning for None markers is gone.
+        self.assertNotIn(
+            "existing_version is not None and existing_version != current_version",
+            body,
+        )
+
+    def test_init_processing_delegates_registration(self):
+        content = (ROOT / "qgis_snowflake_connector.py").read_text(
+            encoding="utf-8"
+        )
+        idx = content.index("def initProcessing(self)")
+        end = content.index("\n    def ", idx + 1)
+        body = content[idx:end]
+        self.assertIn("self._register_vector_provider()", body)
 
 
 def _load_connection_manager(testcase, present_connections):
