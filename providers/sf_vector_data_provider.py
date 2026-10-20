@@ -47,6 +47,7 @@ from ..managers.sf_connection_manager import SFConnectionManager, build_op_tag
 
 from ..helpers.wrapper import parse_uri
 from ..helpers.sql import (
+    identifiers_equal,
     quote_identifier,
     quote_literal,
     qualified_table_name,
@@ -233,6 +234,13 @@ class SFVectorDataProvider(QgsVectorDataProvider):
         edit into a mass UPDATE/DELETE. We re-validate here (cheap declared-PK
         match first, duplicate-count fallback) and cache the result. Any failure
         fails closed (treated as not-unique / read-only).
+
+        The declared-PK shortcut must bind to the *exact* catalog column
+        identity: Snowflake distinguishes ``ID`` (unquoted) from ``"id"``
+        (quoted), so the match is case-sensitive (identifiers_equal). A blanket
+        ``.upper()`` fold would collapse those distinct identities and let a
+        URI-supplied ``primary_key=ID`` skip the duplicate scan of a non-unique
+        column that merely case-collides with the real key (SNOW-4134145 / CWE-178).
         """
         if self._primary_key_is_valid is not None:
             return self._primary_key_is_valid
@@ -241,7 +249,7 @@ class SFVectorDataProvider(QgsVectorDataProvider):
         try:
             if self._primary_key and self._table_name:
                 declared = get_declared_primary_key(self._context_information)
-                if declared and declared.upper() == self._primary_key.upper():
+                if declared and identifiers_equal(declared, self._primary_key):
                     result = True
                 else:
                     result = not check_column_has_duplicates(

@@ -183,10 +183,62 @@ def remove_connection(settings: QSettings, connection_name: str) -> None:
     Returns:
     - None
     """
+    # SNOW-4134146 / CWE-613: capture the QGIS auth-config ids before the
+    # settings group is removed. The layer_authcfg id lets a persisted
+    # authcfg= project token resolve back to this alias, and config_id holds
+    # the encrypted credentials; both must be deleted so a surviving project
+    # handle can no longer re-authenticate as the deleted connection.
+    settings.beginGroup(f"connections/{connection_name}")
+    layer_authcfg = settings.value(_LAYER_AUTHCFG_MAP_KEY, defaultValue="")
+    credential_config_id = settings.value("config_id", defaultValue="")
+    settings.endGroup()
+
     settings.beginGroup(f"connections/{connection_name}")
     settings.remove("")
     settings.endGroup()
     settings.sync()
+
+    # Best-effort removal of the auth-manager records; a missing/failed auth
+    # manager must not block the settings deletion above.
+    try:
+        auth_manager = QgsApplication.authManager()
+        for config_id in (layer_authcfg, credential_config_id):
+            if config_id:
+                auth_manager.removeAuthenticationConfig(config_id)
+    except Exception:
+        pass
+
+    # Deleting settings alone left the keep-alive Snowflake session cached in
+    # SFConnectionManager. Purge it immediately so a surviving project handle
+    # cannot reuse the deleted alias's role.
+    try:
+        from ..managers.sf_connection_manager import SFConnectionManager
+
+        SFConnectionManager.get_instance().purge_connection(connection_name)
+    except Exception:
+        pass
+
+
+def connection_settings_exist(connection_name: str) -> bool:
+    """Return ``True`` if a connection alias still has persisted QSettings.
+
+    CWE-613: deleting a connection removes its ``connections/<name>`` QSettings
+    group (see :func:`remove_connection`) but does not tear down the live
+    keep-alive Snowflake session cached in ``SFConnectionManager``. This
+    predicate lets the connection manager refuse to hand back a cached session
+    whose backing configuration has been deleted, so a surviving project handle
+    can no longer reuse it. A missing/empty ``connection_name`` or a connection
+    group with no keys is treated as non-existent (fail closed).
+    """
+    if not connection_name:
+        return False
+    settings = get_qsettings()
+    settings.beginGroup("connections")
+    try:
+        exists = connection_name in settings.childGroups()
+    finally:
+        settings.endGroup()
+    return exists
 
 
 def set_connection_settings(connection_settings: dict) -> None:
@@ -248,7 +300,16 @@ def on_handle_error(title: str, message: str) -> None:
     Returns:
         None
     """
-    QMessageBox.critical(None, title, message, QMessageBox.StandardButton.Ok)
+    # Force PlainText: Snowflake / catalog error strings may reflect untrusted
+    # identifiers (CWE-116). AutoText would render embedded HTML/UNC payloads.
+    from qgis.PyQt.QtCore import Qt
+
+    msg_box = QMessageBox(None)
+    msg_box.setIcon(QMessageBox.Icon.Critical)
+    msg_box.setWindowTitle(title)
+    msg_box.setTextFormat(Qt.TextFormat.PlainText)
+    msg_box.setText(message)
+    msg_box.exec()
 
 
 def on_handle_warning(title: str, message: str) -> None:
@@ -262,7 +323,14 @@ def on_handle_warning(title: str, message: str) -> None:
     Returns:
         None
     """
-    QMessageBox.warning(None, title, message, QMessageBox.StandardButton.Ok)
+    from qgis.PyQt.QtCore import Qt
+
+    msg_box = QMessageBox(None)
+    msg_box.setIcon(QMessageBox.Icon.Warning)
+    msg_box.setWindowTitle(title)
+    msg_box.setTextFormat(Qt.TextFormat.PlainText)
+    msg_box.setText(message)
+    msg_box.exec()
 
 
 def check_package_installed(package_name) -> bool:
