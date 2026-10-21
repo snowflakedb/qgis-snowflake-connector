@@ -4,7 +4,7 @@ from typing import Dict
 from qgis.PyQt.QtCore import QSettings
 import os
 from qgis.PyQt.QtWidgets import QMessageBox
-from qgis.core import QgsApplication, QgsAuthMethodConfig
+from qgis.core import Qgis, QgsApplication, QgsAuthMethodConfig, QgsMessageLog
 
 
 def add_task_to_running_queue(task_name: str, status: str) -> None:
@@ -205,8 +205,12 @@ def remove_connection(settings: QSettings, connection_name: str) -> None:
         for config_id in (layer_authcfg, credential_config_id):
             if config_id:
                 auth_manager.removeAuthenticationConfig(config_id)
-    except Exception:
-        pass
+    except Exception as e:
+        QgsMessageLog.logMessage(
+            f"Failed to remove auth config for connection {connection_name}: {e}",
+            "Snowflake Plugin",
+            Qgis.MessageLevel.Warning,
+        )
 
     # Deleting settings alone left the keep-alive Snowflake session cached in
     # SFConnectionManager. Purge it immediately so a surviving project handle
@@ -215,8 +219,12 @@ def remove_connection(settings: QSettings, connection_name: str) -> None:
         from ..managers.sf_connection_manager import SFConnectionManager
 
         SFConnectionManager.get_instance().purge_connection(connection_name)
-    except Exception:
-        pass
+    except Exception as e:
+        QgsMessageLog.logMessage(
+            f"Failed to purge cached session for connection {connection_name}: {e}",
+            "Snowflake Plugin",
+            Qgis.MessageLevel.Warning,
+        )
 
 
 def connection_settings_exist(connection_name: str) -> bool:

@@ -7,7 +7,7 @@ name=Snowflake Connector for QGIS
 qgisMinimumVersion=3.34.1
 qgisMaximumVersion=4.99
 description=This package includes the Snowflake Connector for QGIS.
-version=1.0.26
+version=1.0.27
 author=Snowflake Inc.
 email=erick.cuberojimenez@snowflake.com
 
@@ -20,7 +20,14 @@ repository=https://github.com/snowflakedb/qgis-snowflake-connector/
 # Recommended items:
 
 hasProcessingProvider=yes
-changelog=1.0.26 - Fixes from end-to-end testing:
+changelog=1.0.27 - Security-scan fix: replace the three remaining silent
+ best-effort try/except/pass blocks (remove_connection's auth-config removal
+ and cached-session purge in helpers/utils.py, and the connection close in
+ SFConnectionManager.purge_connection) with QgsMessageLog warning diagnostics,
+ so the Python security scanner's "Try, Except, Pass" (bandit B110) findings
+ are resolved without suppressions and cleanup failures are no longer silent.
+ No user-visible behaviour change.
+ 1.0.26 - Fixes from end-to-end testing:
  * Filtering/subset-querying a layer by its primary-key column no longer fails
    with "ambiguous column name": the feature iterator was projecting the
    primary key twice (once in the field list and again as a trailing column).

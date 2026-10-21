@@ -35,6 +35,10 @@ def _load_helpers_utils(testcase):
     core = types.ModuleType("qgis.core")
     core.QgsApplication = type("QgsApplication", (), {})
     core.QgsAuthMethodConfig = type("QgsAuthMethodConfig", (), {})
+    core.QgsMessageLog = type(
+        "QgsMessageLog", (), {"logMessage": staticmethod(lambda *a, **k: None)}
+    )
+    core.Qgis = type("Qgis", (), {"MessageLevel": type("MessageLevel", (), {"Warning": 1})})
     qgis.core = core
     pyqt = types.ModuleType("qgis.PyQt")
     qtcore = types.ModuleType("qgis.PyQt.QtCore")
@@ -3003,6 +3007,30 @@ class TestDeletedConnectionSessionExpiration(unittest.TestCase):
         self.assertEqual(live.cursor_calls, 1)
         self.assertFalse(live.closed)
         self.assertIn("live_conn", mgr.opened_connections)
+
+    class _RaisingCloseConn:
+        def close(self):
+            raise RuntimeError("close failed")
+
+    def test_purge_connection_drops_state_when_close_raises(self):
+        """purge_connection is best-effort: a failing close() must not
+        propagate and must still drop the cached session and per-session
+        state (CWE-613)."""
+        mod = _load_connection_manager(self, present_connections=set())
+        mgr = mod.SFConnectionManager.get_instance()
+        mgr.opened_connections = {}
+        mgr._active_schemas = {}
+        mgr._active_query_tags = {}
+
+        mgr.opened_connections["deleted_conn"] = self._RaisingCloseConn()
+        mgr._active_schemas["deleted_conn"] = "PUBLIC"
+        mgr._active_query_tags["deleted_conn"] = "tag"
+
+        mgr.purge_connection("deleted_conn")
+
+        self.assertNotIn("deleted_conn", mgr.opened_connections)
+        self.assertNotIn("deleted_conn", mgr._active_schemas)
+        self.assertNotIn("deleted_conn", mgr._active_query_tags)
 
     def test_get_connection_source_checks_settings_existence(self):
         content = (ROOT / "managers" / "sf_connection_manager.py").read_text(

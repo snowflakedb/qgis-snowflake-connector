@@ -183,8 +183,12 @@ class SFConnectionManager:
         if connection is not None:
             try:
                 connection.close()
-            except Exception:
-                pass
+            except Exception as e:
+                QgsMessageLog.logMessage(
+                    f"Failed to close cached Snowflake connection {connection_name}: {e}",
+                    "Snowflake Plugin",
+                    Qgis.MessageLevel.Warning,
+                )
         self._active_schemas.pop(connection_name, None)
         self._active_query_tags.pop(connection_name, None)
 
