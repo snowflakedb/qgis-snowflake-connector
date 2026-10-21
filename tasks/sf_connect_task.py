@@ -14,20 +14,24 @@ from qgis.PyQt.QtGui import QStandardItem
 
 class SFConnectTask(QgsTask):
     on_handle_error = pyqtSignal(str, str)
-    on_data_ready = pyqtSignal(list)
+    # connection_name, catalog_generation, rows — generation lets the UI discard
+    # stale completions after the user switches connection (SNOW-4134147).
+    on_data_ready = pyqtSignal(str, int, list)
 
-    def __init__(self, connection_name: str) -> None:
+    def __init__(self, connection_name: str, catalog_generation: int = 0) -> None:
         """
         Initializes the SFConnectTask object.
 
         Args:
             connection_name (str): The name of the Snowflake connection.
+            catalog_generation (int): Widget-side generation token used to
+                discard stale catalog responses after a connection switch.
 
         Raises:
             Exception: If the initialization fails.
         """
         try:
-            super().__init__("Snowflake Connection Task", QgsTask.CanCancel)
+            super().__init__("Snowflake Connection Task", QgsTask.Flag.CanCancel)
             self._run_thread_id: typing.Optional[int] = None
             self.settings = get_qsettings()
             self.auth_information = get_authentification_information(
@@ -41,6 +45,7 @@ class SFConnectTask(QgsTask):
             ORDER BY TABLE_CATALOG, TABLE_SCHEMA, TABLE_NAME, COLUMN_NAME, DATA_TYPE
             """  # nosec B608 - value escaped via quote_literal
             self.connection_name = connection_name
+            self.catalog_generation = catalog_generation
         except Exception as e:
             self.on_handle_error.emit(
                 "SFConnectTask init failed",
@@ -128,4 +133,6 @@ class SFConnectTask(QgsTask):
             None
         """
         if result:
-            self.on_data_ready.emit(self.rows_items)
+            self.on_data_ready.emit(
+                self.connection_name, self.catalog_generation, self.rows_items
+            )

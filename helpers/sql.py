@@ -34,6 +34,30 @@ def quote_identifier(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
 
+def identifiers_equal(left: str, right: str) -> bool:
+    """Return True only when two Snowflake column identifiers denote the SAME
+    column, comparing case-sensitively.
+
+    Snowflake identifiers are case-sensitive once resolved: an unquoted name
+    such as ``ID`` (which folds to upper case) and a double-quoted name such as
+    ``"id"`` (which keeps its lower case) are two DISTINCT columns. Comparing
+    them after a blanket ``.upper()`` fold collapses those separate identities
+    into one. That collapse is what let a malicious ``.qgs``/``.qgz`` project
+    point ``primary_key=ID`` at a non-unique column that merely case-collides
+    with a table's real quoted ``"id"`` key, skip the uniqueness check, and turn
+    one QGIS edit into silent mass UPDATE/DELETE (SNOW-4134145 / CWE-178).
+
+    Both arguments are exact catalog column names -- as returned by
+    ``SHOW PRIMARY KEYS`` / ``INFORMATION_SCHEMA.COLUMNS`` and as persisted
+    verbatim in the datasource URI -- so an exact, case-sensitive comparison is
+    the correct identity test. Callers must fall through to an empirical
+    duplicate scan whenever this returns False rather than assuming uniqueness.
+    """
+    if left is None or right is None:
+        return False
+    return str(left) == str(right)
+
+
 def quote_literal(value: str) -> str:
     """Escape a string literal for use in SQL WHERE/ILIKE clauses.
 
@@ -68,6 +92,30 @@ _SQL_STATEMENT_BREAKERS = re.compile(
     r"--|/\*|\*/|;|\bUNION\b|\bINTERSECT\b|\bEXCEPT\b|\bMINUS\b",
     re.IGNORECASE,
 )
+
+_READ_ONLY_SQL_START = re.compile(
+    r"^\s*(WITH|SELECT|SHOW|DESCRIBE|DESC)\b",
+    re.IGNORECASE,
+)
+
+_FORBIDDEN_SQL_VERBS = re.compile(
+    r"\b(INSERT|UPDATE|DELETE|MERGE|CREATE|DROP|ALTER|TRUNCATE|COPY|"
+    r"GRANT|REVOKE|CALL|EXECUTE|PUT|REMOVE|UNDROP)\b",
+    re.IGNORECASE,
+)
+
+
+def sql_statement_is_read_only(sql: str) -> bool:
+    """Return True when ``sql`` is a single read-only Snowflake statement.
+
+    Custom SQL query layers embedded in project files are expected to be
+    SELECT-style reads. Anything else is rejected before execution.
+    """
+    if not sql or predicate_has_statement_breakers(sql):
+        return False
+    if not _READ_ONLY_SQL_START.match(sql):
+        return False
+    return _FORBIDDEN_SQL_VERBS.search(sql) is None
 
 
 def predicate_has_statement_breakers(predicate: str) -> bool:

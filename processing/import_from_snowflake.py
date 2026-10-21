@@ -24,23 +24,23 @@ _IMAGES_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "ui", "im
 
 
 _GEO_TYPE_TO_WKB = {
-    "Point": QgsWkbTypes.Point,
-    "MultiPoint": QgsWkbTypes.MultiPoint,
-    "LineString": QgsWkbTypes.LineString,
-    "MultiLineString": QgsWkbTypes.MultiLineString,
-    "Polygon": QgsWkbTypes.Polygon,
-    "MultiPolygon": QgsWkbTypes.MultiPolygon,
-    "GeometryCollection": QgsWkbTypes.GeometryCollection,
+    "Point": QgsWkbTypes.Type.Point,
+    "MultiPoint": QgsWkbTypes.Type.MultiPoint,
+    "LineString": QgsWkbTypes.Type.LineString,
+    "MultiLineString": QgsWkbTypes.Type.MultiLineString,
+    "Polygon": QgsWkbTypes.Type.Polygon,
+    "MultiPolygon": QgsWkbTypes.Type.MultiPolygon,
+    "GeometryCollection": QgsWkbTypes.Type.GeometryCollection,
 }
 
 
 def _pick_wkb_type(geo_types):
     """Choose a WKB type that can hold all detected source geometry types."""
     if not geo_types:
-        return QgsWkbTypes.Unknown
+        return QgsWkbTypes.Type.Unknown
     unique = list(dict.fromkeys(geo_types))
     if len(unique) == 1:
-        return _GEO_TYPE_TO_WKB.get(unique[0], QgsWkbTypes.Unknown)
+        return _GEO_TYPE_TO_WKB.get(unique[0], QgsWkbTypes.Type.Unknown)
     categories = set()
     for t in unique:
         if "Point" in t:
@@ -52,12 +52,12 @@ def _pick_wkb_type(geo_types):
         else:
             categories.add("other")
     if categories == {"point"}:
-        return QgsWkbTypes.MultiPoint
+        return QgsWkbTypes.Type.MultiPoint
     if categories == {"line"}:
-        return QgsWkbTypes.MultiLineString
+        return QgsWkbTypes.Type.MultiLineString
     if categories == {"polygon"}:
-        return QgsWkbTypes.MultiPolygon
-    return QgsWkbTypes.GeometryCollection
+        return QgsWkbTypes.Type.MultiPolygon
+    return QgsWkbTypes.Type.GeometryCollection
 
 
 class ImportFromSnowflakeAlgorithm(QgsProcessingAlgorithm):
@@ -116,7 +116,7 @@ class ImportFromSnowflakeAlgorithm(QgsProcessingAlgorithm):
         ))
         self.addParameter(QgsProcessingParameterNumber(
             self.LIMIT, self.tr("Row limit (0 = no limit)"),
-            type=QgsProcessingParameterNumber.Integer,
+            type=QgsProcessingParameterNumber.Type.Integer,
             defaultValue=50000, minValue=0,
         ))
         self.addParameter(QgsProcessingParameterFeatureSink(

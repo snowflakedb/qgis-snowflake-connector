@@ -43,7 +43,7 @@ class SFConvertSQLQueryToLayerTask(QgsTask):
             self._run_thread_id: typing.Optional[int] = None
             super().__init__(
                 f"Snowflake convert query to layer: {self.query}",
-                QgsTask.CanCancel,
+                QgsTask.Flag.CanCancel,
             )
         except Exception as e:
             self.on_handle_error.emit(
