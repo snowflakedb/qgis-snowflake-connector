@@ -7,7 +7,7 @@ name=Snowflake Connector for QGIS
 qgisMinimumVersion=3.34.1
 qgisMaximumVersion=4.99
 description=This package includes the Snowflake Connector for QGIS.
-version=1.0.27
+version=1.0.28
 author=Snowflake Inc.
 email=erick.cuberojimenez@snowflake.com
 
@@ -20,7 +20,13 @@ repository=https://github.com/snowflakedb/qgis-snowflake-connector/
 # Recommended items:
 
 hasProcessingProvider=yes
-changelog=1.0.27 - Security-scan fix: replace the three remaining silent
+changelog=1.0.28 - Packaging re-release of 1.0.27: ship the plugin as a
+ properly packaged ZIP whose top-level folder is "qgis-snowflake-connector"
+ (no version suffix), so installing via Plugins > Install from ZIP no longer
+ fails with "ModuleNotFoundError: No module named 'qgis-snowflake-connector-1'"
+ that occurs when QGIS is pointed at GitHub's auto-generated source archive.
+ No functional code change since 1.0.27.
+ 1.0.27 - Security-scan fix: replace the three remaining silent
  best-effort try/except/pass blocks (remove_connection's auth-config removal
  and cached-session purge in helpers/utils.py, and the connection close in
  SFConnectionManager.purge_connection) with QgsMessageLog warning diagnostics,
