@@ -152,7 +152,8 @@ class TestToolbarHelpers(unittest.TestCase):
         self.assertIn("Reload from Snowflake", plugin)
         self.assertIn("Toggle map-extent loading", plugin)
         self.assertIn("Ask Snowflake (Cortex)...", plugin)
-        self.assertIn("Describe map (Cortex)...", plugin)
+        self.assertIn("Map brief (Cortex)...", plugin)
+        self.assertIn("on_map_brief", plugin)
         self.assertIn("on_reload_from_snowflake", plugin)
         self.assertIn("toolbar.deleteLater", plugin)
 
@@ -218,8 +219,26 @@ class TestCortexSqlHelpers(unittest.TestCase):
         self.assertIn("sql_statement_is_read_only", _read("dialogs/sf_ask_dialog.py"))
 
 
-class TestDescribeMapHelpers(unittest.TestCase):
-    """Map description helpers and dialog wiring."""
+class TestMapBriefHelpers(unittest.TestCase):
+    """Map brief helpers, section parsing, staging, and dialog wiring."""
+
+    def test_assess_view_warnings(self):
+        from helpers.cortex import assess_view
+
+        self.assertEqual(
+            assess_view(0, False, False),
+            ["No visible layers on the map canvas."],
+        )
+        warnings = assess_view(2, False, True)
+        self.assertIn(
+            "No visible layer extent intersects the current map view.",
+            warnings,
+        )
+        self.assertIn(
+            "The rendered map image looks nearly uniform (possibly empty).",
+            warnings,
+        )
+        self.assertEqual(assess_view(1, True, False), [])
 
     def test_summarize_renderer_graduated(self):
         from helpers.cortex import summarize_renderer
@@ -246,30 +265,169 @@ class TestDescribeMapHelpers(unittest.TestCase):
         self.assertIn("field=CRASHES", summary)
         self.assertIn("0-10", summary)
 
-    def test_build_map_context_truncates(self):
-        from helpers.cortex import build_map_context
+    def test_layer_context_budget_omits_lower_layers(self):
+        from helpers.cortex import build_map_context, format_layer_block
 
+        blocks = []
+        for idx in range(8):
+            blocks.append(
+                format_layer_block(
+                    {
+                        "name": f"layer_{idx}",
+                        "geometry_kind": "points",
+                        "draw_order": idx,
+                        "fields": ["a", "b", "c"],
+                        "snowflake_table": f"PUBLIC.T{idx}",
+                        "extent_mode": idx == 0,
+                    }
+                )
+            )
         text = build_map_context(
             extent_wkt="POLYGON((0 0,1 0,1 1,0 1,0 0))",
             scale=10000,
             crs_authid="EPSG:4326",
-            layer_summaries=["layer " + ("x" * 200)] * 50,
-            max_chars=500,
+            layer_blocks=blocks,
+            max_chars=450,
         )
-        self.assertLessEqual(len(text), 500)
-        self.assertIn("[truncated]", text)
+        self.assertIn("layer_0", text)
+        self.assertIn("map_extent_loading: on", text)
+        self.assertIn("lower layers omitted", text)
+        self.assertNotIn("[truncated]", text)
 
-    def test_describe_dialog_and_task_exist(self):
-        dialog = _read("dialogs/sf_describe_map_dialog.py")
-        task = _read("tasks/sf_describe_map_task.py")
-        self.assertIn("class SFDescribeMapDialog", dialog)
-        self.assertIn("CREATE TEMPORARY STAGE IF NOT EXISTS", task)
-        self.assertIn("SNOWFLAKE_SSE", task)
+    def test_split_brief_sections_variants(self):
+        from helpers.cortex import BRIEF_SECTIONS, split_brief_sections
+
+        ordered = "\n".join(
+            f"## {title}\nBody for {title}" for title in BRIEF_SECTIONS
+        )
+        sections = split_brief_sections(ordered)
+        for title in BRIEF_SECTIONS:
+            self.assertIn(f"Body for {title}", sections[title])
+
+        shuffled = (
+            "## Suggested next steps\nDo X\n"
+            "**Seen in the image**\nDots\n"
+            "### From layer settings\nRoads\n"
+            "Not determinable from this view:\nUnknown\n"
+        )
+        sections = split_brief_sections(shuffled)
+        self.assertIn("Do X", sections["Suggested next steps"])
+        self.assertIn("Dots", sections["Seen in the image"])
+        self.assertIn("Roads", sections["From layer settings"])
+        self.assertIn("Unknown", sections["Not determinable from this view"])
+
+        partial = "## Seen in the image\nOnly this\n"
+        sections = split_brief_sections(partial)
+        self.assertEqual(sections["Seen in the image"], "Only this")
+        self.assertEqual(sections["Suggested next steps"], "")
+
+    def test_build_brief_prompt_contains_headings_and_warnings(self):
+        from helpers.cortex import BRIEF_SECTIONS, build_brief_prompt
+
+        prompt = build_brief_prompt(
+            "road safety",
+            "CRS: EPSG:4326",
+            warnings=["No visible layers on the map canvas."],
+        )
+        for title in BRIEF_SECTIONS:
+            self.assertIn(title, prompt)
+        self.assertIn("Automatic checks", prompt)
+        self.assertIn("No visible layers", prompt)
+        self.assertIn("road safety", prompt)
+
+    def test_project_notes_and_label_text(self):
+        from datetime import datetime, timezone
+
+        from helpers.cortex import (
+            format_brief_label_text,
+            format_project_notes_block,
+        )
+
+        sections = {
+            "Seen in the image": "Dots",
+            "From layer settings": "Roads",
+            "Not determinable from this view": "",
+            "Suggested next steps": "Zoom in",
+        }
+        label = format_brief_label_text(sections)
+        self.assertIn("Seen in the image\nDots", label)
+        self.assertIn("Suggested next steps\nZoom in", label)
+        notes = format_project_notes_block(
+            sections,
+            when=datetime(2026, 3, 13, 12, 0, tzinfo=timezone.utc),
+        )
+        self.assertTrue(notes.startswith("Map brief (2026-03-13 12:00 UTC)"))
+        self.assertIn("Dots", notes)
+
+    def test_map_image_session_puts_once(self):
+        import tempfile
+
+        from helpers.map_stage import MapImageSession
+
+        class _Cursor:
+            def close(self):
+                return None
+
+        class _FakeManager:
+            def __init__(self):
+                self.queries = []
+
+            def execute_query(self, connection_name, query, **kwargs):
+                self.queries.append(query)
+                return _Cursor()
+
+        fd, path = tempfile.mkstemp(suffix=".png")
+        os.close(fd)
+        try:
+            manager = _FakeManager()
+            session = MapImageSession(
+                connection_name="c",
+                database="DB",
+                schema="PUBLIC",
+                connection_manager=manager,
+            )
+            session.set_local_png(path)
+            session.ensure_staged()
+            session.ensure_staged()
+            session.ensure_staged()
+            puts = [q for q in manager.queries if q.startswith("PUT ")]
+            creates = [
+                q for q in manager.queries if "CREATE TEMPORARY STAGE" in q
+            ]
+            self.assertEqual(len(puts), 1)
+            self.assertEqual(len(creates), 1)
+            session.release()
+            removes = [q for q in manager.queries if q.startswith("REMOVE ")]
+            self.assertEqual(len(removes), 1)
+            # Second release should not REMOVE again.
+            session.release()
+            removes = [q for q in manager.queries if q.startswith("REMOVE ")]
+            self.assertEqual(len(removes), 1)
+        finally:
+            if os.path.isfile(path):
+                os.remove(path)
+
+    def test_map_brief_task_does_not_remove(self):
+        task = _read("tasks/sf_map_brief_task.py")
+        self.assertIn("class SFMapBriefTask", task)
         self.assertIn("TO_FILE", task)
-        self.assertIn("REMOVE", task)
+        self.assertNotIn("REMOVE", task)
+        self.assertIn("ensure_staged", task)
+
+    def test_map_brief_dialog_and_capture_exist(self):
+        dialog = _read("dialogs/sf_map_brief_dialog.py")
+        self.assertIn("class SFMapBriefDialog", dialog)
+        self.assertIn("Ask about this view", dialog)
+        self.assertIn("Insert into print layout", dialog)
+        self.assertIn("Save to project notes", dialog)
+        self.assertNotIn("Save...", dialog)
         capture = _read("helpers/map_capture.py")
         self.assertIn("def render_canvas_png", capture)
         self.assertIn("def build_canvas_map_context", capture)
+        self.assertIn("def collect_view_warnings", capture)
+        stage = _read("helpers/map_stage.py")
+        self.assertIn("class MapImageSession", stage)
+        self.assertIn("SNOWFLAKE_SSE", stage)
 
 
 if __name__ == "__main__":

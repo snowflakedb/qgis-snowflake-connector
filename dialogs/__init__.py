@@ -4,7 +4,7 @@ from .sf_new_schema_dialog import SFNewSchemaDialog
 from .sf_new_table_dialog import SFNewTableDialog
 from .sf_sql_query_dialog import SFSQLQueryDialog
 from .sf_ask_dialog import SFAskDialog
-from .sf_describe_map_dialog import SFDescribeMapDialog
+from .sf_map_brief_dialog import SFMapBriefDialog
 
 __all__ = [
     "SFConnectionStringDialog",
@@ -13,5 +13,5 @@ __all__ = [
     "SFNewTableDialog",
     "SFSQLQueryDialog",
     "SFAskDialog",
-    "SFDescribeMapDialog",
+    "SFMapBriefDialog",
 ]

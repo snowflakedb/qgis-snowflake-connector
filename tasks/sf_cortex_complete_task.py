@@ -84,7 +84,7 @@ class SFCortexCompleteTask(QgsTask):
             upper = message.upper()
             if "CREATE STAGE" in upper or "INSUFFICIENT PRIVILEGES" in upper:
                 hint = (
-                    "\n\nHint: Describe map needs CREATE STAGE on the selected "
+                    "\n\nHint: Map brief needs CREATE STAGE on the selected "
                     "schema (temporary SSE stage for the canvas image)."
                 )
             elif "UNKNOWN_MODEL" in upper or "MODEL" in upper and "NOT" in upper:

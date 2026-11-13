@@ -238,7 +238,7 @@ class QGISSnowflakeConnectorPlugin(object):
             ("Reload from Snowflake", self.on_reload_from_snowflake),
             ("Toggle map-extent loading", self.on_toggle_extent_mode),
             ("Ask Snowflake (Cortex)...", self.on_ask_snowflake),
-            ("Describe map (Cortex)...", self.on_describe_map),
+            ("Map brief (Cortex)...", self.on_map_brief),
         ]
         for title, slot in action_specs:
             action = QAction(QIcon(_ICON_PATH), title, self.iface.mainWindow())
@@ -338,25 +338,25 @@ class QGISSnowflakeConnectorPlugin(object):
         )
         dialog.exec()
 
-    def on_describe_map(self):
+    def on_map_brief(self):
         try:
-            from .dialogs.sf_describe_map_dialog import SFDescribeMapDialog
+            from .dialogs.sf_map_brief_dialog import SFMapBriefDialog
         except ImportError:
             QMessageBox.information(
                 self.iface.mainWindow() if self.iface else None,
-                "Describe map (Cortex)",
-                "The Describe map dialog is not available in this build.",
+                "Map brief (Cortex)",
+                "The Map brief dialog is not available in this build.",
             )
             return
         context = self._context_for_dialogs()
         if not context.get("connection_name"):
             QMessageBox.information(
                 self.iface.mainWindow() if self.iface else None,
-                "Describe map (Cortex)",
+                "Map brief (Cortex)",
                 "Create a Snowflake connection first (Layer > Data Source Manager > Snowflake).",
             )
             return
-        dialog = SFDescribeMapDialog(
+        dialog = SFMapBriefDialog(
             context_information=context,
             iface=self.iface,
             parent=self.iface.mainWindow() if self.iface else None,

@@ -1315,7 +1315,7 @@ class TestUIBoundary(unittest.TestCase):
             "__init__.py",
             "sf_spatial_filter_dialog.py",
             "sf_ask_dialog.py",
-            "sf_describe_map_dialog.py",
+            "sf_map_brief_dialog.py",
         }
         for py_file in sorted(dialogs_dir.glob("*.py")):
             if py_file.name in skip:

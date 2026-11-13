@@ -38,15 +38,17 @@ helpers/
   wrapper.py      # parse_uri (delegates to provider metadata)
   messages.py     # UI message boxes
   toolbar.py      # Toolbar URI helpers (extent_mode toggle)
-  cortex.py       # Cortex prompt builders / SQL extract / renderer summary
-  map_capture.py  # Canvas PNG render + map context for Describe map
+  cortex.py       # Cortex prompt builders / SQL extract / Map brief sections
+  map_capture.py  # Canvas PNG render + Map brief layer context / view checks
+  map_stage.py    # Session-scoped temp SSE stage for Map brief images
+  map_outputs.py  # Print layout label + project notes outputs
 
 dialogs/
   sf_connection_string_dialog.py     # Connection settings (auth, key pair, SSO)
   sf_data_source_manager_widget.py   # Data Source Manager tab
   sf_sql_query_dialog.py             # SQL query execution dialog
   sf_ask_dialog.py                   # Ask Snowflake (Cortex) question -> SQL
-  sf_describe_map_dialog.py          # Describe map (Cortex)
+  sf_map_brief_dialog.py             # Map brief (Cortex)
   sf_new_table_dialog.py / sf_new_schema_dialog.py
 
 tasks/
@@ -55,7 +57,7 @@ tasks/
   sf_convert_sql_query_to_layer_task.py
   sf_execute_sql_query_task.py
   sf_cortex_complete_task.py         # AI_COMPLETE (text)
-  sf_describe_map_task.py            # Stage PUT + AI_COMPLETE(TO_FILE)
+  sf_map_brief_task.py               # AI_COMPLETE(TO_FILE) against MapImageSession
 
 ui/    # Generated PyQt .py/.ui files (do NOT hand-edit .py files)
 test/  # Regression tests (see testing section below)

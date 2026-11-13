@@ -38,7 +38,7 @@ After the plugin loads, a **Snowflake** toolbar (and Plugins → Snowflake menu)
 - **Reload from Snowflake** — call `reloadData()` on selected Snowflake layers.
 - **Toggle map-extent loading** — add or remove `extent_mode=1` on selected Snowflake layers.
 - **Ask Snowflake (Cortex)…** — draft a read-only SELECT from a natural-language question.
-- **Describe map (Cortex)…** — send the current map image plus legend context to a multimodal Cortex model.
+- **Map brief (Cortex)…** — write a four-section brief of the current map view with a multimodal Cortex model.
 
 ## Map-extent loading (#106)
 
@@ -54,10 +54,12 @@ Both Cortex actions use `AI_COMPLETE` on your existing Snowflake connection.
 
 **Ask Snowflake** needs Cortex access and a text model available in your account/region (default `llama3.1-70b`). Generated SQL must pass the plugin’s read-only check before it can open in the SQL editor.
 
-**Describe map** needs:
+**Map brief** needs:
 
 - Cortex access to a multimodal model (default `claude-3-5-sonnet`)
-- `CREATE STAGE` on the selected schema (the plugin creates a temporary SSE-encrypted stage, PUTs the canvas PNG, calls `AI_COMPLETE` with `TO_FILE`, then REMOVEs the file)
+- `CREATE STAGE` on the selected schema (the plugin creates a temporary SSE-encrypted stage, PUTs the canvas PNG once per dialog session, calls `AI_COMPLETE` with `TO_FILE`, and REMOVEs the file when the dialog closes)
+
+Before calling Cortex, the dialog runs local checks (no visible layers, layers off the current extent, nearly blank image) and shows warnings. The model returns four fixed sections: Seen in the image, From layer settings, Not determinable from this view, and Suggested next steps. You can ask follow-up questions about the same captured view, re-capture the canvas, insert the brief into a print layout label, or append it to the project notes (metadata abstract).
 
 ## Support
 If you found bugs or have suggestions for improving the plugin, please [submit](https://github.com/snowflakedb/qgis-snowflake-connector/issues) the issue or contribute by creating a pull request.
