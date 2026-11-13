@@ -109,7 +109,7 @@ class SFLocatorFilter(QgsLocatorFilter):
 
             from .helpers.utils import get_auth_information
             from .helpers.sql import quote_literal
-            from .managers.sf_connection_manager import SFConnectionManager
+            from .managers.sf_connection_manager import SFConnectionManager, build_op_tag
             from .tasks.sf_convert_column_to_layer_task import SFConvertColumnToLayerTask
 
             auth = get_auth_information(conn_name)
