@@ -218,7 +218,62 @@ class TestCortexSqlHelpers(unittest.TestCase):
         self.assertIn("sql_statement_is_read_only", _read("dialogs/sf_ask_dialog.py"))
 
 
+class TestDescribeMapHelpers(unittest.TestCase):
+    """Map description helpers and dialog wiring."""
+
+    def test_summarize_renderer_graduated(self):
+        from helpers.cortex import summarize_renderer
+
+        class _Range:
+            def __init__(self, label):
+                self._label = label
+
+            def label(self):
+                return self._label
+
+        class _Renderer:
+            def type(self):
+                return "graduatedSymbol"
+
+            def classAttribute(self):
+                return "CRASHES"
+
+            def ranges(self):
+                return [_Range("0-10"), _Range("10-50")]
+
+        summary = summarize_renderer(_Renderer())
+        self.assertIn("renderer=graduatedSymbol", summary)
+        self.assertIn("field=CRASHES", summary)
+        self.assertIn("0-10", summary)
+
+    def test_build_map_context_truncates(self):
+        from helpers.cortex import build_map_context
+
+        text = build_map_context(
+            extent_wkt="POLYGON((0 0,1 0,1 1,0 1,0 0))",
+            scale=10000,
+            crs_authid="EPSG:4326",
+            layer_summaries=["layer " + ("x" * 200)] * 50,
+            max_chars=500,
+        )
+        self.assertLessEqual(len(text), 500)
+        self.assertIn("[truncated]", text)
+
+    def test_describe_dialog_and_task_exist(self):
+        dialog = _read("dialogs/sf_describe_map_dialog.py")
+        task = _read("tasks/sf_describe_map_task.py")
+        self.assertIn("class SFDescribeMapDialog", dialog)
+        self.assertIn("CREATE TEMPORARY STAGE IF NOT EXISTS", task)
+        self.assertIn("SNOWFLAKE_SSE", task)
+        self.assertIn("TO_FILE", task)
+        self.assertIn("REMOVE", task)
+        capture = _read("helpers/map_capture.py")
+        self.assertIn("def render_canvas_png", capture)
+        self.assertIn("def build_canvas_map_context", capture)
+
+
 if __name__ == "__main__":
     unittest.main()
+
 
 
