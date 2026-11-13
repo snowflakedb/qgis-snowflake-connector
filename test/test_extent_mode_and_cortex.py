@@ -157,6 +157,68 @@ class TestToolbarHelpers(unittest.TestCase):
         self.assertIn("toolbar.deleteLater", plugin)
 
 
+class TestCortexSqlHelpers(unittest.TestCase):
+    """Pure Cortex SQL prompt / extract helpers."""
+
+    def test_build_schema_context(self):
+        from helpers.cortex import build_schema_context
+
+        text = build_schema_context(
+            [
+                ("CITIES", "ID", "NUMBER"),
+                ("CITIES", "GEOM", "GEOGRAPHY"),
+                ("ROADS", "NAME", "TEXT"),
+            ]
+        )
+        self.assertIn("CITIES(ID NUMBER, GEOM GEOGRAPHY)", text)
+        self.assertIn("ROADS(NAME TEXT)", text)
+
+    def test_build_schema_context_respects_max_tables(self):
+        from helpers.cortex import build_schema_context
+
+        rows = [(f"T{i}", "C", "TEXT") for i in range(5)]
+        text = build_schema_context(rows, max_tables=2)
+        self.assertEqual(text.count("("), 2)
+
+    def test_build_sql_prompt_mentions_rules(self):
+        from helpers.cortex import build_sql_prompt
+
+        prompt = build_sql_prompt(
+            "find parks", "PARKS(GEOM GEOGRAPHY)", "DB", "PUBLIC"
+        )
+        self.assertIn("read-only SELECT", prompt)
+        self.assertIn("PARKS(GEOM GEOGRAPHY)", prompt)
+        self.assertIn("find parks", prompt)
+
+    def test_extract_sql_fenced(self):
+        from helpers.cortex import extract_sql
+
+        sql = extract_sql("Sure.\n```sql\nSELECT 1;\n```\nDone.")
+        self.assertEqual(sql, "SELECT 1")
+
+    def test_extract_sql_unfenced(self):
+        from helpers.cortex import extract_sql
+
+        sql = extract_sql("Here you go:\nSELECT * FROM T")
+        self.assertEqual(sql, "SELECT * FROM T")
+
+    def test_extract_sql_keeps_first_statement(self):
+        from helpers.cortex import extract_sql
+
+        sql = extract_sql("SELECT 1; DELETE FROM T;")
+        self.assertEqual(sql, "SELECT 1")
+
+    def test_ask_dialog_and_task_exist(self):
+        self.assertIn("class SFAskDialog", _read("dialogs/sf_ask_dialog.py"))
+        self.assertIn(
+            "class SFCortexCompleteTask",
+            _read("tasks/sf_cortex_complete_task.py"),
+        )
+        self.assertIn("def set_query", _read("dialogs/sf_sql_query_dialog.py"))
+        self.assertIn("sql_statement_is_read_only", _read("dialogs/sf_ask_dialog.py"))
+
+
 if __name__ == "__main__":
     unittest.main()
+
 
