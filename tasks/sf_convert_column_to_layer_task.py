@@ -52,6 +52,7 @@ class SFConvertColumnToLayerTask(QgsTask):
 
             self.path = path
             self._run_thread_id: typing.Optional[int] = None
+            self._pending_layers: typing.List[typing.Tuple[str, str]] = []
             super().__init__(
                 f"Snowflake Add Map Layer From {self.schema}.{self.table}.{self.column}",
                 QgsTask.Flag.CanCancel,
@@ -64,17 +65,18 @@ class SFConvertColumnToLayerTask(QgsTask):
 
     def run(self) -> bool:
         """
-        Executes the task to convert a Snowflake column to a layer.
-
-        Returns:
-            bool: True if the task is executed successfully, False otherwise.
+        Collect layer URIs on the worker thread. Layer objects are created in
+        ``finished()`` on the main thread.
         """
         try:
             self._run_thread_id = threading.get_ident()
+            self._pending_layers = []
             geo_column_type = get_geo_column_type(
                 geo_column_name=self.column,
                 context_information=self.context_information,
             )
+            if self.isCanceled():
+                return False
             srid = (
                 get_srid_from_table_geo_column(
                     geo_column_name=self.column,
@@ -84,6 +86,8 @@ class SFConvertColumnToLayerTask(QgsTask):
                 if geo_column_type == "GEOMETRY"
                 else 4326
             )
+            if self.isCanceled():
+                return False
             geo_type_list = (
                 get_type_from_table_geo_column(
                     geo_column_name=self.column,
@@ -95,6 +99,8 @@ class SFConvertColumnToLayerTask(QgsTask):
             )
 
             for geo_type in geo_type_list:
+                if self.isCanceled():
+                    return False
                 uri = (
                     f"{connection_uri_token(self.connection_name)} sql_query= "
                     f"schema_name={self.schema} "
@@ -119,8 +125,7 @@ class SFConvertColumnToLayerTask(QgsTask):
                     if len(geo_type_list) == 1
                     else f"{self.table}_{geo_type}"
                 )
-                layer = QgsVectorLayer(uri, layer_name, "snowflakedb")
-                QgsProject.instance().addMapLayer(layer)
+                self._pending_layers.append((uri, layer_name))
             return True
         except Exception as e:
             self.on_handle_error.emit(
@@ -139,13 +144,10 @@ class SFConvertColumnToLayerTask(QgsTask):
 
     def finished(self, result: bool) -> None:
         """
-        Callback function called when the task is finished.
-
-        Args:
-            result (bool): The result of the task.
-
-        Returns:
-            None
+        Create and add layers on the main thread.
         """
         if result:
+            for uri, layer_name in getattr(self, "_pending_layers", []):
+                layer = QgsVectorLayer(uri, layer_name, "snowflakedb")
+                QgsProject.instance().addMapLayer(layer)
             self.on_handle_finished.emit(self.path)
