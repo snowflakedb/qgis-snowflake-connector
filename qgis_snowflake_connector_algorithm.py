@@ -572,6 +572,7 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
                 _primary_key,
                 _load_all_rows,
                 _single_geom_layer,
+                _extent_mode,
             ) = parse_uri(provider.dataSourceUri())
         except Exception:
             return False

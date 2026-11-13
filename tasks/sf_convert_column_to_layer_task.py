@@ -22,6 +22,7 @@ class SFConvertColumnToLayerTask(QgsTask):
         context_information: dict,
         path: str,
         load_all_rows: bool = False,
+        extent_mode: bool = False,
     ) -> None:
         """
         Initializes a SFConvertColumnToLayerTask object.
@@ -31,6 +32,8 @@ class SFConvertColumnToLayerTask(QgsTask):
             information_dict (dict): A dictionary containing information about the column, table, schema, and optional column type.
             load_all_rows (bool): If True, the provider will load the full table
                 instead of a random sample when it exceeds the row limit.
+            extent_mode (bool): If True, the layer fetches only features inside
+                the current map extent on each render (#106).
 
         Raises:
             Exception: If initialization fails.
@@ -45,6 +48,7 @@ class SFConvertColumnToLayerTask(QgsTask):
             self.column = context_information["geo_column"]
             self.primary_key = context_information["primary_key"]
             self.load_all_rows = load_all_rows
+            self.extent_mode = extent_mode
 
             self.path = path
             self._run_thread_id: typing.Optional[int] = None
@@ -102,6 +106,8 @@ class SFConvertColumnToLayerTask(QgsTask):
                 )
                 if self.load_all_rows:
                     uri += " load_all_rows=1"
+                if self.extent_mode:
+                    uri += " extent_mode=1"
                 # When the column has a single geometry family the layer covers
                 # every row, so featureCount()/extent() can skip the per-row
                 # geometry-type predicate and use a fast metadata COUNT(*).

@@ -514,71 +514,86 @@ ORDER BY {column_name}"""  # nosec B608 - column_name is a fixed literal; values
                 return True
             if self.item_type == "table" and not self.geom_column:
                 return False
-            schema_data_item = self.parent()
-            if (
-                self.item_type == "table"
-                and self.path() not in schema_data_item._running_tasks
-            ):
-                auth_information = get_auth_information(self.connection_name)
-                context_information = {
-                    "connection_name": self.connection_name,
-                    "database_name": auth_information["database"],
-                    "schema_name": schema_data_item.clean_name,
-                    "table_name": self.clean_name,
-                    "geo_column": self.geom_column,
-                    "geom_type": self.geom_type,
-                }
-
-                limit_size = limit_size_for_table(
-                    context_information=context_information
-                )
-                table_exceeds_size = check_table_exceeds_size(
-                    context_information=context_information,
-                )
-
-                load_all_rows = False
-                if table_exceeds_size:
-                    choice = get_large_dataset_choice(
-                        "SFConvertColumnToLayerTask Dataset is too large",
-                        (
-                            "The dataset is too large. Please consider using "
-                            '"Execute SQL" to limit the result set.\n\n'
-                            f'"Load sample" will load a random sample of {limit_size // 1000} '
-                            "thousand rows.\n"
-                            '"Load all rows" will load the full dataset '
-                            "(this may be slow and memory-intensive)."
-                        ),
-                    )
-                    if choice == LargeDatasetChoice.CANCEL:
-                        return False
-                    load_all_rows = choice == LargeDatasetChoice.LOAD_ALL
-
-                context_information["primary_key"] = prompt_and_get_primary_key(
-                    context_information=context_information, data_type=self.geom_type
-                )
-
-                schema_data_item._running_tasks[self.path()] = True
-                snowflake_covert_column_to_layer_task = SFConvertColumnToLayerTask(
-                    context_information=context_information,
-                    path=self.path(),
-                    load_all_rows=load_all_rows,
-                )
-                snowflake_covert_column_to_layer_task.on_handle_error.connect(
-                    slot=on_handle_error
-                )
-                snowflake_covert_column_to_layer_task.on_handle_warning.connect(
-                    slot=on_handle_warning
-                )
-                snowflake_covert_column_to_layer_task.on_handle_finished.connect(
-                    slot=self.on_handle_finished
-                )
-                QgsApplication.taskManager().addTask(
-                    task=snowflake_covert_column_to_layer_task
-                )
+            if self.item_type == "table":
+                return self._start_add_table_layer(extent_mode=False)
             return True
         except Exception as e:
             print(str(e))
             return False
+
+    def _start_add_table_layer(self, extent_mode: bool = False) -> bool:
+        """Queue SFConvertColumnToLayerTask for this table item.
+
+        Args:
+            extent_mode: When True, the layer URI includes extent_mode=1 so
+                each render fetches only features inside the map extent (#106).
+        """
+        schema_data_item = self.parent()
+        if self.path() in schema_data_item._running_tasks:
+            return True
+
+        auth_information = get_auth_information(self.connection_name)
+        context_information = {
+            "connection_name": self.connection_name,
+            "database_name": auth_information["database"],
+            "schema_name": schema_data_item.clean_name,
+            "table_name": self.clean_name,
+            "geo_column": self.geom_column,
+            "geom_type": self.geom_type,
+        }
+
+        load_all_rows = False
+        # Map-extent loading already caps per-request fetches; skip the
+        # whole-table sample/load-all prompt.
+        if not extent_mode:
+            limit_size = limit_size_for_table(
+                context_information=context_information
+            )
+            table_exceeds_size = check_table_exceeds_size(
+                context_information=context_information,
+            )
+            if table_exceeds_size:
+                choice = get_large_dataset_choice(
+                    "SFConvertColumnToLayerTask Dataset is too large",
+                    (
+                        "The dataset is too large. Please consider using "
+                        '"Execute SQL" to limit the result set.\n\n'
+                        f'"Load sample" will load a random sample of {limit_size // 1000} '
+                        "thousand rows.\n"
+                        '"Load all rows" will load the full dataset '
+                        "(this may be slow and memory-intensive).\n"
+                        'Or right-click the table and choose '
+                        '"Add with map-extent loading".'
+                    ),
+                )
+                if choice == LargeDatasetChoice.CANCEL:
+                    return False
+                load_all_rows = choice == LargeDatasetChoice.LOAD_ALL
+
+        context_information["primary_key"] = prompt_and_get_primary_key(
+            context_information=context_information, data_type=self.geom_type
+        )
+
+        schema_data_item._running_tasks[self.path()] = True
+        snowflake_covert_column_to_layer_task = SFConvertColumnToLayerTask(
+            context_information=context_information,
+            path=self.path(),
+            load_all_rows=load_all_rows,
+            extent_mode=extent_mode,
+        )
+        snowflake_covert_column_to_layer_task.on_handle_error.connect(
+            slot=on_handle_error
+        )
+        snowflake_covert_column_to_layer_task.on_handle_warning.connect(
+            slot=on_handle_warning
+        )
+        snowflake_covert_column_to_layer_task.on_handle_finished.connect(
+            slot=self.on_handle_finished
+        )
+        QgsApplication.taskManager().addTask(
+            task=snowflake_covert_column_to_layer_task
+        )
+        return True
 
     def on_handle_finished(self, path: str) -> None:
         """
@@ -649,6 +664,15 @@ ORDER BY {column_name}"""  # nosec B608 - column_name is a fixed literal; values
                 )
                 action_list.append(self.execute_sql_action)
 
+            if self.item_type == "table" and self.geom_column:
+                self.extent_mode_action = QAction(
+                    "Add with map-extent loading", None
+                )
+                self.extent_mode_action.triggered.connect(
+                    self.on_add_with_extent_mode_triggered
+                )
+                action_list.append(self.extent_mode_action)
+
             if self.item_type == "root":
                 self.new_connection_action = QAction("New Connection", None)
                 self.new_connection_action.triggered.connect(
@@ -662,6 +686,17 @@ ORDER BY {column_name}"""  # nosec B608 - column_name is a fixed literal; values
                 None,
                 "Data Item Actions Creation Error",
                 f"SFDataItem - Data item actions creation failed.\n\nExtended error information:\n{str(e)}",
+            )
+
+    def on_add_with_extent_mode_triggered(self) -> None:
+        """Add this table as a layer that loads features by map extent (#106)."""
+        try:
+            self._start_add_table_layer(extent_mode=True)
+        except Exception as e:
+            QMessageBox.information(
+                None,
+                "Add with map-extent loading failed",
+                f"Could not add the layer.\n\nExtended error information:\n{str(e)}",
             )
 
     def on_execute_sql_action_triggered(self) -> None:

@@ -84,6 +84,11 @@ class SFVectorDataProvider(QgsVectorDataProvider):
         self._feature_count = None
         self.filter_where_clause = None
         self._load_all_rows = False
+        self._extent_mode = False
+        # Last map-extent fetch cache: same render rectangle + filter reuses
+        # the previous result without another warehouse round-trip.
+        self._extent_cache_key = None
+        self._extent_cache_features = []
         # SNOW-3712083: cache for the "is the URI-supplied primary_key actually
         # unique?" check (None = not yet computed).
         self._primary_key_is_valid = None
@@ -100,6 +105,7 @@ class SFVectorDataProvider(QgsVectorDataProvider):
                 self._primary_key,
                 self._load_all_rows,
                 self._single_geom_layer,
+                self._extent_mode,
             ) = parse_uri(uri)
 
         except Exception as e:
@@ -148,7 +154,9 @@ class SFVectorDataProvider(QgsVectorDataProvider):
             # a malicious project file cannot force an unbounded fetch (client
             # OOM + uncapped warehouse spend). There is no table to consult for
             # a cheap ROW_COUNT, so probe the wrapped query directly.
-            if self._load_all_rows:
+            # Map-extent loading skips the probe: each render fetches only the
+            # visible rectangle with a per-request LIMIT (#106).
+            if self._load_all_rows or self._extent_mode:
                 self._is_limited_unordered = False
             else:
                 limit_size = limit_size_for_type(self._geo_column_type)
@@ -170,7 +178,7 @@ class SFVectorDataProvider(QgsVectorDataProvider):
                 )
             else:
                 self._from_clause = quote_identifier(self._table_name)
-            if self._load_all_rows:
+            if self._load_all_rows or self._extent_mode:
                 self._is_limited_unordered = False
             else:
                 limit_size = limit_size_for_type(self._geo_column_type)
@@ -515,6 +523,7 @@ class SFVectorDataProvider(QgsVectorDataProvider):
         "connection_name", "authcfg", "sql_query", "sql", "schema_name",
         "table_name", "srid", "geom_column", "geometry_type",
         "geo_column_type", "primary_key", "load_all_rows",
+        "single_geom_layer", "extent_mode",
     )
 
     @classmethod
@@ -675,6 +684,8 @@ class SFVectorDataProvider(QgsVectorDataProvider):
         self._features_loaded = False
         self._feature_count = None
         self._extent = None
+        self._extent_cache_key = None
+        self._extent_cache_features = []
         self.connect_database()
         # Notify QGIS so the layer-level feature cache (QgsVectorLayerCache)
         # and the attribute table model refresh without requiring the user

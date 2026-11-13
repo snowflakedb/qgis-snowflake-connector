@@ -87,6 +87,12 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
             self._provider._features_loaded = False
             self._provider._features = []
 
+        # Map-extent loading (#106): never use the shared full-layer cache.
+        # Each request streams against the current render rectangle.
+        self._extent_mode = bool(getattr(self._provider, "_extent_mode", False))
+        self._serving_extent_cache = False
+        self._populate_extent_cache = False
+
         # FilterFid/FilterFids cannot be resolved in SQL: feature ids are the
         # 0-based fetch order of the result set (f.setId(self._index)), not the
         # primary key. Capture the requested fids and make sure the in-memory
@@ -101,11 +107,30 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                 if ftype == QgsFeatureRequest.FilterType.FilterFid
                 else list(self._request.filterFids())
             )
-            if not self._provider._features_loaded:
+            if self._extent_mode:
+                # Resolve fids from the last extent-cache snapshot when present.
+                # Without a prior map-extent fetch there is nothing to resolve.
+                self._serving_extent_cache = True
+                self._index = 0
+                return
+            elif not self._provider._features_loaded:
                 for _ in self._provider.getFeatures(QgsFeatureRequest()):
                     pass
 
-        if not self._provider._features_loaded:
+        # Serve a previous map-extent result when the rectangle + filters match.
+        if (
+            self._extent_mode
+            and not filter_rect.isNull()
+            and self._provider._extent_cache_key is not None
+        ):
+            cache_key = self._build_extent_cache_key(filter_rect)
+            if cache_key == self._provider._extent_cache_key:
+                self._serving_extent_cache = True
+                self._index = 0
+                return
+
+        # Shared full-layer cache is only used when map-extent loading is off.
+        if self._extent_mode or not self._provider._features_loaded:
             geom_column = self._provider.get_geometry_column()
 
             # Mapping between the field type and the conversion function
@@ -243,12 +268,22 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
             # later full-extent request to that subset. subsetString() is a
             # stable provider-level filter (reloadData() clears the cache when
             # it changes), so it is intentionally not part of this check.
+            # Map-extent loading never writes the shared cache (#106).
             self._should_cache_features = (
-                not getattr(self._provider, "_load_all_rows", False)
+                not self._extent_mode
+                and not getattr(self._provider, "_load_all_rows", False)
                 and self._target_fids is None
                 and self._expression == ""
                 and filter_geom_clause == ""
             )
+            self._populate_extent_cache = (
+                self._extent_mode and not filter_rect.isNull()
+            )
+            if self._populate_extent_cache:
+                self._provider._extent_cache_key = self._build_extent_cache_key(
+                    filter_rect
+                )
+                self._provider._extent_cache_features = []
 
             # build the complete where clause
             where_clause = ""
@@ -316,7 +351,15 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                 f"{where_clause}"
             )
 
-            if self._provider._is_limited_unordered:
+            if self._extent_mode:
+                # Per-request LIMIT for map-extent loading (#106). With a
+                # rectangle the ST_INTERSECTS pushdown already restricts the
+                # result; without one (attribute table) we still cap the fetch.
+                limit_n = limit_size_for_type(self._provider._geo_column_type)
+                self.final_query = (
+                    f"select * from ({base_query}) LIMIT {int(limit_n)}"  # nosec B608 - base_query uses quoted identifiers; limit_n is an int
+                )
+            elif self._provider._is_limited_unordered:
                 # A7: let Snowflake's TABLESAMPLE do the random-sample work
                 # on the already-filtered set instead of sorting the entire
                 # resultset with ORDER BY RANDOM().
@@ -349,6 +392,23 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
             )
         self._index = 0
 
+    def _build_extent_cache_key(self, filter_rect) -> str:
+        """Stable key for the last map-extent fetch (rect + active filters)."""
+        expression = ""
+        if self._request.filterType() == QgsFeatureRequest.FilterType.FilterExpression:
+            expr = self._request.filterExpression()
+            if expr is not None:
+                expression = expr.expression() or ""
+        subset = self._provider.subsetString() or ""
+        return f"{filter_rect.asWktPolygon()}|{subset}|{expression}"
+
+    def _copy_cached_feature(self, local_feature: QgsFeature, f: QgsFeature) -> None:
+        f.setFields(self._provider.fields())
+        f.setGeometry(local_feature.geometry())
+        f.setId(local_feature.id())
+        f.setAttributes(local_feature.attributes())
+        f.setValid(True)
+
     def fetchFeature(self, f: QgsFeature) -> bool:
         """fetch next feature, return true on success
 
@@ -358,7 +418,29 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
         :rtype: bool
         """
         try:
-            if self._provider._features_loaded:
+            if self._serving_extent_cache:
+                if not self._provider.isValid():
+                    f.setValid(False)
+                    return False
+                features = self._provider._extent_cache_features
+                if self._target_fids is not None:
+                    while self._index < len(self._target_fids):
+                        fid = self._target_fids[self._index]
+                        self._index += 1
+                        if fid < 0 or fid >= len(features):
+                            continue
+                        self._copy_cached_feature(features[fid], f)
+                        return True
+                    f.setValid(False)
+                    return False
+                if self._index < 0 or self._index >= len(features):
+                    f.setValid(False)
+                    return False
+                self._copy_cached_feature(features[self._index], f)
+                self._index += 1
+                return True
+
+            if self._provider._features_loaded and not self._extent_mode:
                 if not self._provider.isValid():
                     f.setValid(False)
                     return False
@@ -383,11 +465,7 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                             and not local_feature.geometry().intersects(filter_rect)
                         ):
                             continue
-                        f.setFields(self._provider.fields())
-                        f.setGeometry(local_feature.geometry())
-                        f.setId(local_feature.id())
-                        f.setAttributes(local_feature.attributes())
-                        f.setValid(True)
+                        self._copy_cached_feature(local_feature, f)
                         return True
                     f.setValid(False)
                     return False
@@ -409,11 +487,7 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                         return False
                     local_feature = features[self._index]
 
-                f.setFields(self._provider.fields())
-                f.setGeometry(local_feature.geometry())
-                f.setId(local_feature.id())
-                f.setAttributes(local_feature.attributes())
-                f.setValid(True)
+                self._copy_cached_feature(local_feature, f)
 
             else:
                 if not self._cursor_batch_rows:
@@ -513,6 +587,8 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                 f.setValid(True)
                 if self._should_cache_features:
                     self._provider._features.append(QgsFeature(f))
+                if getattr(self, "_populate_extent_cache", False):
+                    self._provider._extent_cache_features.append(QgsFeature(f))
 
             self._index += 1
         except Exception as e:
