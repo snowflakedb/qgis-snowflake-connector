@@ -963,15 +963,21 @@ class TestPhase5Hardening(unittest.TestCase):
 
     def test_no_geom_dialog_forces_plain_text(self):
         """SNOW-3712087: the server-controlled table name must be shown as plain
-        text so a <img src=UNC> name cannot trigger an SMB/NTLM leak."""
+        text so a <img src=UNC> name cannot trigger an SMB/NTLM leak.
+
+        Attribute-only tables now load as layers (#105); the failure path still
+        shows the table name and must force PlainText.
+        """
         content = (ROOT / "entities" / "sf_data_item.py").read_text(
             encoding="utf-8"
         )
-        idx = content.index('if self.item_type == "table_no_geom":')
-        block = content[idx:idx + 900]
+        self.assertIn("_start_add_attribute_table_layer", content)
+        idx = content.index("def _start_add_attribute_table_layer")
+        block = content[idx:idx + 4000]
         self.assertIn("setTextFormat(Qt.TextFormat.PlainText)", block)
-        # The vulnerable auto-format static call must be gone from this branch.
+        # The vulnerable auto-format static call must be gone from this path.
         self.assertNotIn("QMessageBox.information(", block)
+        self.assertNotIn("QMessageBox.warning(", block)
 
     def test_dialog_skips_cleartext_password_when_encrypted(self):
         """SNOW-3712079: the dialog must not capture the Basic-tab password when

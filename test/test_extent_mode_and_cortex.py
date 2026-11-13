@@ -108,6 +108,29 @@ class TestExtentModeBrowserAction(unittest.TestCase):
         self.assertIn('uri += " extent_mode=1"', task)
 
 
+class TestAttributeOnlyLayers(unittest.TestCase):
+    """Tables without geometry load as attribute-only layers (#105)."""
+
+    def test_iterator_skips_st_for_no_geometry(self):
+        iterator = _read("providers/sf_feature_iterator.py")
+        self.assertIn("has_geometry = bool(geom_column)", iterator)
+        self.assertIn("Attribute-only table (#105)", iterator)
+
+    def test_base_provider_counts_attribute_rows(self):
+        provider = _read("providers/sf_vector_data_provider.py")
+        # Base provider featureCount no longer hard-codes 0.
+        self.assertIn(
+            "Row count for attribute-only (no geometry) table layers (#105).",
+            provider,
+        )
+
+    def test_browser_loads_attribute_table(self):
+        data_item = _read("entities/sf_data_item.py")
+        self.assertIn("_start_add_attribute_table_layer", data_item)
+        self.assertIn('geom_column= geometry_type= geo_column_type=', data_item)
+        self.assertNotIn("cannot be displayed on the map", data_item)
+
+
 class TestToolbarHelpers(unittest.TestCase):
     """Pure helpers for the Snowflake toolbar."""
 

@@ -218,10 +218,13 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
             if self._provider.subsetString():
                 where_clause_list.append(self._provider.subsetString())
 
+            # Attribute-only tables (#105) have no geometry column.
+            has_geometry = bool(geom_column)
+
             # Apply the geometry filter
-            quoted_geom = quote_identifier(geom_column)
+            quoted_geom = quote_identifier(geom_column) if has_geometry else ""
             filter_geom_clause = ""
-            if not filter_rect.isNull():
+            if has_geometry and not filter_rect.isNull():
                 if self._provider._geo_column_type == "GEOMETRY":
                     filter_geom_clause = (
                         f'ST_INTERSECTS({quoted_geom}, '
@@ -277,7 +280,7 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                 and filter_geom_clause == ""
             )
             self._populate_extent_cache = (
-                self._extent_mode and not filter_rect.isNull()
+                self._extent_mode and has_geometry and not filter_rect.isNull()
             )
             if self._populate_extent_cache:
                 self._provider._extent_cache_key = self._build_extent_cache_key(
@@ -294,14 +297,15 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                         where_clause += f" and {clause}"
 
             self._request_no_geometry = (
-                self._request.flags() & QgsFeatureRequest.Flag.NoGeometry
+                not has_geometry
+                or bool(self._request.flags() & QgsFeatureRequest.Flag.NoGeometry)
             )
 
             # Geometry projection. For H3 (NUMBER/TEXT) the layer renders the
             # cell boundary, so the WKB comes from H3_CELL_TO_BOUNDARY and the
             # raw cell id/value follows it; otherwise it is a single ST_ASWKB.
             geom_select_parts = []
-            if not self._request_no_geometry:
+            if has_geometry and not self._request_no_geometry:
                 if self._provider._geo_column_type == "TEXT":
                     geom_select_parts = [
                         f"ST_ASWKB(H3_CELL_TO_BOUNDARY({quoted_geom}))",
@@ -333,29 +337,39 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                 + index_select_parts
             )
 
-            mapped_type = mapping_multi_single_to_geometry_type.get(
-                self._provider._geometry_type
-            )
+            if has_geometry:
+                mapped_type = mapping_multi_single_to_geometry_type.get(
+                    self._provider._geometry_type
+                )
 
-            filter_geo_type = f"ST_ASGEOJSON({quoted_geom}):type::string IN ({quote_literal(self._provider._geometry_type)}"  # nosec B608 - geometry_type escaped via quote_literal
-            if mapped_type is not None:
-                filter_geo_type += f", {quote_literal(mapped_type)}"
-            filter_geo_type += ")"
-            if self._provider._geo_column_type in ["NUMBER", "TEXT"]:
-                filter_geo_type = f'H3_IS_VALID_CELL({quoted_geom})'
+                filter_geo_type = f"ST_ASGEOJSON({quoted_geom}):type::string IN ({quote_literal(self._provider._geometry_type)}"  # nosec B608 - geometry_type escaped via quote_literal
+                if mapped_type is not None:
+                    filter_geo_type += f", {quote_literal(mapped_type)}"
+                filter_geo_type += ")"
+                if self._provider._geo_column_type in ["NUMBER", "TEXT"]:
+                    filter_geo_type = f'H3_IS_VALID_CELL({quoted_geom})'
 
-            base_query = (
-                "select * from ("  # nosec B608 - from_clause pre-quoted; fragments built from quoted identifiers and validated fragments
-                f"select {inner_select} "
-                f"from {self._provider._from_clause} where {filter_geo_type} {filter_geom_clause}) "
-                f"{where_clause}"
-            )
+                base_query = (
+                    "select * from ("  # nosec B608 - from_clause pre-quoted; fragments built from quoted identifiers and validated fragments
+                    f"select {inner_select} "
+                    f"from {self._provider._from_clause} where {filter_geo_type} {filter_geom_clause}) "
+                    f"{where_clause}"
+                )
+            else:
+                # Attribute-only table (#105): no ST_* projection or type filter.
+                base_query = (
+                    "select * from ("  # nosec B608 - from_clause pre-quoted; attribute names quoted via quote_identifier
+                    f"select {inner_select} "
+                    f"from {self._provider._from_clause}) "
+                    f"{where_clause}"
+                )
 
+            geo_type_for_limit = self._provider._geo_column_type or ""
             if self._extent_mode:
                 # Per-request LIMIT for map-extent loading (#106). With a
                 # rectangle the ST_INTERSECTS pushdown already restricts the
                 # result; without one (attribute table) we still cap the fetch.
-                limit_n = limit_size_for_type(self._provider._geo_column_type)
+                limit_n = limit_size_for_type(geo_type_for_limit)
                 self.final_query = (
                     f"select * from ({base_query}) LIMIT {int(limit_n)}"  # nosec B608 - base_query uses quoted identifiers; limit_n is an int
                 )
@@ -363,7 +377,7 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                 # A7: let Snowflake's TABLESAMPLE do the random-sample work
                 # on the already-filtered set instead of sorting the entire
                 # resultset with ORDER BY RANDOM().
-                sample_n = limit_size_for_type(self._provider._geo_column_type)
+                sample_n = limit_size_for_type(geo_type_for_limit)
                 self.final_query = (
                     f"select * from ({base_query}) SAMPLE ({sample_n} ROWS)"  # nosec B608 - base_query is built from quoted identifiers / validated fragments; sample_n is an int
                 )

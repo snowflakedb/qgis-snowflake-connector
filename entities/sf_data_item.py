@@ -12,6 +12,7 @@ from ..helpers.messages import (
     get_large_dataset_choice,
 )
 from ..helpers.utils import (
+    connection_uri_token,
     decodeUri,
     get_auth_information,
     get_auth_method_config,
@@ -496,22 +497,7 @@ ORDER BY {column_name}"""  # nosec B608 - column_name is a fixed literal; values
         """
         try:
             if self.item_type == "table_no_geom":
-                # SNOW-3712087: the table name is server-controlled and shown on
-                # the first line. Force plain text so Qt::mightBeRichText() can
-                # never switch the label to rich text and auto-load a UNC <img>
-                # (forced SMB auth / NTLM hash leak).
-                msg_box = QMessageBox(None)
-                msg_box.setIcon(QMessageBox.Icon.Information)
-                msg_box.setWindowTitle("No Geometry Column")
-                msg_box.setTextFormat(Qt.TextFormat.PlainText)
-                msg_box.setText(
-                    f"Table '{self.clean_name}' has no geometry column and cannot be displayed on the map.\n\n"
-                    "You can:\n"
-                    "• Use 'Execute SQL' to query this table\n"
-                    "• View/edit attributes via Processing tools"
-                )
-                msg_box.exec()
-                return True
+                return self._start_add_attribute_table_layer()
             if self.item_type == "table" and not self.geom_column:
                 return False
             if self.item_type == "table":
@@ -520,6 +506,75 @@ ORDER BY {column_name}"""  # nosec B608 - column_name is a fixed literal; values
         except Exception as e:
             print(str(e))
             return False
+
+    def _start_add_attribute_table_layer(self) -> bool:
+        """Load a table with no geometry column as an attribute-only layer (#105)."""
+        schema_data_item = self.parent()
+        # table_no_geom items may sit under a "Tables (no geometry)" group.
+        if getattr(schema_data_item, "item_type", None) == "table_group":
+            schema_data_item = schema_data_item.parent()
+        if self.path() in getattr(schema_data_item, "_running_tasks", {}):
+            return True
+
+        auth_information = get_auth_information(self.connection_name)
+        context_information = {
+            "connection_name": self.connection_name,
+            "database_name": auth_information["database"],
+            "schema_name": schema_data_item.clean_name,
+            "table_name": self.clean_name,
+        }
+
+        limit_size = limit_size_for_table(
+            context_information={**context_information, "geom_type": ""}
+        )
+        table_exceeds_size = check_table_exceeds_size(
+            context_information=context_information,
+        )
+        load_all_rows = False
+        if table_exceeds_size:
+            choice = get_large_dataset_choice(
+                "Attribute table is too large",
+                (
+                    "The table is too large. Please consider using "
+                    '"Execute SQL" to limit the result set.\n\n'
+                    f'"Load sample" will load a random sample of {limit_size // 1000} '
+                    "thousand rows.\n"
+                    '"Load all rows" will load the full dataset '
+                    "(this may be slow and memory-intensive)."
+                ),
+            )
+            if choice == LargeDatasetChoice.CANCEL:
+                return False
+            load_all_rows = choice == LargeDatasetChoice.LOAD_ALL
+
+        primary_key = prompt_and_get_primary_key(
+            context_information=context_information, data_type=""
+        )
+
+        uri = (
+            f"{connection_uri_token(self.connection_name)} sql_query= "
+            f"schema_name={schema_data_item.clean_name} "
+            f"table_name={self.clean_name} srid= "
+            f"geom_column= geometry_type= geo_column_type= "
+            f"primary_key={primary_key}"
+        )
+        if load_all_rows:
+            uri += " load_all_rows=1"
+
+        layer = QgsVectorLayer(uri, self.clean_name, "snowflakedb")
+        if not layer.isValid():
+            # SNOW-3712087: table name is server-controlled; force plain text.
+            msg_box = QMessageBox(None)
+            msg_box.setIcon(QMessageBox.Icon.Warning)
+            msg_box.setWindowTitle("Could not load attribute table")
+            msg_box.setTextFormat(Qt.TextFormat.PlainText)
+            msg_box.setText(
+                f"Failed to load table '{self.clean_name}' as a Snowflake layer."
+            )
+            msg_box.exec()
+            return False
+        QgsProject.instance().addMapLayer(layer)
+        return True
 
     def _start_add_table_layer(self, extent_mode: bool = False) -> bool:
         """Queue SFConvertColumnToLayerTask for this table item.

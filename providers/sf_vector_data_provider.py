@@ -895,26 +895,45 @@ class SFVectorDataProvider(QgsVectorDataProvider):
         return True
 
     def extent(self) -> QgsRectangle:
-        """Returns the extent of the layer.
-
-        Currently, this method returns an empty QgsRectangle,
-        indicating that the extent is unknown or not applicable.
-
-        Returns:
-            QgsRectangle: An empty QgsRectangle.
-        """
-        return QgsRectangle()
+        """Attribute-only layers have no spatial extent (#105)."""
+        if self._extent is None:
+            self._extent = QgsRectangle()
+        return self._extent
 
     def featureCount(self) -> int:
-        """
-        Returns the number of features in the layer.
+        """Row count for attribute-only (no geometry) table layers (#105)."""
+        if self._feature_count is not None:
+            return self._feature_count
+        if not self._is_valid or not self._table_name:
+            self._feature_count = 0
+            return self._feature_count
+        if self._is_limited_unordered:
+            self._feature_count = limit_size_for_type(self._geo_column_type or "")
+            return self._feature_count
 
-        In this specific implementation, it always returns 0.
+        cheap = get_cheap_row_count(self._context_information)
+        if cheap is not None and not self.subsetString():
+            self._feature_count = cheap
+            return self._feature_count
 
-        Returns:
-            int: The feature count, which is 0.
-        """
-        return 0
+        where_clause = ""
+        if self.subsetString():
+            where_clause = f" WHERE {self.subsetString()}"  # nosec B608 - subsetString is compiler-validated
+        query = f"SELECT COUNT(*) FROM {self._from_clause}{where_clause}"  # nosec B608 - from_clause pre-quoted
+        cur = self.connection_manager.execute_query(
+            connection_name=self._connection_name,
+            query=query,
+            context_information=self._context_information,
+            op_tag=build_op_tag(
+                "featurecount",
+                connection_name=self._connection_name,
+                schema=self._schema_name,
+                table=self._table_name,
+            ),
+        )
+        self._feature_count = cur.fetchone()[0]
+        cur.close()
+        return self._feature_count
 
 
 class SFGeoVectorDataProvider(SFVectorDataProvider):
