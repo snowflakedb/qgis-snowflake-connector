@@ -286,6 +286,7 @@ class SFVectorDataProvider(QgsVectorDataProvider):
             or self._geo_column_type not in ("GEOGRAPHY", "GEOMETRY")
             or (self._sql_query is not None and self._sql_query != "")
             or self._is_limited_unordered
+            or getattr(self, "_extent_mode", False)
             or not self._validate_primary_key()
         ):
             reasons = []
@@ -299,6 +300,10 @@ class SFVectorDataProvider(QgsVectorDataProvider):
             # stable feature ids, so edits could hit the wrong rows.
             if self._is_limited_unordered:
                 reasons.append("row-capped/unordered result (unstable feature ids)")
+            if getattr(self, "_extent_mode", False):
+                reasons.append(
+                    "map-extent loading (feature ids are per-query fetch order)"
+                )
             # SNOW-3712083: refuse edits when the declared primary key cannot be
             # confirmed unique. Skip this reason for custom SQL query layers
             # (there is no base table to validate against, so it would only add
@@ -973,6 +978,10 @@ class SFGeoVectorDataProvider(SFVectorDataProvider):
             else:
                 if self._is_limited_unordered:
                     self._feature_count = limit_size_for_type(self._geo_column_type)
+                elif getattr(self, "_extent_mode", False):
+                    # Avoid a full-table COUNT(*) on every extent-mode layer.
+                    cheap = get_cheap_row_count(self._context_information)
+                    self._feature_count = cheap if cheap is not None else -1
                 else:
                     # The feature iterator always restricts rows to this layer's
                     # geometry type (which also drops NULL geometries), so COUNT
@@ -1078,6 +1087,10 @@ class SFH3VectorDataProvider(SFVectorDataProvider):
             else:
                 if self._is_limited_unordered:
                     self._feature_count = limit_size_for_type(self._geo_column_type)
+                    return self._feature_count
+                if getattr(self, "_extent_mode", False):
+                    cheap = get_cheap_row_count(self._context_information)
+                    self._feature_count = cheap if cheap is not None else -1
                     return self._feature_count
 
                 query = f"SELECT COUNT(*) FROM {self._from_clause}"  # nosec B608 - from_clause pre-quoted

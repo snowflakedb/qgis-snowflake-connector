@@ -34,23 +34,27 @@ class SFMetadataProvider(QgsProviderMetadata):
         """Reassembles a provider data source URI from its component paths
         (e.g. file path, layer name).
 
-        :param Dict[str, str] parts: parts as returned by decodeUri
-        :returns: uri as string
+        Keys match ``decodeUri`` / ``helpers.utils.decodeUri``.
         """
-
-        connection_name = parts["connection_name"]
-        sql_query = parts["sql_query"]
-        schema_name = parts["schema_name"]
-        table_name = parts["table_name"]
-        srid = parts["srid"]
-        geo_column = parts["geo_column"]
-        geometry_type = parts["geometry_type"]
-        geo_column_type = parts["geo_column_type"]
-        primary_key = parts["primary_key"]
+        connection_name = parts.get("connection_name", "")
+        sql_query = parts.get("sql_query", "")
+        schema_name = parts.get("schema_name", "")
+        table_name = parts.get("table_name", "")
+        srid = parts.get("srid", "")
+        geom_column = parts.get("geom_column", "")
+        geometry_type = parts.get("geometry_type", "")
+        geo_column_type = parts.get("geo_column_type", "")
+        primary_key = parts.get("primary_key", "")
         uri = (
-            f"{connection_uri_token(connection_name)} sql={sql_query} "
+            f"{connection_uri_token(connection_name)} sql_query={sql_query} "
             f"schema_name={schema_name} table_name={table_name} srid={srid} "
-            f"geo_column={geo_column} geometry_type={geometry_type} geo_column_type={geo_column_type} "
-            f"primary_key={primary_key}"
+            f"geom_column={geom_column} geometry_type={geometry_type} "
+            f"geo_column_type={geo_column_type} primary_key={primary_key}"
         )
+        if parts.get("extent_mode") in ("1", 1, True, "true", "True"):
+            uri += " extent_mode=1"
+        if parts.get("load_all_rows") in ("1", 1, True, "true", "True"):
+            uri += " load_all_rows=1"
+        if parts.get("single_geom_layer") in ("1", 1, True, "true", "True"):
+            uri += " single_geom_layer=1"
         return uri

@@ -108,9 +108,9 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                 else list(self._request.filterFids())
             )
             if self._extent_mode:
-                # Resolve fids from the last extent-cache snapshot when present.
-                # Without a prior map-extent fetch there is nothing to resolve.
-                self._serving_extent_cache = True
+                # Resolve fids only from a completed extent-cache snapshot.
+                if self._provider._extent_cache_key is not None:
+                    self._serving_extent_cache = True
                 self._index = 0
                 return
             elif not self._provider._features_loaded:
@@ -226,10 +226,22 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
             filter_geom_clause = ""
             if has_geometry and not filter_rect.isNull():
                 if self._provider._geo_column_type == "GEOMETRY":
-                    filter_geom_clause = (
-                        f'ST_INTERSECTS({quoted_geom}, '
-                        f"ST_GEOMETRYFROMWKT('{filter_rect.asWktPolygon()}'))"
-                    )
+                    srid = getattr(self._provider, "_srid", None) or 0
+                    try:
+                        srid_int = int(srid)
+                    except (TypeError, ValueError):
+                        srid_int = 0
+                    if srid_int:
+                        filter_geom_clause = (
+                            f'ST_INTERSECTS({quoted_geom}, '
+                            f"ST_GEOMETRYFROMWKT('{filter_rect.asWktPolygon()}', "
+                            f"{srid_int}))"
+                        )
+                    else:
+                        filter_geom_clause = (
+                            f'ST_INTERSECTS({quoted_geom}, '
+                            f"ST_GEOMETRYFROMWKT('{filter_rect.asWktPolygon()}'))"
+                        )
                 elif self._provider._geo_column_type == "GEOGRAPHY":
                     # ST_GEOGRAPHYFROMWKT requires valid WGS84 lon/lat. If the
                     # rect from QGIS is outside that range (e.g. the transform
@@ -279,14 +291,17 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                 and self._expression == ""
                 and filter_geom_clause == ""
             )
+            # Accumulate locally; publish only when the cursor is exhausted.
             self._populate_extent_cache = (
                 self._extent_mode and has_geometry and not filter_rect.isNull()
             )
-            if self._populate_extent_cache:
-                self._provider._extent_cache_key = self._build_extent_cache_key(
-                    filter_rect
-                )
-                self._provider._extent_cache_features = []
+            self._extent_cache_buffer = []
+            self._extent_cache_pending_key = (
+                self._build_extent_cache_key(filter_rect)
+                if self._populate_extent_cache
+                else None
+            )
+            self._extent_limit_n = None
 
             # build the complete where clause
             where_clause = ""
@@ -338,16 +353,22 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
             )
 
             if has_geometry:
-                mapped_type = mapping_multi_single_to_geometry_type.get(
-                    self._provider._geometry_type
-                )
-
-                filter_geo_type = f"ST_ASGEOJSON({quoted_geom}):type::string IN ({quote_literal(self._provider._geometry_type)}"  # nosec B608 - geometry_type escaped via quote_literal
-                if mapped_type is not None:
-                    filter_geo_type += f", {quote_literal(mapped_type)}"
-                filter_geo_type += ")"
                 if self._provider._geo_column_type in ["NUMBER", "TEXT"]:
                     filter_geo_type = f'H3_IS_VALID_CELL({quoted_geom})'
+                elif getattr(self._provider, "_single_geom_layer", False):
+                    # Single-geometry-family layers need only a NULL check.
+                    filter_geo_type = f"{quoted_geom} IS NOT NULL"
+                else:
+                    mapped_type = mapping_multi_single_to_geometry_type.get(
+                        self._provider._geometry_type
+                    )
+                    filter_geo_type = (
+                        f"ST_ASGEOJSON({quoted_geom}):type::string IN ("
+                        f"{quote_literal(self._provider._geometry_type)}"
+                    )  # nosec B608 - geometry_type escaped via quote_literal
+                    if mapped_type is not None:
+                        filter_geo_type += f", {quote_literal(mapped_type)}"
+                    filter_geo_type += ")"
 
                 base_query = (
                     "select * from ("  # nosec B608 - from_clause pre-quoted; fragments built from quoted identifiers and validated fragments
@@ -370,6 +391,7 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                 # rectangle the ST_INTERSECTS pushdown already restricts the
                 # result; without one (attribute table) we still cap the fetch.
                 limit_n = limit_size_for_type(geo_type_for_limit)
+                self._extent_limit_n = int(limit_n)
                 self.final_query = (
                     f"select * from ({base_query}) LIMIT {int(limit_n)}"  # nosec B608 - base_query uses quoted identifiers; limit_n is an int
                 )
@@ -407,14 +429,54 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
         self._index = 0
 
     def _build_extent_cache_key(self, filter_rect) -> str:
-        """Stable key for the last map-extent fetch (rect + active filters)."""
+        """Stable key for the last map-extent fetch.
+
+        Includes the attribute subset, NoGeometry flag, and destination CRS so
+        a partial or reprojected request cannot poison a later full request.
+        """
         expression = ""
         if self._request.filterType() == QgsFeatureRequest.FilterType.FilterExpression:
             expr = self._request.filterExpression()
             if expr is not None:
                 expression = expr.expression() or ""
         subset = self._provider.subsetString() or ""
-        return f"{filter_rect.asWktPolygon()}|{subset}|{expression}"
+        no_geom = bool(
+            self._request.flags() & QgsFeatureRequest.Flag.NoGeometry
+        )
+        attrs = ""
+        if self._request.flags() & QgsFeatureRequest.Flag.SubsetOfAttributes:
+            attrs = ",".join(str(i) for i in sorted(self._request.subsetOfAttributes()))
+        dest_crs = ""
+        try:
+            crs = self._request.destinationCrs()
+            if crs is not None and crs.isValid():
+                dest_crs = crs.authid() or ""
+        except Exception:
+            dest_crs = ""
+        return (
+            f"{filter_rect.asWktPolygon()}|{subset}|{expression}|"
+            f"nog={int(no_geom)}|attrs={attrs}|crs={dest_crs}"
+        )
+
+    def _publish_extent_cache_if_complete(self) -> None:
+        """Atomically publish the local buffer once the cursor is exhausted."""
+        if not getattr(self, "_populate_extent_cache", False):
+            return
+        key = getattr(self, "_extent_cache_pending_key", None)
+        buffer = getattr(self, "_extent_cache_buffer", None)
+        if key is None or buffer is None:
+            return
+        self._provider._extent_cache_features = list(buffer)
+        self._provider._extent_cache_key = key
+        limit_n = getattr(self, "_extent_limit_n", None)
+        if limit_n is not None and len(buffer) >= limit_n:
+            QgsMessageLog.logMessage(
+                f"Map-extent fetch hit the row LIMIT ({limit_n}); "
+                "the map may show a truncated subset of matching features.",
+                "Snowflake Plugin",
+                Qgis.MessageLevel.Warning,
+            )
+        self._populate_extent_cache = False
 
     def _copy_cached_feature(self, local_feature: QgsFeature, f: QgsFeature) -> None:
         f.setFields(self._provider.fields())
@@ -433,7 +495,10 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
         """
         try:
             if self._serving_extent_cache:
-                if not self._provider.isValid():
+                if (
+                    not self._provider.isValid()
+                    or self._provider._extent_cache_key is None
+                ):
                     f.setValid(False)
                     return False
                 features = self._provider._extent_cache_features
@@ -517,6 +582,8 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                     f.setValid(False)
                     if self._should_cache_features:
                         self._provider._features_loaded = True
+                    if next_result is None and self._provider.isValid():
+                        self._publish_extent_cache_if_complete()
                     return False
 
                 f.setFields(self._provider.fields())
@@ -602,10 +669,12 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                 if self._should_cache_features:
                     self._provider._features.append(QgsFeature(f))
                 if getattr(self, "_populate_extent_cache", False):
-                    self._provider._extent_cache_features.append(QgsFeature(f))
+                    self._extent_cache_buffer.append(QgsFeature(f))
 
             self._index += 1
         except Exception as e:
+            # Do not publish a partial extent cache on error.
+            self._populate_extent_cache = False
             QgsMessageLog.logMessage(
                 f"Error fetching feature: {str(e)}",
                 "Snowflake Plugin",
@@ -643,6 +712,12 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
 
     def rewind(self) -> bool:
         """reset the iterator to the starting position"""
+        if getattr(self, "_serving_extent_cache", False):
+            self._index = 0
+            return True
+        if not getattr(self, "final_query", None):
+            self._index = 0
+            return False
         self._result = self._provider.connection_manager.execute_query(
             connection_name=self._provider._connection_name,
             query=self.final_query,
@@ -650,12 +725,15 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
         )
         self._provider._features = []
         self._provider._features_loaded = False
+        self._extent_cache_buffer = []
         self._index = 0
         return True
 
     def close(self) -> bool:
         """end of iterating: free the resources / lock"""
         self._index = -1
+        # Never publish a partial extent cache from an early close/cancel.
+        self._populate_extent_cache = False
         # SNOW-3712076: release the server-side cursor so an abandoned/cancelled
         # render does not leak an open SnowflakeCursor on the singleton
         # connection.
