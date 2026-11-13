@@ -28,6 +28,10 @@ When the URI includes `extent_mode=1`:
 - Each request with a filter rectangle pushes `ST_INTERSECTS` and applies `LIMIT` (not `SAMPLE`).
 - Last-result cache on the provider (`_extent_cache_key` / `_extent_cache_features`) reuses an identical rectangle + filter for repaints; `reloadData()` clears it.
 
+## Download with spatial filter
+
+Browser action **Download with spatial filter…** (`SFDataItem`) opens `SFSpatialFilterDialog`. Extent sources: current canvas, another vector layer’s extent, or `QgsMapToolExtent` draw. SQL uses `ST_INTERSECTS` with `TO_GEOGRAPHY` (GEOGRAPHY/H3 via `H3_CELL_TO_BOUNDARY`) or `ST_GEOMETRYFROMWKT` + SRID (GEOMETRY). Accepted SQL is loaded via `SFConvertSQLQueryToLayerTask` (URI `sql_query=…`). After successful Browser/filter/convert adds, `helpers/map_zoom.py` zooms the canvas to the layer extent with a ~1.1 buffer.
+
 ## Attribute-only layers
 
 URI with empty `geom_column` / `geo_column_type`:

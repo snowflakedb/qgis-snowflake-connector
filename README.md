@@ -44,6 +44,10 @@ After the plugin loads, a **Snowflake** toolbar (and Plugins → Snowflake menu)
 
 For tables too large to sample wholesale, right-click a spatial table in the Browser and choose **Add with map-extent loading**. The layer URI includes `extent_mode=1`. Each map render issues a query filtered to the current canvas rectangle with a per-request row LIMIT. Results are capped, so a dense view may show a truncated subset; selection and feature ids are per query and these layers are read-only. Warehouse cost still depends on clustering and pruning—`ADD SEARCH OPTIMIZATION ON GEO(<geom_column>)` helps. You can also toggle this mode from the toolbar for an existing Snowflake layer.
 
+## Download with spatial filter
+
+For a one-shot filtered download (not live map-extent loading), right-click a spatial table in the Browser and choose **Download with spatial filter…**. Set the extent from the current map canvas, another project layer, or by drawing a rectangle on the map; optionally add a WHERE clause and a row limit. The dialog previews the `ST_INTERSECTS` SQL (GEOGRAPHY uses `TO_GEOGRAPHY`, GEOMETRY uses `ST_GEOMETRYFROMWKT` with the table SRID, H3 uses `H3_CELL_TO_BOUNDARY`). On OK the plugin loads the SQL as a Snowflake query layer in the background, reports progress and cancel/empty/failure in the message bar, and zooms the canvas to the new layer.
+
 ## Attribute-only tables (#105)
 
 Tables without a GEOGRAPHY/GEOMETRY/H3 column appear under **Tables (no geometry)** in the Browser. Double-click one to open it as a Snowflake attribute layer (attribute table and filters). These layers are read-only.

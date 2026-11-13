@@ -26,6 +26,9 @@ changelog=1.1.0 - Map-extent loading, toolbar, attribute tables, Cortex tools:
    snapshot last-extent cache for repaints. These layers are read-only.
    Right-click a table in the Browser and choose "Add with map-extent loading",
    or toggle it from the Snowflake toolbar.
+ * Download with spatial filter: Browser action opens a dialog for canvas,
+   layer, or drawn extent plus optional WHERE/LIMIT; loads filtered SQL as a
+   Snowflake query layer with progress feedback and zoom-to-layer.
  * Snowflake toolbar and Plugins menu: Execute SQL, Reload from Snowflake,
    Toggle map-extent loading, Ask Snowflake (Cortex), Map brief (Cortex).
  * Attribute-only tables (#105): tables without a geometry column open as

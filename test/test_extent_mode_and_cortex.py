@@ -102,10 +102,29 @@ class TestExtentModeBrowserAction(unittest.TestCase):
         self.assertIn("on_add_with_extent_mode_triggered", data_item)
         self.assertIn("extent_mode=True", data_item)
 
+    def test_spatial_filter_browser_action_exists(self):
+        data_item = _read("entities/sf_data_item.py")
+        self.assertIn("Download with spatial filter…", data_item)
+        self.assertIn("on_download_with_spatial_filter_triggered", data_item)
+        self.assertIn("SFSpatialFilterDialog", data_item)
+        self.assertIn("SFConvertSQLQueryToLayerTask", data_item)
+
     def test_convert_task_accepts_extent_mode(self):
         task = _read("tasks/sf_convert_column_to_layer_task.py")
         self.assertIn("extent_mode: bool = False", task)
         self.assertIn('uri += " extent_mode=1"', task)
+
+    def test_convert_and_sql_tasks_report_progress_and_zoom(self):
+        convert = _read("tasks/sf_convert_column_to_layer_task.py")
+        sql_task = _read("tasks/sf_convert_sql_query_to_layer_task.py")
+        for source in (convert, sql_task):
+            self.assertIn("setProgress", source)
+            self.assertIn("zoom_canvas_to_layers", source)
+            self.assertIn("Layer download was canceled", source)
+        self.assertIn("Empty result", sql_task)
+        zoom = _read("helpers/map_zoom.py")
+        self.assertIn("buffer_scale: float = 1.1", zoom)
+        self.assertIn("setExtent", zoom)
 
 
 class TestAttributeOnlyLayers(unittest.TestCase):

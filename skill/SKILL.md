@@ -81,6 +81,7 @@ Optional flags:
 - `single_geom_layer=1` — column has a single geometry family
 - `extent_mode=1` — map-extent loading (#106): per-render `ST_INTERSECTS` + LIMIT, no shared feature cache
 - empty `geom_column` / `geo_column_type` — attribute-only table layer (#105)
+- `sql_query=…` — one-shot SQL layer (Execute SQL / Download with spatial filter)
 
 Parsed by `helpers/wrapper.py:parse_uri()` and `helpers/utils.py:decodeUri()`.
 

@@ -1,12 +1,14 @@
 from ..managers.sf_connection_manager import SFConnectionManager
 from ..helpers.data_base import (
     check_table_exceeds_size,
+    get_srid_from_table_geo_column,
     limit_size_for_table,
     get_column_iterator,
     get_features_iterator,
     get_table_geo_columns,
     get_table_iterator,
 )
+from ..helpers.map_zoom import zoom_canvas_to_layer
 from ..helpers.messages import (
     LargeDatasetChoice,
     get_large_dataset_choice,
@@ -27,7 +29,9 @@ from ..helpers.utils import (
 )
 from ..helpers.sql import quote_literal
 from ..tasks.sf_convert_column_to_layer_task import SFConvertColumnToLayerTask
+from ..tasks.sf_convert_sql_query_to_layer_task import SFConvertSQLQueryToLayerTask
 from ..dialogs.sf_connection_string_dialog import SFConnectionStringDialog
+from ..dialogs.sf_spatial_filter_dialog import SFSpatialFilterDialog
 from qgis.PyQt.QtCore import pyqtSignal, Qt
 from qgis.core import (
     QgsDataItem,
@@ -575,6 +579,7 @@ ORDER BY {column_name}"""  # nosec B608 - column_name is a fixed literal; values
             msg_box.exec()
             return False
         QgsProject.instance().addMapLayer(layer)
+        zoom_canvas_to_layer(layer)
         return True
 
     def _start_add_table_layer(self, extent_mode: bool = False) -> bool:
@@ -729,6 +734,14 @@ ORDER BY {column_name}"""  # nosec B608 - column_name is a fixed literal; values
                 )
                 action_list.append(self.extent_mode_action)
 
+                self.spatial_filter_action = QAction(
+                    "Download with spatial filter…", None
+                )
+                self.spatial_filter_action.triggered.connect(
+                    self.on_download_with_spatial_filter_triggered
+                )
+                action_list.append(self.spatial_filter_action)
+
             if self.item_type == "root":
                 self.new_connection_action = QAction("New Connection", None)
                 self.new_connection_action.triggered.connect(
@@ -754,6 +767,92 @@ ORDER BY {column_name}"""  # nosec B608 - column_name is a fixed literal; values
                 "Add with map-extent loading failed",
                 f"Could not add the layer.\n\nExtended error information:\n{str(e)}",
             )
+
+    def on_download_with_spatial_filter_triggered(self) -> None:
+        """Open the spatial filter dialog and load the resulting SQL as a layer."""
+        try:
+            schema_data_item = self.parent()
+            auth_information = get_auth_information(self.connection_name)
+            geo_column_type = (self.geom_type or "GEOGRAPHY").upper()
+            srid = 4326
+            if geo_column_type == "GEOMETRY":
+                try:
+                    srid = (
+                        get_srid_from_table_geo_column(
+                            geo_column_name=self.geom_column,
+                            table_name=self.clean_name,
+                            context_information={
+                                "connection_name": self.connection_name,
+                                "database_name": auth_information["database"],
+                                "schema_name": schema_data_item.clean_name,
+                                "table_name": self.clean_name,
+                                "geo_column": self.geom_column,
+                            },
+                        )
+                        or 4326
+                    )
+                except Exception:
+                    srid = 4326
+
+            dialog = SFSpatialFilterDialog(
+                connection_name=self.connection_name,
+                schema=schema_data_item.clean_name,
+                table=self.clean_name,
+                geo_column=self.geom_column,
+                parent=None,
+                geo_column_type=geo_column_type,
+                srid=srid,
+            )
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+
+            params = dialog.get_parameters()
+            context_information = {
+                "connection_name": self.connection_name,
+                "database_name": auth_information["database"],
+                "schema_name": schema_data_item.clean_name,
+                "table_name": self.clean_name,
+                "geo_column": self.geom_column,
+                "geo_column_name": self.geom_column,
+                "geom_type": self.geom_type,
+                "geo_column_type_is_h3": geo_column_type in ("NUMBER", "TEXT"),
+                "h3_sf_col_type": self.geom_type,
+            }
+            context_information["primary_key"] = prompt_and_get_primary_key(
+                context_information=context_information,
+                data_type=self.geom_type,
+            )
+
+            task = SFConvertSQLQueryToLayerTask(
+                query=params["sql"],
+                layer_name=f"{self.clean_name}_filtered",
+                context_information=context_information,
+                zoom_on_success=True,
+            )
+            task.on_handle_error.connect(self._on_spatial_filter_message)
+            QgsApplication.taskManager().addTask(task)
+        except Exception as e:
+            self._on_spatial_filter_message(
+                "Download with spatial filter failed",
+                f"Could not start the filtered download.\n\nExtended error information:\n{str(e)}",
+            )
+
+    def _on_spatial_filter_message(self, title: str, message: str) -> None:
+        """Push cancel/empty/failure feedback to the message bar (plain text)."""
+        try:
+            from qgis.utils import iface
+
+            if iface is not None:
+                iface.messageBar().pushMessage(
+                    title,
+                    message.replace("\n", " "),
+                    level=Qgis.MessageLevel.Warning,
+                    duration=8,
+                )
+                return
+        except Exception:
+            pass
+        on_handle_error(title, message)
 
     def on_execute_sql_action_triggered(self) -> None:
         """

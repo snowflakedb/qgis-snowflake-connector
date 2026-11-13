@@ -238,10 +238,16 @@ class TestSpatialFilterDialog(unittest.TestCase):
         self.assertIn("ymin_edit", source)
         self.assertIn("xmax_edit", source)
         self.assertIn("ymax_edit", source)
+        self.assertIn("Use current map extent", source)
+        self.assertIn("Use layer extent", source)
+        self.assertIn("Draw extent on map", source)
+        self.assertIn("QgsMapToolExtent", source)
 
     def test_dialog_uses_st_intersects(self):
         source = self._read("dialogs/sf_spatial_filter_dialog.py")
         self.assertIn("ST_INTERSECTS", source)
+        self.assertIn("TO_GEOGRAPHY", source)
+        self.assertIn("ST_GEOMETRYFROMWKT", source)
 
     def test_dialog_has_sql_preview(self):
         source = self._read("dialogs/sf_spatial_filter_dialog.py")
@@ -257,6 +263,11 @@ class TestSpatialFilterDialog(unittest.TestCase):
         source = self._read("dialogs/sf_spatial_filter_dialog.py")
         self.assertIn("limit_spin", source)
         self.assertIn("LIMIT", source)
+
+    def test_dialog_warns_without_filter(self):
+        source = self._read("dialogs/sf_spatial_filter_dialog.py")
+        self.assertIn("No filter selected", source)
+        self.assertIn("_validate_and_accept", source)
 
     def _read(self, filename):
         path = os.path.join(_plugin_root, filename)
