@@ -8,12 +8,18 @@ from .sf_vector_data_provider import SFVectorDataProvider
 
 
 class SFMetadataProvider(QgsProviderMetadata):
-    def __init__(self):
+    def __init__(self, plugin_version: str = ""):
         super().__init__(
             SFVectorDataProvider.providerKey(),
             SFVectorDataProvider.description(),
             SFVectorDataProvider.createProvider,
         )
+        # Version marker used to detect a stale provider left registered by a
+        # previous plugin version after an in-place upgrade. QGIS registers the
+        # vector provider once per process and never unregisters it, so the
+        # plugin inspects this marker on startup to warn when a restart is
+        # required to finish an upgrade.
+        self.plugin_version = plugin_version
 
     def decodeUri(self, uri: str) -> Dict[str, str]:
         """Breaks a provider data source URI into its component paths

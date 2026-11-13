@@ -140,6 +140,20 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
     CONNECTION_DYN_CB = "CONNECTION_DYN_CB"
     GEOMETRY_COLUMN = "GEOMETRY_COLUMN"
 
+    def flags(self):
+        return super().flags() | QgsProcessingAlgorithm.Flag.FlagNoThreading
+
+    def _confirm_export(self, connection_name, database, schema, table):
+        from .helpers.trust_policy import require_trusted_action_consent
+
+        return require_trusted_action_consent(
+            "Confirm Snowflake export",
+            "The Snowflake plugin is about to export features to "
+            f"'{database}.{schema}.{table}' using connection "
+            f"'{connection_name}'.\n\n"
+            "Only proceed if you trust the source of this export workflow.",
+        )
+
     def initAlgorithm(self, config):
         """
         Here we define the inputs and output of the algorithm, along
@@ -212,6 +226,7 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
                 self.parameterAsString(parameters, self.CONNECTION_DYN_CB, context)
             )
         )
+        schema_was_empty = selected_schema == ""
 
         if self._targets_same_snowflake_table(
             parameters,
@@ -223,12 +238,28 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
         ):
             raise QgsProcessingException(SAME_TABLE_EXPORT_MESSAGE)
 
+        if selected_schema == "":
+            selected_schema = "PUBLIC"
+        if selected_table == "":
+            selected_table = self.parameterAsSource(
+                parameters, self.INPUT, context
+            ).sourceName()
+
+        if not self._confirm_export(
+            selected_connection,
+            selected_database,
+            selected_schema,
+            selected_table,
+        ):
+            raise QgsProcessingException(
+                "Export to Snowflake was cancelled by the user."
+            )
+
         auth_information = get_authentification_information(
             self.settings, selected_connection
         )
         self.sf_data_provider = SFDataProvider(auth_information)
-        if selected_schema == "":
-            selected_schema = "PUBLIC"
+        if schema_was_empty:
             count_schemas = get_count_schemas(
                 settings=self.settings,
                 connection_name=selected_connection,
@@ -243,31 +274,30 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
                     schema_name=selected_schema,
                 )
 
-        if selected_table == "":
-            selected_table = self.parameterAsSource(
-                parameters, self.INPUT, context
-            ).sourceName()
-
-            count_table = get_count_tables(
-                connection_name=selected_connection,
+        # Create the target table (if missing) only after consent. This covers
+        # both the empty-table-name path (defaults to the source name) and the
+        # explicit-table-name path; neither creates anything in
+        # checkParameterValues anymore (F2).
+        count_table = get_count_tables(
+            connection_name=selected_connection,
+            database_name=selected_database,
+            schema_name=selected_schema,
+            table_name=selected_table,
+        )
+        if count_table == 0:
+            query_create_table = self.get_create_table_query(
+                geom_column=geom_column,
+                source=source,
+                is_snowflake_layer=is_snowflake_layer,
                 database_name=selected_database,
                 schema_name=selected_schema,
                 table_name=selected_table,
+                use_geometry_type=use_geometry_type,
             )
-            if count_table == 0:
-                query_create_table = self.get_create_table_query(
-                    geom_column=geom_column,
-                    source=source,
-                    is_snowflake_layer=is_snowflake_layer,
-                    database_name=selected_database,
-                    schema_name=selected_schema,
-                    table_name=selected_table,
-                    use_geometry_type=use_geometry_type,
-                )
 
-                create_table(
-                    connection_name=selected_connection, query=query_create_table
-                )
+            create_table(
+                connection_name=selected_connection, query=query_create_table
+            )
 
         # Retrieve the feature source and sink. The 'dest_id' variable is used
         # to uniquely identify the feature sink, and must be included in the
@@ -345,18 +375,9 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
         query_values_alias = f" AS v({','.join(value_aliases)})"
         query = query_base
         first = True
-        executed = False
+        rows_in_batch = 0
+        rows_inserted = 0
         for current, feature in enumerate(features):
-            if current != 0 and current % 5000 == 0:
-                cur = self.sf_data_provider.execute_query(
-                    query + query_values_alias, selected_connection
-                )
-                cur.close()
-                query = query_base
-                first = True
-                executed = True
-            executed = False
-            # Stop the algorithm if cancel button has been clicked
             if feedback.isCanceled():
                 break
 
@@ -422,15 +443,27 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
                         else:
                             query += _sql_literal_from_value(feat_val)
             query += ")"
+            rows_in_batch += 1
+
+            if rows_in_batch >= 5000:
+                cur = self.sf_data_provider.execute_query(
+                    query + query_values_alias, selected_connection
+                )
+                cur.close()
+                rows_inserted += rows_in_batch
+                rows_in_batch = 0
+                query = query_base
+                first = True
 
             # Update the progress bar
             feedback.setProgress(int(current * total))
 
-        if not executed:
+        if not feedback.isCanceled() and rows_in_batch > 0:
             cur = self.sf_data_provider.execute_query(
                 query + query_values_alias, selected_connection
             )
             cur.close()
+            rows_inserted += rows_in_batch
 
         # Return the results of the algorithm. In this case our only result is
         # the feature sink which contains the processed features, but some
@@ -439,7 +472,7 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
         # dictionary, with keys matching the feature corresponding parameter
         # or output names.
         # return {self.OUTPUT: dest_id}
-        return {"Rows Inserted": source.featureCount()}
+        return {"Rows Inserted": rows_inserted}
 
     def get_field_type_from_code_type(self, code_type: int) -> str:
         """
@@ -599,61 +632,52 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
                 return False, SAME_TABLE_EXPORT_MESSAGE
 
             if not selected_table_is_empty:
-                # Check if the selected table exists
-                source = self.parameterAsSource(parameters, self.INPUT, context)
+                # Validation only: never create the target table here.
+                # checkParameterValues runs during QGIS parameter validation,
+                # before the user has consented to the export (F2). The table is
+                # created in processAlgorithm after _confirm_export(). If the
+                # table already exists, verify the geometry column is present;
+                # if it does not exist yet, there is nothing to validate because
+                # it will be created with the requested geometry column.
                 count_table = get_count_tables(
                     connection_name=selected_connection,
                     database_name=selected_database,
                     schema_name=selected_schema,
                     table_name=selected_table,
                 )
-                if count_table == 0:
-                    query_create_table = self.get_create_table_query(
-                        geom_column=geom_column,
-                        source=source,
-                        is_snowflake_layer=False,
-                        database_name=selected_database,
-                        schema_name=selected_schema,
-                        table_name=selected_table,
-                        use_geometry_type=source.sourceCrs().postgisSrid() != 4326,
+                if count_table > 0:
+                    auth_information = get_authentification_information(
+                        self.settings, selected_connection
                     )
+                    self.sf_data_provider = SFDataProvider(auth_information)
 
-                    create_table(
-                        connection_name=selected_connection, query=query_create_table
+                    query_select_columns = f"""
+                        SELECT DISTINCT COLUMN_NAME
+                        FROM INFORMATION_SCHEMA.COLUMNS
+                        WHERE TABLE_CATALOG ILIKE {quote_literal(selected_database)}
+                        AND TABLE_SCHEMA ILIKE {quote_literal(selected_schema)}
+                        AND TABLE_NAME ILIKE {quote_literal(selected_table)}
+                    """  # nosec B608 - values escaped via quote_literal
+                    cur_select_columns = self.sf_data_provider.execute_query(
+                        query_select_columns, selected_connection
                     )
+                    available_columns = []
+                    column_found = False
+                    for row in cur_select_columns.fetchall():
+                        if row[0].upper() == geom_column.upper():
+                            cur_select_columns.close()
+                            column_found = True
+                            return True, ""
+                        else:
+                            available_columns.append(row[0])
 
-                auth_information = get_authentification_information(
-                    self.settings, selected_connection
-                )
-                self.sf_data_provider = SFDataProvider(auth_information)
-
-                query_select_columns = f"""
-                    SELECT DISTINCT COLUMN_NAME
-                    FROM INFORMATION_SCHEMA.COLUMNS
-                    WHERE TABLE_CATALOG ILIKE {quote_literal(selected_database)}
-                    AND TABLE_SCHEMA ILIKE {quote_literal(selected_schema)}
-                    AND TABLE_NAME ILIKE {quote_literal(selected_table)}
-                """  # nosec B608 - values escaped via quote_literal
-                cur_select_columns = self.sf_data_provider.execute_query(
-                    query_select_columns, selected_connection
-                )
-                available_columns = []
-                column_found = False
-                for row in cur_select_columns.fetchall():
-                    if row[0].upper() == geom_column.upper():
+                    if not column_found:
                         cur_select_columns.close()
-                        column_found = True
-                        return True, ""
-                    else:
-                        available_columns.append(row[0])
-
-                if not column_found:
+                        return (
+                            False,
+                            f"Given Geometry Column: {geom_column} does not exist! Available columns: {', '.join(available_columns)}",
+                        )
                     cur_select_columns.close()
-                    return (
-                        False,
-                        f"Given Geometry Column: {geom_column} does not exist! Available columns: {', '.join(available_columns)}",
-                    )
-                cur_select_columns.close()
 
             return True, ""
         except Exception as e:

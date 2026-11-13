@@ -7,7 +7,7 @@ import snowflake.connector
 
 from qgis.core import Qgis, QgsMessageLog
 
-from ..helpers.utils import get_auth_information
+from ..helpers.utils import connection_settings_exist, get_auth_information
 from ..helpers.sql import quote_identifier
 
 
@@ -161,8 +161,36 @@ class SFConnectionManager:
             snowflake.connector.SnowflakeConnection: The Snowflake connection object if found, otherwise None.
         """
         if connection_name in self.opened_connections:
+            # CWE-613 / SNOW-4134146: a connection whose settings were deleted
+            # must not remain usable through a surviving keep-alive session. If
+            # the alias no longer exists in QSettings, purge the cached session
+            # and fail closed by returning None so callers re-authenticate.
+            if not connection_settings_exist(connection_name):
+                self.purge_connection(connection_name)
+                return None
             return self.opened_connections[connection_name]
         return None
+
+    def purge_connection(self, connection_name: str) -> None:
+        """Drop and close a cached connection plus its per-session state.
+
+        Used when a connection's backing settings have been removed so the
+        stale keep-alive session can never be reused (CWE-613). Closing is
+        best-effort: the entry is dropped from ``opened_connections``
+        regardless of whether ``close()`` succeeds.
+        """
+        connection = self.opened_connections.pop(connection_name, None)
+        if connection is not None:
+            try:
+                connection.close()
+            except Exception as e:
+                QgsMessageLog.logMessage(
+                    f"Failed to close cached Snowflake connection {connection_name}: {e}",
+                    "Snowflake Plugin",
+                    Qgis.MessageLevel.Warning,
+                )
+        self._active_schemas.pop(connection_name, None)
+        self._active_query_tags.pop(connection_name, None)
 
     def close_connection(self, connection_name: str) -> None:
         """
@@ -203,6 +231,17 @@ class SFConnectionManager:
             Exception: If an error occurs while creating the cursor.
         """
         try:
+            # CWE-613 / SNOW-4134146: execute_query reaches a session through
+            # create_cursor, not get_connection, so the stale-session guard must
+            # also live here. If the alias no longer exists in QSettings, purge
+            # the cached keep-alive session and fail closed so a surviving
+            # project handle cannot run SQL under the deleted connection's role.
+            if not connection_settings_exist(connection_name):
+                self.purge_connection(connection_name)
+                raise Exception(
+                    f"Connection '{connection_name}' no longer exists; "
+                    "its session has been closed."
+                )
             connection = None
             if connection_name in self.opened_connections:
                 connection = self.opened_connections[connection_name]

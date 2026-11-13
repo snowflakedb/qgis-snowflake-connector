@@ -2,6 +2,7 @@ import copy
 import re
 import typing
 from qgis.core import (
+    NULL,
     Qgis,
     QgsCoordinateReferenceSystem,
     QgsDataProvider,
@@ -45,7 +46,13 @@ from ..helpers.utils import (
 from ..managers.sf_connection_manager import SFConnectionManager, build_op_tag
 
 from ..helpers.wrapper import parse_uri
-from ..helpers.sql import quote_identifier, quote_literal, qualified_table_name
+from ..helpers.sql import (
+    identifiers_equal,
+    quote_identifier,
+    quote_literal,
+    qualified_table_name,
+    sql_statement_is_read_only,
+)
 from ..helpers.expression_compiler import compile_expression_to_sql
 from ..helpers.mappings import (
     SNOWFLAKE_METADATA_TYPE_CODE_DICT,
@@ -127,6 +134,15 @@ class SFVectorDataProvider(QgsVectorDataProvider):
         self._is_limited_unordered = False
 
         if self._sql_query and not self._table_name:
+            if not sql_statement_is_read_only(self._sql_query):
+                QgsMessageLog.logMessage(
+                    "Custom SQL query layers must be read-only SELECT-style "
+                    "statements; refusing to load the layer.",
+                    "Snowflake Plugin",
+                    Qgis.MessageLevel.Critical,
+                )
+                self._is_valid = False
+                return
             self._from_clause = f"({self._sql_query})"
             # SNOW-3712076: a custom sql_query layer must still be row-capped so
             # a malicious project file cannot force an unbounded fetch (client
@@ -218,6 +234,13 @@ class SFVectorDataProvider(QgsVectorDataProvider):
         edit into a mass UPDATE/DELETE. We re-validate here (cheap declared-PK
         match first, duplicate-count fallback) and cache the result. Any failure
         fails closed (treated as not-unique / read-only).
+
+        The declared-PK shortcut must bind to the *exact* catalog column
+        identity: Snowflake distinguishes ``ID`` (unquoted) from ``"id"``
+        (quoted), so the match is case-sensitive (identifiers_equal). A blanket
+        ``.upper()`` fold would collapse those distinct identities and let a
+        URI-supplied ``primary_key=ID`` skip the duplicate scan of a non-unique
+        column that merely case-collides with the real key (SNOW-4134145 / CWE-178).
         """
         if self._primary_key_is_valid is not None:
             return self._primary_key_is_valid
@@ -226,7 +249,7 @@ class SFVectorDataProvider(QgsVectorDataProvider):
         try:
             if self._primary_key and self._table_name:
                 declared = get_declared_primary_key(self._context_information)
-                if declared and declared.upper() == self._primary_key.upper():
+                if declared and identifiers_equal(declared, self._primary_key):
                     result = True
                 else:
                     result = not check_column_has_duplicates(
@@ -245,7 +268,8 @@ class SFVectorDataProvider(QgsVectorDataProvider):
 
     def capabilities(self) -> QgsVectorDataProvider.Capabilities:
         base_capabilities = (
-            QgsVectorDataProvider.CreateSpatialIndex | QgsVectorDataProvider.SelectAtId
+            QgsVectorDataProvider.Capability.CreateSpatialIndex
+            | QgsVectorDataProvider.Capability.SelectAtId
         )
 
         # An empty string used as a primary key signifies the absence of a defined primary key.
@@ -292,12 +316,12 @@ class SFVectorDataProvider(QgsVectorDataProvider):
 
         return (
             base_capabilities
-            | QgsVectorDataProvider.AddFeatures
-            | QgsVectorDataProvider.DeleteFeatures
-            | QgsVectorDataProvider.ChangeAttributeValues
-            | QgsVectorDataProvider.AddAttributes
-            | QgsVectorDataProvider.DeleteAttributes
-            | QgsVectorDataProvider.ChangeGeometries
+            | QgsVectorDataProvider.Capability.AddFeatures
+            | QgsVectorDataProvider.Capability.DeleteFeatures
+            | QgsVectorDataProvider.Capability.ChangeAttributeValues
+            | QgsVectorDataProvider.Capability.AddAttributes
+            | QgsVectorDataProvider.Capability.DeleteAttributes
+            | QgsVectorDataProvider.Capability.ChangeGeometries
         )
 
     def name(self) -> str:
@@ -326,15 +350,15 @@ class SFVectorDataProvider(QgsVectorDataProvider):
         QgsWkbTypes.
         """
         if not self._column_geom:
-            return QgsWkbTypes.NoGeometry
+            return QgsWkbTypes.Type.NoGeometry
         if not self._wkb_type:
             if not self._is_valid:
-                self._wkb_type = QgsWkbTypes.Unknown
+                self._wkb_type = QgsWkbTypes.Type.Unknown
             else:
                 if self._geometry_type in mapping_snowflake_qgis_geometry:
                     geometry_type = mapping_snowflake_qgis_geometry[self._geometry_type]
                 else:
-                    self._wkb_type = QgsWkbTypes.Unknown
+                    self._wkb_type = QgsWkbTypes.Type.Unknown
                     return self._wkb_type
 
                 self._wkb_type = geometry_type
@@ -407,6 +431,14 @@ class SFVectorDataProvider(QgsVectorDataProvider):
                         )
                         self._fields.append(qgs_field)
                 else:
+                    if not sql_statement_is_read_only(self._sql_query):
+                        QgsMessageLog.logMessage(
+                            "Custom SQL query layers must be read-only "
+                            "SELECT-style statements.",
+                            "Snowflake Plugin",
+                            Qgis.MessageLevel.Critical,
+                        )
+                        return self._fields
                     field_info = []
                     cur = self.connection_manager.execute_query(
                         connection_name=self._connection_name,
@@ -445,12 +477,12 @@ class SFVectorDataProvider(QgsVectorDataProvider):
         """Auto-generate the next sequential value for numeric primary key columns."""
         fields = self.fields()
         if fieldIndex < 0 or fieldIndex >= fields.count():
-            return QVariant()
+            return NULL
         field = fields.field(fieldIndex)
         if field.name() != self._primary_key:
-            return QVariant()
+            return NULL
         if field.type() not in (QMetaType.Type.Int, QMetaType.Type.Double, QMetaType.Type.LongLong):
-            return QVariant()
+            return NULL
         next_val = get_next_primary_key_value(
             self._context_information, self._table_name, self._primary_key,
         )
@@ -459,7 +491,7 @@ class SFVectorDataProvider(QgsVectorDataProvider):
             # QVariant.isNull() and reject raw Python ints when a null-check
             # is expected.
             return QVariant(next_val)
-        return QVariant()
+        return NULL
 
     def defaultValueClause(self, fieldIndex):
         """Advertise an auto-increment default for the PK column.

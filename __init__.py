@@ -53,6 +53,37 @@ class _StubPlugin:
         pass
 
 
+def _dependency_diagnostics() -> str:
+    """Report versions and resolved paths of the SSL dependency chain.
+
+    Never imports ``OpenSSL`` (that import is what fails in the GEN_EMAIL
+    mismatch) and never imports ``helpers.utils`` (that chain may itself be
+    broken).  Uses only the standard library so it can run even when the
+    plugin's own imports are unusable.
+    """
+    import sys
+    import importlib.metadata
+    import importlib.util
+
+    lines = [f"  python: {sys.executable}"]
+    for dist_name, module_name in (
+        ("snowflake-connector-python", "snowflake.connector"),
+        ("cryptography", "cryptography"),
+        ("pyOpenSSL", "OpenSSL"),
+    ):
+        try:
+            version = importlib.metadata.version(dist_name)
+        except Exception:  # nosec B110 - diagnostics are best-effort
+            version = "not installed"
+        try:
+            spec = importlib.util.find_spec(module_name)
+            location = spec.origin if spec is not None else "not found"
+        except Exception:  # nosec B110 - diagnostics are best-effort
+            location = "unresolved"
+        lines.append(f"  {dist_name}: {version} ({location})")
+    return "\n".join(lines)
+
+
 # noinspection PyPep8Naming
 def classFactory(iface):  # pylint: disable=invalid-name
     """Load QGISSnowflakeConnector class from file QGISSnowflakeConnector.
@@ -97,19 +128,34 @@ def classFactory(iface):  # pylint: disable=invalid-name
         from .qgis_snowflake_connector import QGISSnowflakeConnectorPlugin
 
         return QGISSnowflakeConnectorPlugin()
-    except ImportError as imp_err:
+    except Exception as load_err:
         from qgis.core import QgsMessageLog, Qgis
 
-        hint = str(imp_err)
-        if "cryptography" in hint.lower() or "ExtensionOID" in hint:
+        hint = str(load_err)
+        if "module 'lib' has no attribute" in hint:
+            hint += (
+                "\n\nThis is caused by an incompatible 'cryptography' / "
+                "'pyOpenSSL' pair in the Python environment QGIS is using: "
+                "cryptography 49+ dropped OpenSSL bindings (e.g. GEN_EMAIL) "
+                "that older pyOpenSSL (<=26.1.0) still references.\n"
+                "Upgrade BOTH together using QGIS's own interpreter (on "
+                "Windows, the OSGeo4W Shell), never cryptography alone:\n"
+                "  python -m pip install --upgrade cryptography pyopenssl\n"
+                "If the mismatch persists, a copy in your per-user "
+                "site-packages may be shadowing QGIS's bundled packages.\n"
+                "Then restart QGIS."
+            )
+        elif "cryptography" in hint.lower() or "ExtensionOID" in hint:
             hint += (
                 "\n\nThis is usually caused by an outdated 'cryptography' "
-                "package. Try:\n"
-                "  python3 -m pip install --upgrade cryptography pyopenssl\n"
+                "package. Using QGIS's own interpreter (on Windows, the "
+                "OSGeo4W Shell), upgrade the pair together:\n"
+                "  python -m pip install --upgrade cryptography pyopenssl\n"
                 "Then restart QGIS."
             )
         QgsMessageLog.logMessage(
-            f"Snowflake Connector failed to load: {hint}",
+            f"Snowflake Connector failed to load: {hint}\n"
+            "Dependency diagnostics:\n" + _dependency_diagnostics(),
             "Snowflake Plugin",
             Qgis.MessageLevel.Critical,
         )

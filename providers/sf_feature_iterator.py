@@ -93,12 +93,12 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
         # cache exists so fetchFeature() can resolve them locally.
         ftype = self._request.filterType()
         if ftype in (
-            QgsFeatureRequest.FilterFid,
-            QgsFeatureRequest.FilterFids,
+            QgsFeatureRequest.FilterType.FilterFid,
+            QgsFeatureRequest.FilterType.FilterFids,
         ):
             self._target_fids = (
                 [self._request.filterFid()]
-                if ftype == QgsFeatureRequest.FilterFid
+                if ftype == QgsFeatureRequest.FilterType.FilterFid
                 else list(self._request.filterFids())
             )
             if not self._provider._features_loaded:
@@ -154,13 +154,10 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                     field.name() for field in self._provider.fields()
                 ]
 
-            if len(list_field_names) > 0:
-                fields_name_for_query = ", ".join(quote_identifier(n) for n in list_field_names)
-            else:
-                fields_name_for_query = ""
-
-            if fields_name_for_query:
-                fields_name_for_query += ","
+            # The ST_ASWKB geometry column is projected immediately after the
+            # attribute columns, so its position in the result is the field
+            # count. The projection itself is assembled as a list further down
+            # (so the primary key is never duplicated).
             self.index_geom_column = len(list_field_names)
 
             # FilterFid/FilterFids are handled from the in-memory cache (see the
@@ -173,7 +170,7 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
             # attacker-influenceable (persisted in project files), so it is
             # compiled to SQL through a whitelist compiler; anything that does
             # not fully compile is NOT pushed down (QGIS filters client-side).
-            if self._request.filterType() == QgsFeatureRequest.FilterExpression:
+            if self._request.filterType() == QgsFeatureRequest.FilterType.FilterExpression:
                 expression = self._request.filterExpression().expression()
                 if expression:
                     compiled = compile_expression_to_sql(
@@ -261,25 +258,45 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                     for clause in where_clause_list[1:]:
                         where_clause += f" and {clause}"
 
-            geom_query = f'ST_ASWKB({quoted_geom}), '
-            if self._provider._geo_column_type == "TEXT":
-                geom_query = f'ST_ASWKB(H3_CELL_TO_BOUNDARY({quoted_geom})), {quoted_geom}, '
-            elif self._provider._geo_column_type == "NUMBER":
-                geom_query = (
-                    f'ST_ASWKB(H3_CELL_TO_BOUNDARY({quoted_geom})), '
-                    f'H3_INT_TO_STRING({quoted_geom}), '
-                )
-
             self._request_no_geometry = (
                 self._request.flags() & QgsFeatureRequest.Flag.NoGeometry
             )
-            if self._request_no_geometry:
-                geom_query = ""
 
+            # Geometry projection. For H3 (NUMBER/TEXT) the layer renders the
+            # cell boundary, so the WKB comes from H3_CELL_TO_BOUNDARY and the
+            # raw cell id/value follows it; otherwise it is a single ST_ASWKB.
+            geom_select_parts = []
+            if not self._request_no_geometry:
+                if self._provider._geo_column_type == "TEXT":
+                    geom_select_parts = [
+                        f"ST_ASWKB(H3_CELL_TO_BOUNDARY({quoted_geom}))",
+                        f"{quoted_geom}",
+                    ]
+                elif self._provider._geo_column_type == "NUMBER":
+                    geom_select_parts = [
+                        f"ST_ASWKB(H3_CELL_TO_BOUNDARY({quoted_geom}))",
+                        f"H3_INT_TO_STRING({quoted_geom})",
+                    ]
+                else:
+                    geom_select_parts = [f"ST_ASWKB({quoted_geom})"]
+
+            # SNOW-4134145 follow-up: the declared primary key is already part of
+            # the attribute projection, so re-selecting it here produced a
+            # duplicate output column and made an outer ``WHERE <pk>`` (the
+            # subset-string / filter-expression pushdown) fail with "ambiguous
+            # column name". Only a key-less layer needs a synthetic row column;
+            # feature ids themselves remain fetch-order positions regardless.
+            index_select_parts = []
             if self._provider.primary_key() == "":
-                index = "ROW_NUMBER() OVER (order by 1) as sfindexsfrownumberauto "
-            else:
-                index = self._provider._fields[self._provider.primary_key()].name()
+                index_select_parts = [
+                    "ROW_NUMBER() OVER (order by 1) as sfindexsfrownumberauto"
+                ]
+
+            inner_select = ", ".join(
+                [quote_identifier(n) for n in list_field_names]
+                + geom_select_parts
+                + index_select_parts
+            )
 
             mapped_type = mapping_multi_single_to_geometry_type.get(
                 self._provider._geometry_type
@@ -294,8 +311,7 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
 
             base_query = (
                 "select * from ("  # nosec B608 - from_clause pre-quoted; fragments built from quoted identifiers and validated fragments
-                f"select {fields_name_for_query} "
-                f"{geom_query} {index} "
+                f"select {inner_select} "
                 f"from {self._provider._from_clause} where {filter_geo_type} {filter_geom_clause}) "
                 f"{where_clause}"
             )
@@ -557,7 +573,7 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
         if result is not None:
             try:
                 result.close()
-            except Exception:
+            except Exception:  # nosec B110 - best-effort release of a server-side cursor during close(); a failure here must not raise from iterator teardown
                 pass
             self._result = None
         return True

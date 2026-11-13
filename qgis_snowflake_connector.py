@@ -65,6 +65,16 @@ from .sf_expression_functions import register_sf_functions, unregister_sf_functi
 from qgis.gui import QgsGui
 
 
+def get_plugin_version():
+    """Read the plugin version from metadata.txt (fallback: 0.0.0)."""
+    import configparser
+
+    meta_path = os.path.join(os.path.dirname(__file__), "metadata.txt")
+    cfg = configparser.ConfigParser()
+    cfg.read(meta_path)
+    return cfg.get("general", "version", fallback="0.0.0")
+
+
 class QGISSnowflakeConnectorPlugin(object):
     def __init__(self):
         self.provider = None
@@ -85,23 +95,65 @@ class QGISSnowflakeConnectorPlugin(object):
             self.sf_data_item_provider
         )
 
+        self._register_vector_provider()
+
+    def _register_vector_provider(self):
+        """Register the Snowflake vector data provider, detecting a stale
+        registration left by a previous plugin version.
+
+        QGIS registers a vector provider once per process and offers no way to
+        unregister it, so an in-place upgrade cannot replace the running
+        provider code. When that happens the previously registered provider is
+        still serving layers with the OLD code; the user must restart QGIS to
+        finish the upgrade. Detect this and warn instead of silently running
+        stale code.
+        """
         registry = QgsProviderRegistry.instance()
-        sf_metadata_provider = SFMetadataProvider()
+        current_version = get_plugin_version()
+
+        existing = registry.providerMetadata("snowflakedb")
+        if existing is not None:
+            existing_version = getattr(existing, "plugin_version", None)
+            # Warn on any version mismatch. An unmarked (None) provider was
+            # registered by a release that predates version tracking (<= 1.0.25),
+            # so it is still an older provider running stale code after an
+            # in-place upgrade. Only a positive same-version match is a benign
+            # same-version plugin reload.
+            if existing_version != current_version:
+                existing_label = existing_version or "an earlier version"
+                QgsMessageLog.logMessage(
+                    "A previous version of the Snowflake vector provider "
+                    f"({existing_label}) is still registered and cannot be "
+                    f"replaced by the installed version {current_version} while "
+                    "QGIS is running. Please restart QGIS to finish the "
+                    "upgrade.",
+                    "Snowflake Plugin",
+                    Qgis.MessageLevel.Warning,
+                )
+            else:
+                QgsMessageLog.logMessage(
+                    f"Snowflake vector provider already registered "
+                    f"(version {existing_version or 'unknown'}).",
+                    "Snowflake Plugin",
+                    Qgis.MessageLevel.Info,
+                )
+            return
+
+        sf_metadata_provider = SFMetadataProvider(current_version)
         registry.registerProvider(sf_metadata_provider)
+        QgsMessageLog.logMessage(
+            f"Snowflake vector provider {current_version} registered.",
+            "Snowflake Plugin",
+            Qgis.MessageLevel.Info,
+        )
 
     def _check_for_updates(self):
         """Check GitHub for a newer plugin release in a background thread."""
         try:
             import urllib.request
             import json
-            import configparser
 
-            meta_path = os.path.join(
-                os.path.dirname(__file__), "metadata.txt"
-            )
-            cfg = configparser.ConfigParser()
-            cfg.read(meta_path)
-            local_version = cfg.get("general", "version", fallback="0.0.0")
+            local_version = get_plugin_version()
 
             url = (
                 "https://api.github.com/repos/"

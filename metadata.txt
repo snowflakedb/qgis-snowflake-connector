@@ -7,7 +7,7 @@ name=Snowflake Connector for QGIS
 qgisMinimumVersion=3.34.1
 qgisMaximumVersion=4.99
 description=This package includes the Snowflake Connector for QGIS.
-version=1.0.22
+version=1.0.28
 author=Snowflake Inc.
 email=erick.cuberojimenez@snowflake.com
 
@@ -20,7 +20,57 @@ repository=https://github.com/snowflakedb/qgis-snowflake-connector/
 # Recommended items:
 
 hasProcessingProvider=yes
-changelog=1.0.22 - Fix from end-to-end feature testing: editing a feature on a
+changelog=1.0.28 - Packaging re-release of 1.0.27: ship the plugin as a
+ properly packaged ZIP whose top-level folder is "qgis-snowflake-connector"
+ (no version suffix), so installing via Plugins > Install from ZIP no longer
+ fails with "ModuleNotFoundError: No module named 'qgis-snowflake-connector-1'"
+ that occurs when QGIS is pointed at GitHub's auto-generated source archive.
+ No functional code change since 1.0.27.
+ 1.0.27 - Security-scan fix: replace the three remaining silent
+ best-effort try/except/pass blocks (remove_connection's auth-config removal
+ and cached-session purge in helpers/utils.py, and the connection close in
+ SFConnectionManager.purge_connection) with QgsMessageLog warning diagnostics,
+ so the Python security scanner's "Try, Except, Pass" (bandit B110) findings
+ are resolved without suppressions and cleanup failures are no longer silent.
+ No user-visible behaviour change.
+ 1.0.26 - Fixes from end-to-end testing:
+ * Filtering/subset-querying a layer by its primary-key column no longer fails
+   with "ambiguous column name": the feature iterator was projecting the
+   primary key twice (once in the field list and again as a trailing column).
+ * Export to Snowflake no longer creates the target table during parameter
+   validation; all table/schema creation now happens after the user consents,
+   so a cancelled export leaves no table behind.
+ * Spatial Join with the ST_DWITHIN predicate now exposes a validated Distance
+   parameter and generates valid SQL (ST_DWITHIN requires a distance argument).
+ * After an in-place upgrade, the plugin detects that a previous version's
+   vector provider is still registered (QGIS cannot replace it while running)
+   and logs a warning asking the user to restart QGIS to finish the upgrade.
+ 1.0.25 - Fix the Qt6 compatibility issues reported by the QGIS
+ Plugin Repository scan. Every flagged enum member is now accessed through
+ its enum scope (QgsWkbTypes.Type, QgsTask.Flag, QgsFeatureRequest.FilterType,
+ QgsVectorDataProvider.Capability, QgsProcessingParameterNumber.Type,
+ QgsProcessingAlgorithm.Flag, QDialogButtonBox.StandardButton), the provider's
+ defaultValue() returns qgis.core NULL instead of a bare QVariant(), and the
+ QGIS < 3.38 QVariant.Type fallback in create_qgs_field is resolved
+ dynamically because that attribute only exists on PyQt5. Scoped access is
+ value-identical on Qt5, so there is no behaviour change on QGIS 3.34-3.44.
+ 1.0.24 - Packaging/security fixes for the QGIS Plugin Repository
+ validation scan: annotate two best-effort cleanup try/except blocks (the
+ Buffer algorithm's temp-table teardown and the feature iterator's cursor
+ close) with documented bandit B110 suppressions, matching the convention
+ already used elsewhere, and remove the Sphinx help/make.bat Windows helper
+ so it no longer trips the suspicious-file check. No user-visible behaviour
+ change.
+ 1.0.23 - Fix plugin load failure ("AttributeError: module 'lib'
+ has no attribute 'GEN_EMAIL'"): this is a cryptography/pyOpenSSL version
+ mismatch in the QGIS Python environment (cryptography 49+ removed OpenSSL
+ bindings that older pyOpenSSL still references), not a QGIS version issue.
+ classFactory now catches any load-time exception (not just ImportError) so
+ the plugin degrades to a no-op stub with an actionable message instead of a
+ raw traceback dialog, and logs the resolved versions and paths of
+ snowflake-connector-python, cryptography and pyOpenSSL to help diagnose
+ per-user site-packages shadowing.
+ 1.0.22 - Fix from end-to-end feature testing: editing a feature on a
  Snowflake layer crashed with "TypeError: list indices must be integers or
  slices, not str" because FilterFid/FilterFids requests were pushed down to SQL
  using a column name as a list index. Feature ids are fetch-order positions, not

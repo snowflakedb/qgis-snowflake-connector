@@ -32,7 +32,7 @@ class SFExecuteSQLQueryTask(QgsTask):
             self.query = query
             super().__init__(
                 f"Snowflake Execute Query: {self.query}",
-                QgsTask.CanCancel,
+                QgsTask.Flag.CanCancel,
             )
             self.context_information = context_information
             self.limit = limit

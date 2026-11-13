@@ -35,6 +35,10 @@ def _load_helpers_utils(testcase):
     core = types.ModuleType("qgis.core")
     core.QgsApplication = type("QgsApplication", (), {})
     core.QgsAuthMethodConfig = type("QgsAuthMethodConfig", (), {})
+    core.QgsMessageLog = type(
+        "QgsMessageLog", (), {"logMessage": staticmethod(lambda *a, **k: None)}
+    )
+    core.Qgis = type("Qgis", (), {"MessageLevel": type("MessageLevel", (), {"Warning": 1})})
     qgis.core = core
     pyqt = types.ModuleType("qgis.PyQt")
     qtcore = types.ModuleType("qgis.PyQt.QtCore")
@@ -543,6 +547,20 @@ class TestSQLSafety(unittest.TestCase):
         with self.assertRaises(ValueError):
             mod.quote_json_literal_for_parse_json(payload)
 
+    def test_sql_statement_is_read_only(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "helpers.sql", ROOT / "helpers" / "sql.py"
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        self.assertTrue(mod.sql_statement_is_read_only("SELECT * FROM T"))
+        self.assertTrue(mod.sql_statement_is_read_only("WITH cte AS (SELECT 1) SELECT * FROM cte"))
+        self.assertFalse(mod.sql_statement_is_read_only("DROP TABLE T"))
+        self.assertFalse(mod.sql_statement_is_read_only("SELECT 1; DELETE FROM T"))
+        self.assertFalse(mod.sql_statement_is_read_only("INSERT INTO T VALUES (1)"))
+
     def test_predicate_has_statement_breakers(self):
         """SNOW-3712086: the free-text WHERE-clause guard must flag comments,
         statement terminators and set operators, while allowing a plain
@@ -840,7 +858,10 @@ class TestPhase4ProjectFileTrust(unittest.TestCase):
             encoding="utf-8"
         )
         idx = content.index("def close(self)")
-        body = content[idx:idx + 500]
+        # close() is the last method in the file, so read to EOF instead of a
+        # brittle fixed-width window (which broke when a documented `# nosec`
+        # annotation was added to the except line).
+        body = content[idx:]
         self.assertIn("result.close()", body)
         self.assertIn("self._result = None", body)
 
@@ -1081,6 +1102,22 @@ class TestPhase5Hardening(unittest.TestCase):
         qgis.PyQt = pyqt
         utils = types.ModuleType("qgis.utils")
         utils.iface = iface_value
+        root_pkg = types.ModuleType("sfc_root")
+        processing_pkg = types.ModuleType("sfc_root.processing")
+        helpers_pkg = types.ModuleType("sfc_root.helpers")
+        trust_policy_mod = types.ModuleType("sfc_root.helpers.trust_policy")
+
+        def _require_trusted_action_consent(_title, _message):
+            return iface_value is not None
+
+        trust_policy_mod.require_trusted_action_consent = _require_trusted_action_consent
+        helpers_pkg.trust_policy = trust_policy_mod
+        root_pkg.processing = processing_pkg
+        root_pkg.helpers = helpers_pkg
+        sys.modules["sfc_root"] = root_pkg
+        sys.modules["sfc_root.processing"] = processing_pkg
+        sys.modules["sfc_root.helpers"] = helpers_pkg
+        sys.modules["sfc_root.helpers.trust_policy"] = trust_policy_mod
         sys.modules["qgis"] = qgis
         sys.modules["qgis.core"] = core
         sys.modules["qgis.PyQt"] = pyqt
@@ -1089,17 +1126,22 @@ class TestPhase5Hardening(unittest.TestCase):
         sys.modules["qgis.utils"] = utils
 
         spec = importlib.util.spec_from_file_location(
-            "sfc_execute_sql_under_test", ROOT / "processing" / "execute_sql.py"
+            "sfc_root.processing.execute_sql",
+            ROOT / "processing" / "execute_sql.py",
+            submodule_search_locations=[str(ROOT / "processing")],
         )
         mod = importlib.util.module_from_spec(spec)
+        mod.__package__ = "sfc_root.processing"
+        processing_pkg.execute_sql = mod
+        sys.modules["sfc_root.processing.execute_sql"] = mod
         spec.loader.exec_module(mod)
         return mod
 
-    def test_execute_sql_headless_proceeds_without_prompt(self):
-        """SNOW-3712080: headless (no iface) runs are user-initiated and proceed."""
+    def test_execute_sql_headless_requires_opt_in(self):
+        """SNOW-4068892: headless runs must not auto-trust model-supplied SQL."""
         mod = self._load_execute_sql(iface_value=None)
         alg = mod.ExecuteSQLAlgorithm()
-        self.assertTrue(alg._confirm_execution("conn", "SELECT 1"))
+        self.assertFalse(alg._confirm_execution("conn", "SELECT 1"))
 
     def test_execute_sql_requires_confirmation_before_execution(self):
         """SNOW-3712080: the algorithm must gate execution on _confirm_execution
@@ -1117,7 +1159,7 @@ class TestPhase5Hardening(unittest.TestCase):
             "confirmation must happen before the SQL is executed",
         )
         self.assertIn("QgsProcessingException(", body)
-        self.assertIn("setTextFormat(Qt.TextFormat.PlainText)", content)
+        self.assertIn("require_trusted_action_consent", content)
 
 
 class TestProviderLifecycle(unittest.TestCase):
@@ -1308,11 +1350,18 @@ class TestStartupReliability(unittest.TestCase):
         self.assertIn("return _StubPlugin()", content)
 
     def test_init_catches_import_errors(self):
-        """classFactory must catch ImportError during plugin load and return stub."""
+        """classFactory must catch load errors during plugin load and return stub.
+
+        The handler is broadened to ``except Exception`` because the
+        cryptography/pyOpenSSL mismatch surfaces as an AttributeError
+        ("module 'lib' has no attribute 'GEN_EMAIL'"), not an ImportError.
+        """
         content = (ROOT / "__init__.py").read_text(encoding="utf-8")
-        self.assertIn("except ImportError as imp_err:", content)
+        self.assertIn("except Exception as load_err:", content)
         self.assertIn("cryptography", content)
         self.assertIn("ExtensionOID", content)
+        self.assertIn("module 'lib' has no attribute", content)
+        self.assertIn("_dependency_diagnostics", content)
 
     def test_check_install_package_returns_bool(self):
         content = (ROOT / "helpers" / "utils.py").read_text(encoding="utf-8")
@@ -1812,7 +1861,8 @@ class TestOpenIssueFixes(unittest.TestCase):
         self.assertIn("def create_qgs_field(", content)
         self.assertIn("QGIS_VERSION_INT", content)
         self.assertIn("33800", content)
-        self.assertIn("QVariant.Type(int(metatype))", content)
+        self.assertIn('getattr(QVariant, "Type")', content)
+        self.assertIn("qvariant_type(int(metatype))", content)
 
     def test_qgsfield_construction_sites_use_helper(self):
         """#120: every QgsField construction that takes a QMetaType.Type must
@@ -2341,6 +2391,208 @@ class TestStatementTimeoutSafetyNet(unittest.TestCase):
         self.assertIn("STATEMENT_TIMEOUT_IN_SECONDS", src)
 
 
+class TestGlasswingTrustPolicy(unittest.TestCase):
+    """CWE-441 remediation: untrusted workflows must not auto-run destructive SQL."""
+
+    def _load_trust_policy(self, iface_value=None, settings_value=False, env_value=None):
+        import os
+        import sys
+        import types
+        import importlib.util
+
+        env_key = "SNOWFLAKE_QGIS_ALLOW_HEADLESS_TRUSTED_ACTIONS"
+        prior_env = os.environ.get(env_key)
+        if env_value is None:
+            os.environ.pop(env_key, None)
+        else:
+            os.environ[env_key] = env_value
+
+        def _restore_env():
+            if prior_env is None:
+                os.environ.pop(env_key, None)
+            else:
+                os.environ[env_key] = prior_env
+        self.addCleanup(_restore_env)
+
+        names = (
+            "qgis", "qgis.core", "qgis.PyQt", "qgis.PyQt.QtCore",
+            "qgis.PyQt.QtWidgets", "qgis.utils",
+        )
+        saved = {n: sys.modules.get(n) for n in names}
+
+        def _restore_modules():
+            for n, prev in saved.items():
+                if prev is None:
+                    sys.modules.pop(n, None)
+                else:
+                    sys.modules[n] = prev
+        self.addCleanup(_restore_modules)
+
+        qgis = types.ModuleType("qgis")
+        core = types.ModuleType("qgis.core")
+        qgis.core = core
+        pyqt = types.ModuleType("qgis.PyQt")
+        qtcore = types.ModuleType("qgis.PyQt.QtCore")
+        qtcore.Qt = type("Qt", (), {"TextFormat": type("TextFormat", (), {"PlainText": 0})})
+        pyqt.QtCore = qtcore
+        qtwidgets = types.ModuleType("qgis.PyQt.QtWidgets")
+
+        class _FakeMessageBox:
+            Icon = type("Icon", (), {"Warning": 0})
+            StandardButton = type(
+                "StandardButton", (), {"Yes": 1, "No": 0}
+            )
+
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def setIcon(self, *_args, **_kwargs):
+                pass
+
+            def setWindowTitle(self, *_args, **_kwargs):
+                pass
+
+            def setTextFormat(self, *_args, **_kwargs):
+                pass
+
+            def setText(self, *_args, **_kwargs):
+                pass
+
+            def setStandardButtons(self, *_args, **_kwargs):
+                pass
+
+            def setDefaultButton(self, *_args, **_kwargs):
+                pass
+
+            def exec(self):
+                return self.StandardButton.No
+
+        qtwidgets.QMessageBox = _FakeMessageBox
+        pyqt.QtWidgets = qtwidgets
+        qgis.PyQt = pyqt
+        utils = types.ModuleType("qgis.utils")
+        utils.iface = iface_value
+        sys.modules["qgis"] = qgis
+        sys.modules["qgis.core"] = core
+        sys.modules["qgis.PyQt"] = pyqt
+        sys.modules["qgis.PyQt.QtCore"] = qtcore
+        sys.modules["qgis.PyQt.QtWidgets"] = qtwidgets
+        sys.modules["qgis.utils"] = utils
+
+        utils_mod = _load_helpers_utils(self)
+        sys.modules["qgis.PyQt.QtCore"].Qt = type(
+            "Qt", (), {"TextFormat": type("TextFormat", (), {"PlainText": 0})}
+        )
+
+        class _FakeSettings:
+            def value(self, key, defaultValue=False):
+                if key == "security/allow_headless_trusted_actions":
+                    return settings_value
+                return defaultValue
+
+        utils_mod.get_qsettings = lambda: _FakeSettings()
+
+        helpers_pkg = types.ModuleType("helpers")
+        helpers_pkg.utils = utils_mod
+        sys.modules["helpers"] = helpers_pkg
+        sys.modules["helpers.utils"] = utils_mod
+
+        spec = importlib.util.spec_from_file_location(
+            "helpers.trust_policy",
+            ROOT / "helpers" / "trust_policy.py",
+            submodule_search_locations=[str(ROOT / "helpers")],
+        )
+        mod = importlib.util.module_from_spec(spec)
+        mod.__package__ = "helpers"
+        helpers_pkg.trust_policy = mod
+        sys.modules["helpers.trust_policy"] = mod
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_headless_denies_without_opt_in(self):
+        mod = self._load_trust_policy(iface_value=None, settings_value=False)
+        self.assertFalse(mod.require_trusted_action_consent("t", "m"))
+
+    def test_headless_allows_with_env_opt_in(self):
+        mod = self._load_trust_policy(iface_value=None, env_value="1")
+        self.assertTrue(mod.require_trusted_action_consent("t", "m"))
+
+    def test_overwrite_algorithms_require_consent_before_execute(self):
+        for filename in [
+            "processing/buffer_table.py",
+            "processing/spatial_join.py",
+            "processing/h3_index.py",
+        ]:
+            content = (ROOT / filename).read_text(encoding="utf-8")
+            self.assertIn("FlagNoThreading", content)
+            self.assertIn("_confirm_overwrite", content)
+            idx = content.index("def processAlgorithm(")
+            body = content[idx:]
+            confirm_pos = body.index("_confirm_overwrite(")
+            exec_pos = body.index("mgr.execute_query(")
+            self.assertLess(confirm_pos, exec_pos, filename)
+
+    def test_custom_sql_layers_must_be_read_only(self):
+        content = (ROOT / "providers" / "sf_vector_data_provider.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("sql_statement_is_read_only", content)
+        start = content.index("if self._sql_query and not self._table_name:")
+        end = content.index("self.get_geometry_column()", start)
+        block = content[start:end]
+        self.assertIn("sql_statement_is_read_only(self._sql_query)", block)
+
+    def test_export_requires_consent_and_skips_final_batch_on_cancel(self):
+        content = (ROOT / "qgis_snowflake_connector_algorithm.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("def _confirm_export(", content)
+        self.assertIn("FlagNoThreading", content)
+        idx = content.index("def processAlgorithm(")
+        body = content[idx:]
+        self.assertIn("_confirm_export(", body)
+        self.assertIn("if not feedback.isCanceled() and rows_in_batch > 0:", body)
+        self.assertIn('return {"Rows Inserted": rows_inserted}', body)
+
+    def test_check_parameter_values_creates_no_table(self):
+        """F2: checkParameterValues runs during parameter validation, before the
+        user consents to the export. It must perform no DDL / no write."""
+        content = (ROOT / "qgis_snowflake_connector_algorithm.py").read_text(
+            encoding="utf-8"
+        )
+        idx = content.index("def checkParameterValues(")
+        end = content.index("\n    def ", idx + 1)
+        body = content[idx:end]
+        self.assertNotIn(
+            "create_table(",
+            body,
+            "checkParameterValues must not create the target table before "
+            "consent (F2)",
+        )
+        self.assertNotIn(
+            "get_create_table_query(",
+            body,
+            "checkParameterValues must not build a CREATE TABLE statement (F2)",
+        )
+
+    def test_table_created_only_after_consent(self):
+        """F2: in processAlgorithm the target table creation must happen after
+        _confirm_export() so a cancelled export leaves no table behind."""
+        content = (ROOT / "qgis_snowflake_connector_algorithm.py").read_text(
+            encoding="utf-8"
+        )
+        idx = content.index("def processAlgorithm(")
+        body = content[idx:]
+        confirm_pos = body.index("_confirm_export(")
+        create_pos = body.index("create_table(")
+        self.assertLess(
+            confirm_pos,
+            create_pos,
+            "create_table must be called after _confirm_export in "
+            "processAlgorithm (F2)",
+        )
+
+
 class TestImportDecimalCoercion(unittest.TestCase):
     """Regression: imported Snowflake NUMBER values arrive as Decimal, which
     the memory/OGR providers cannot store into a double field (the feature is
@@ -2355,6 +2607,647 @@ class TestImportDecimalCoercion(unittest.TestCase):
         flat = re.sub(r"\s+", "", src)
         self.assertIn("isinstance(val,Decimal)", flat)
         self.assertIn("float(val)", flat)
+
+
+class TestCaseCollidingPrimaryKey(unittest.TestCase):
+    """SNOW-4134145 / CWE-178: the declared-primary-key shortcut in
+    _validate_primary_key must compare identifiers case-sensitively.
+
+    Snowflake treats ``ID`` (unquoted -> folds to ``ID``) and ``"id"`` (quoted
+    -> stays ``id``) as two distinct columns. The old shortcut compared them
+    after a blanket ``.upper()`` fold, so a project author could persist
+    ``primary_key=ID`` in a shared .qgs/.qgz that case-collides with a table's
+    real quoted ``"id"`` key. That false match skipped the duplicate scan of
+    the URI-selected column, wrongly advertised UPDATE/DELETE capability on a
+    non-unique column, and turned one edit into silent mass DML.
+    """
+
+    def _load_sql(self):
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            "helpers.sql", ROOT / "helpers" / "sql.py"
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_identifiers_equal_exists(self):
+        mod = self._load_sql()
+        self.assertTrue(
+            hasattr(mod, "identifiers_equal"),
+            "helpers/sql.py must expose identifiers_equal for a case-sensitive "
+            "primary-key identity check",
+        )
+
+    def test_identifiers_equal_matches_exact_case(self):
+        mod = self._load_sql()
+        self.assertTrue(mod.identifiers_equal("ID", "ID"))
+        self.assertTrue(mod.identifiers_equal("id", "id"))
+        self.assertTrue(mod.identifiers_equal("GEOM_ID", "GEOM_ID"))
+
+    def test_identifiers_equal_rejects_case_collision(self):
+        """Case-only differences are DISTINCT columns and must not match."""
+        mod = self._load_sql()
+        self.assertTrue("id".upper() == "ID".upper())
+        self.assertFalse(mod.identifiers_equal("id", "ID"))
+        self.assertFalse(mod.identifiers_equal("ID", "id"))
+        self.assertFalse(mod.identifiers_equal("Id", "ID"))
+
+    def test_identifiers_equal_none_safe(self):
+        mod = self._load_sql()
+        self.assertFalse(mod.identifiers_equal(None, "ID"))
+        self.assertFalse(mod.identifiers_equal("ID", None))
+        self.assertFalse(mod.identifiers_equal(None, None))
+
+    def test_validate_primary_key_uses_case_sensitive_compare(self):
+        content = (ROOT / "providers" / "sf_vector_data_provider.py").read_text(
+            encoding="utf-8"
+        )
+        idx = content.index("def _validate_primary_key(self)")
+        next_def = content.index("\n    def ", idx + 1)
+        body = content[idx:next_def]
+        self.assertNotIn(
+            "self._primary_key.upper()",
+            body,
+            "the case-insensitive .upper() primary-key comparison must be "
+            "removed (SNOW-4134145 / CWE-178)",
+        )
+        self.assertIn("identifiers_equal(declared, self._primary_key)", body)
+        self.assertIn("identifiers_equal", content)
+
+
+class TestPrimaryKeyFilterProjection(unittest.TestCase):
+    """F1: filtering a layer by its primary-key column must not fail with
+    "ambiguous column name".
+
+    The iterator used to select the full field list (which already contains the
+    primary key) AND re-append the primary key as a trailing ``index`` column,
+    so the inner subquery produced two columns named e.g. ``ID``. A plain
+    ``select *`` fetch tolerated the duplicate, but the subset-string / filter
+    pushdown wraps the subquery in an outer ``WHERE <pk> = ...`` which then
+    failed to compile. The projection is now assembled as a list that includes
+    the primary key exactly once; a synthetic row column is emitted only for a
+    key-less layer.
+    """
+
+    def _iterator_content(self):
+        return (ROOT / "providers" / "sf_feature_iterator.py").read_text(
+            encoding="utf-8"
+        )
+
+    def test_primary_key_not_reselected_as_trailing_column(self):
+        content = self._iterator_content()
+        self.assertNotIn(
+            "index = self._provider._fields[self._provider.primary_key()].name()",
+            content,
+            "the primary key must not be re-selected as a separate output "
+            "column (it is already in the field projection) -- the duplicate "
+            "made an outer WHERE <pk> ambiguous (F1)",
+        )
+
+    def test_projection_assembled_as_list_with_single_pk(self):
+        content = self._iterator_content()
+        self.assertIn("inner_select = \", \".join(", content)
+        self.assertIn(
+            "[quote_identifier(n) for n in list_field_names]", content
+        )
+        self.assertIn("f\"select {inner_select} \"", content)
+
+    def test_synthetic_row_column_only_without_primary_key(self):
+        content = self._iterator_content()
+        idx = content.index("index_select_parts = []")
+        # The synthetic ROW_NUMBER column is guarded by the empty-PK check that
+        # immediately precedes/follows the list initialisation.
+        window = content[idx - 200 : idx + 200]
+        self.assertIn('self._provider.primary_key() == ""', window)
+        self.assertIn("sfindexsfrownumberauto", content)
+
+
+class TestSpatialJoinDWithin(unittest.TestCase):
+    """F3: the spatial-join ST_DWITHIN predicate requires a distance argument.
+
+    The algorithm built every predicate as ``PREDICATE(a.geo, b.geo)``, so
+    choosing ST_DWITHIN produced ``ST_DWITHIN(a.geo, b.geo)`` which Snowflake
+    rejects (missing distance). A validated, optional Distance parameter is now
+    added and the distance is appended only for ST_DWITHIN.
+    """
+
+    def _content(self):
+        return (ROOT / "processing" / "spatial_join.py").read_text(
+            encoding="utf-8"
+        )
+
+    def test_distance_parameter_added(self):
+        content = self._content()
+        self.assertIn("QgsProcessingParameterNumber", content)
+        self.assertIn('DISTANCE = "DISTANCE"', content)
+        self.assertIn("self.DISTANCE", content)
+
+    def test_dwithin_requires_distance(self):
+        content = self._content()
+        idx = content.index("def processAlgorithm(")
+        body = content[idx:]
+        self.assertIn('if predicate == "ST_DWITHIN":', body)
+        self.assertIn("ST_DWITHIN requires a Distance", body)
+        self.assertIn("Distance must be a non-negative value.", body)
+
+    def test_distance_appended_only_for_dwithin(self):
+        content = self._content()
+        self.assertIn(
+            "on_clause = f\"{predicate}(a.{qlg}, b.{qrg}, {distance})\"", content
+        )
+        self.assertIn(
+            "on_clause = f\"{predicate}(a.{qlg}, b.{qrg})\"", content
+        )
+        self.assertIn("ON {on_clause}", content)
+
+
+class TestStaleProviderDetection(unittest.TestCase):
+    """F4: QGIS registers the Snowflake vector provider once per process and
+    never unregisters it, so an in-place upgrade cannot replace the running
+    provider code. The plugin must detect a stale registration and tell the
+    user to restart QGIS instead of silently serving old code.
+    """
+
+    def test_metadata_provider_has_version_marker(self):
+        content = (ROOT / "providers" / "sf_metadata_provider.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("def __init__(self, plugin_version", content)
+        self.assertIn("self.plugin_version = plugin_version", content)
+
+    def test_plugin_has_version_helper(self):
+        content = (ROOT / "qgis_snowflake_connector.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("def get_plugin_version(", content)
+
+    def test_register_inspects_existing_metadata_and_warns(self):
+        content = (ROOT / "qgis_snowflake_connector.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("def _register_vector_provider(self)", content)
+        idx = content.index("def _register_vector_provider(self)")
+        end = content.index("\n    def ", idx + 1)
+        body = content[idx:end]
+        self.assertIn('registry.providerMetadata("snowflakedb")', body)
+        self.assertIn('getattr(existing, "plugin_version", None)', body)
+        self.assertIn("Please restart QGIS to finish the", body)
+        self.assertIn("Qgis.MessageLevel.Warning", body)
+        # The provider is still registered with its version on first load.
+        self.assertIn("SFMetadataProvider(current_version)", body)
+
+    def test_register_warns_on_unmarked_previous_provider(self):
+        """An in-place upgrade from <= 1.0.25 leaves a provider whose
+        plugin_version marker is None. That is still an older provider running
+        stale code, so it must trigger the restart warning, not a benign
+        "already registered" info message."""
+        content = (ROOT / "qgis_snowflake_connector.py").read_text(
+            encoding="utf-8"
+        )
+        idx = content.index("def _register_vector_provider(self)")
+        end = content.index("\n    def ", idx + 1)
+        body = content[idx:end]
+        # The warning fires on any mismatch, including the unmarked (None) case.
+        self.assertIn("if existing_version != current_version:", body)
+        # The old guard that suppressed the warning for None markers is gone.
+        self.assertNotIn(
+            "existing_version is not None and existing_version != current_version",
+            body,
+        )
+
+    def test_init_processing_delegates_registration(self):
+        content = (ROOT / "qgis_snowflake_connector.py").read_text(
+            encoding="utf-8"
+        )
+        idx = content.index("def initProcessing(self)")
+        end = content.index("\n    def ", idx + 1)
+        body = content[idx:end]
+        self.assertIn("self._register_vector_provider()", body)
+
+
+def _load_connection_manager(testcase, present_connections):
+    """Load managers/sf_connection_manager.py against self-contained stubs."""
+    import sys
+    import types
+    import importlib.util
+
+    names = (
+        "snowflake",
+        "snowflake.connector",
+        "snowflake.connector.cursor",
+        "qgis",
+        "qgis.core",
+        "qgis_snowflake_connector",
+        "qgis_snowflake_connector.managers",
+        "qgis_snowflake_connector.managers.sf_connection_manager",
+        "qgis_snowflake_connector.helpers",
+        "qgis_snowflake_connector.helpers.utils",
+        "qgis_snowflake_connector.helpers.sql",
+    )
+    saved = {n: sys.modules.get(n) for n in names}
+
+    def _restore():
+        for n, prev in saved.items():
+            if prev is None:
+                sys.modules.pop(n, None)
+            else:
+                sys.modules[n] = prev
+
+    testcase.addCleanup(_restore)
+
+    snowflake = types.ModuleType("snowflake")
+    connector = types.ModuleType("snowflake.connector")
+    connector.SnowflakeConnection = type("SnowflakeConnection", (), {})
+
+    def _stub_connect(**_kwargs):
+        raise RuntimeError("stub snowflake.connector.connect must not be reached")
+
+    connector.connect = _stub_connect
+    cursor_mod = types.ModuleType("snowflake.connector.cursor")
+    cursor_mod.SnowflakeCursor = type("SnowflakeCursor", (), {})
+    connector.cursor = cursor_mod
+    snowflake.connector = connector
+
+    qgis = types.ModuleType("qgis")
+    core = types.ModuleType("qgis.core")
+    core.Qgis = type(
+        "Qgis", (), {"MessageLevel": type("ML", (), {"Critical": 0, "Warning": 1})}
+    )
+    core.QgsMessageLog = type(
+        "QgsMessageLog", (), {"logMessage": staticmethod(lambda *a, **k: None)}
+    )
+    qgis.core = core
+
+    plugin_pkg = types.ModuleType("qgis_snowflake_connector")
+    plugin_pkg.__path__ = [str(ROOT)]
+    managers_pkg = types.ModuleType("qgis_snowflake_connector.managers")
+    managers_pkg.__path__ = [str(ROOT / "managers")]
+    helpers_pkg = types.ModuleType("qgis_snowflake_connector.helpers")
+    helpers_pkg.__path__ = [str(ROOT / "helpers")]
+    helpers_utils = types.ModuleType("qgis_snowflake_connector.helpers.utils")
+    helpers_utils.get_auth_information = lambda name: {}
+    helpers_utils.connection_settings_exist = (
+        lambda name: name in present_connections
+    )
+    helpers_sql = types.ModuleType("qgis_snowflake_connector.helpers.sql")
+    helpers_sql.quote_identifier = lambda n: n
+
+    for mod in (
+        snowflake,
+        connector,
+        cursor_mod,
+        qgis,
+        core,
+        plugin_pkg,
+        managers_pkg,
+        helpers_pkg,
+        helpers_utils,
+        helpers_sql,
+    ):
+        sys.modules[mod.__name__] = mod
+
+    spec = importlib.util.spec_from_file_location(
+        "qgis_snowflake_connector.managers.sf_connection_manager",
+        ROOT / "managers" / "sf_connection_manager.py",
+    )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+class TestDeletedConnectionSessionExpiration(unittest.TestCase):
+    """SNOW-4134146 / CWE-613: a deleted connection must not remain usable
+    through a surviving project handle and keep-alive Snowflake session.
+    """
+
+    class _FakeConn:
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    def test_get_connection_purges_stale_session_when_settings_deleted(self):
+        mod = _load_connection_manager(self, present_connections={"live_conn"})
+        mgr = mod.SFConnectionManager.get_instance()
+        mgr.opened_connections = {}
+        mgr._active_schemas = {}
+        mgr._active_query_tags = {}
+
+        live = self._FakeConn()
+        deleted = self._FakeConn()
+        mgr.opened_connections["live_conn"] = live
+        mgr.opened_connections["deleted_conn"] = deleted
+        mgr._active_schemas["deleted_conn"] = "PUBLIC"
+        mgr._active_query_tags["deleted_conn"] = "tag"
+
+        self.assertIs(mgr.get_connection("live_conn"), live)
+        self.assertFalse(live.closed)
+
+        self.assertIsNone(
+            mgr.get_connection("deleted_conn"),
+            "get_connection() returned a session for a deleted connection; a "
+            "keep-alive session must expire when its settings are removed "
+            "(CWE-613).",
+        )
+        self.assertNotIn("deleted_conn", mgr.opened_connections)
+        self.assertTrue(deleted.closed)
+        self.assertNotIn("deleted_conn", mgr._active_schemas)
+        self.assertNotIn("deleted_conn", mgr._active_query_tags)
+
+    class _FakeCursorConn:
+        def __init__(self):
+            self.closed = False
+            self.expired = False
+            self.cursor_calls = 0
+
+        def cursor(self):
+            self.cursor_calls += 1
+            return object()
+
+        def close(self):
+            self.closed = True
+
+    def test_create_cursor_purges_and_refuses_deleted_connection(self):
+        """execute_query reaches a session via create_cursor, so the stale
+        session guard must also fire here (CWE-613)."""
+        mod = _load_connection_manager(self, present_connections={"live_conn"})
+        mgr = mod.SFConnectionManager.get_instance()
+        mgr.opened_connections = {}
+        mgr._active_schemas = {}
+        mgr._active_query_tags = {}
+
+        deleted = self._FakeCursorConn()
+        mgr.opened_connections["deleted_conn"] = deleted
+        mgr._active_schemas["deleted_conn"] = "PUBLIC"
+        mgr._active_query_tags["deleted_conn"] = "tag"
+
+        with self.assertRaises(Exception):
+            mgr.create_cursor("deleted_conn")
+
+        self.assertNotIn("deleted_conn", mgr.opened_connections)
+        self.assertTrue(deleted.closed)
+        self.assertNotIn("deleted_conn", mgr._active_schemas)
+        self.assertNotIn("deleted_conn", mgr._active_query_tags)
+
+    def test_create_cursor_returns_cursor_for_live_connection(self):
+        mod = _load_connection_manager(self, present_connections={"live_conn"})
+        mgr = mod.SFConnectionManager.get_instance()
+        mgr.opened_connections = {}
+        mgr._active_schemas = {}
+        mgr._active_query_tags = {}
+
+        live = self._FakeCursorConn()
+        mgr.opened_connections["live_conn"] = live
+
+        self.assertIsNotNone(mgr.create_cursor("live_conn"))
+        self.assertEqual(live.cursor_calls, 1)
+        self.assertFalse(live.closed)
+        self.assertIn("live_conn", mgr.opened_connections)
+
+    class _RaisingCloseConn:
+        def close(self):
+            raise RuntimeError("close failed")
+
+    def test_purge_connection_drops_state_when_close_raises(self):
+        """purge_connection is best-effort: a failing close() must not
+        propagate and must still drop the cached session and per-session
+        state (CWE-613)."""
+        mod = _load_connection_manager(self, present_connections=set())
+        mgr = mod.SFConnectionManager.get_instance()
+        mgr.opened_connections = {}
+        mgr._active_schemas = {}
+        mgr._active_query_tags = {}
+
+        mgr.opened_connections["deleted_conn"] = self._RaisingCloseConn()
+        mgr._active_schemas["deleted_conn"] = "PUBLIC"
+        mgr._active_query_tags["deleted_conn"] = "tag"
+
+        mgr.purge_connection("deleted_conn")
+
+        self.assertNotIn("deleted_conn", mgr.opened_connections)
+        self.assertNotIn("deleted_conn", mgr._active_schemas)
+        self.assertNotIn("deleted_conn", mgr._active_query_tags)
+
+    def test_get_connection_source_checks_settings_existence(self):
+        content = (ROOT / "managers" / "sf_connection_manager.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("connection_settings_exist", content)
+        self.assertIn("def purge_connection(", content)
+
+    def test_create_cursor_source_checks_settings_existence(self):
+        content = (ROOT / "managers" / "sf_connection_manager.py").read_text(
+            encoding="utf-8"
+        )
+        idx = content.index("def create_cursor(")
+        next_def = content.index("\n    def ", idx + 1)
+        body = content[idx:next_def]
+        self.assertIn("connection_settings_exist", body)
+        self.assertIn("purge_connection", body)
+
+    def test_remove_connection_purges_manager_session(self):
+        content = (ROOT / "helpers" / "utils.py").read_text(encoding="utf-8")
+        idx = content.index("def remove_connection(")
+        next_def = content.index("\ndef connection_settings_exist(", idx)
+        body = content[idx:next_def]
+        self.assertIn("purge_connection", body)
+
+    def test_remove_connection_removes_auth_configs_before_settings_delete(self):
+        """The layer_authcfg id and credential config_id must be read before
+        the settings group is wiped and then deleted from the auth manager, so
+        a surviving project authcfg= token can no longer re-authenticate as the
+        deleted alias (CWE-613)."""
+        content = (ROOT / "helpers" / "utils.py").read_text(encoding="utf-8")
+        idx = content.index("def remove_connection(")
+        next_def = content.index("\ndef connection_settings_exist(", idx)
+        body = content[idx:next_def]
+
+        self.assertIn("removeAuthenticationConfig", body)
+        self.assertIn("_LAYER_AUTHCFG_MAP_KEY", body)
+
+        # The ids must be captured before the group is removed, otherwise there
+        # is nothing left to delete from the auth manager.
+        read_idx = body.index("_LAYER_AUTHCFG_MAP_KEY")
+        remove_idx = body.index('settings.remove("")')
+        self.assertLess(
+            read_idx,
+            remove_idx,
+            "auth-config ids must be read before the settings group is removed",
+        )
+
+
+class TestForcedSMBDataSourceManagerWidget(unittest.TestCase):
+    """SNOW-4134147 / CWE-116: Data Source Manager dialogs must force PlainText
+    so crafted catalog identifiers cannot trigger SMB/NTLM via rich text.
+    """
+
+    WIDGET = ROOT / "dialogs" / "sf_data_source_manager_widget.py"
+    PAYLOAD = 'SELECT count(*) FROM "<img src=\\\\alice.example\\share\\p>"'
+
+    def _widget_source(self):
+        return self.WIDGET.read_text(encoding="utf-8")
+
+    def test_qt_imported_for_textformat(self):
+        content = self._widget_source()
+        self.assertRegex(
+            content,
+            r"from qgis\.PyQt\.QtCore import [^\n]*\bQt\b",
+            "Qt must be imported from qgis.PyQt.QtCore",
+        )
+
+    def test_no_autotext_information_boxes_remain(self):
+        content = self._widget_source()
+        self.assertNotIn(
+            "QMessageBox.information(",
+            content,
+            "AutoText QMessageBox.information() must be replaced by a "
+            "PlainText-forcing helper",
+        )
+
+    def test_double_click_handler_does_not_use_autotext(self):
+        content = self._widget_source()
+        idx = content.index("def on_m_tables_tree_view_double_clicked(")
+        end = content.index("\n    def ", idx + 1)
+        body = content[idx:end]
+        self.assertNotIn("QMessageBox.information(", body)
+
+    def test_widget_forces_plain_text(self):
+        content = self._widget_source()
+        self.assertIn("setTextFormat(Qt.TextFormat.PlainText)", content)
+
+    def test_stale_catalog_generation_guard_present(self):
+        content = self._widget_source()
+        self.assertIn("_catalog_generation", content)
+        self.assertIn("_on_connection_selection_changed", content)
+        self.assertIn("catalog_generation != self._catalog_generation", content)
+        connect_task = (ROOT / "tasks" / "sf_connect_task.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("on_data_ready = pyqtSignal(str, int, list)", connect_task)
+
+    def test_connect_does_not_trust_catalog_before_response(self):
+        """on_btn_connect_clicked must not pre-set _catalog_connection, or a
+        double-click on the previous connection's still-visible rows would pass
+        the stale-selection guard (SNOW-4134147)."""
+        content = self._widget_source()
+        idx = content.index("def on_btn_connect_clicked(")
+        end = content.index("\n    def ", idx + 1)
+        body = content[idx:end]
+        self.assertIn("self._catalog_connection = None", body)
+        self.assertNotIn("self._catalog_connection = selected_connection", body)
+
+    def test_data_ready_sets_catalog_connection_after_checks(self):
+        content = self._widget_source()
+        idx = content.index("def on_data_ready(")
+        end = content.index("\n    def ", idx + 1)
+        body = content[idx:end]
+        guard_idx = body.index("catalog_generation != self._catalog_generation")
+        set_idx = body.index("self._catalog_connection = connection_name")
+        self.assertLess(
+            guard_idx,
+            set_idx,
+            "_catalog_connection must only be set after the generation/alias "
+            "checks pass",
+        )
+
+    def test_connection_change_ignores_combo_rebuild(self):
+        """currentIndexChanged also fires while the combo is cleared/rebuilt;
+        re-selecting the same alias must not bump the generation and wipe a
+        valid tree (SNOW-4134147)."""
+        content = self._widget_source()
+        idx = content.index("def _on_connection_selection_changed(")
+        end = content.index("\n    def ", idx + 1)
+        body = content[idx:end]
+        self.assertIn("== self._catalog_connection", body)
+        guard_idx = body.index("== self._catalog_connection")
+        bump_idx = body.index("self._catalog_generation += 1")
+        self.assertLess(
+            guard_idx,
+            bump_idx,
+            "the same-alias/empty guard must short-circuit before the "
+            "generation is bumped",
+        )
+
+    def _extract_show_information(self):
+        import ast
+
+        src = self._widget_source()
+        tree = ast.parse(src)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef) and node.name.startswith(
+                "SFDataSourceManagerWidget"
+            ):
+                for item in node.body:
+                    if (
+                        isinstance(item, ast.FunctionDef)
+                        and item.name == "_show_information"
+                    ):
+                        return ast.get_source_segment(src, item)
+        return None
+
+    def test_show_information_helper_renders_payload_as_plain_text(self):
+        import textwrap
+
+        func_src = self._extract_show_information()
+        self.assertIsNotNone(
+            func_src,
+            "SFDataSourceManagerWidget must expose a _show_information helper "
+            "that forces plain text",
+        )
+
+        recorded = {}
+
+        class _FakeIcon:
+            Information = "information"
+
+        class _FakeTextFormat:
+            PlainText = "PlainText"
+            RichText = "RichText"
+            AutoText = "AutoText"
+
+        class _FakeQt:
+            TextFormat = _FakeTextFormat
+
+        class _FakeMessageBox:
+            Icon = _FakeIcon
+
+            def __init__(self, parent=None):
+                recorded["created"] = True
+                recorded["text_format"] = None
+
+            def setIcon(self, icon):
+                recorded["icon"] = icon
+
+            def setWindowTitle(self, title):
+                recorded["title"] = title
+
+            def setTextFormat(self, fmt):
+                recorded["text_format"] = fmt
+
+            def setText(self, text):
+                recorded["text"] = text
+
+            def exec(self):
+                recorded["exec"] = True
+
+        namespace = {"QMessageBox": _FakeMessageBox, "Qt": _FakeQt}
+        exec(textwrap.dedent(func_src), namespace)
+        helper = namespace["_show_information"]
+        helper(object(), "Double-clicked on Table", self.PAYLOAD)
+
+        self.assertTrue(recorded.get("exec"), "the dialog must be shown")
+        self.assertEqual(
+            recorded.get("text_format"),
+            _FakeTextFormat.PlainText,
+            "the helper must force Qt.TextFormat.PlainText",
+        )
+        self.assertEqual(recorded.get("text"), self.PAYLOAD)
+        self.assertNotEqual(recorded.get("text_format"), _FakeTextFormat.AutoText)
+        self.assertNotEqual(recorded.get("text_format"), _FakeTextFormat.RichText)
 
 
 if __name__ == "__main__":

@@ -22,9 +22,28 @@ The installed zip is missing the `tasks/` directory. Rebuild the package ensurin
 
 The zip has files at the top level instead of inside a root directory. The zip must contain `qgis-snowflake-connector/` as the root folder with all plugin files inside it.
 
+### "AttributeError: module 'lib' has no attribute 'GEN_EMAIL'"
+
+Incompatible `cryptography` / `pyOpenSSL` pair in the Python environment QGIS is using. `cryptography` 49.0.0 removed the OpenSSL CFFI bindings (`GEN_EMAIL`, `GEN_DNS`, `GEN_URI`) that older `pyOpenSSL` (<= 26.1.0) references in its `X509Extension` class body, so `import OpenSSL` raises at import time. `snowflake-connector-python` imports `OpenSSL`, so the plugin fails to load with a raw traceback that mentions QGIS/Qt paths but is unrelated to the QGIS version (QGIS 3.34.1 through 4.x are all supported).
+
+Version boundary: `pyOpenSSL` only stopped referencing these symbols in 26.2.0. Compatible pairs are e.g. `pyOpenSSL` 26.2.0 with `cryptography` < 49, or `pyOpenSSL` >= 26.3.0 with `cryptography` >= 49.
+
+Fix, using QGIS's own interpreter (on Windows, the OSGeo4W Shell; elsewhere, run `import sys; print(sys.executable)` in the QGIS Python console). Upgrade the pair together, never `cryptography` alone. The correct command depends on the installed `snowflake-connector-python`:
+
+- Connector >= 4.7.2 (no upper bounds on either dependency):
+```bash
+python -m pip install --upgrade "snowflake-connector-python" cryptography pyopenssl
+```
+- Connector 4.0.0 (pins `pyOpenSSL < 26.0.0`, below the fixed version): also upgrade the connector so a modern `pyOpenSSL` is allowed, otherwise pin `cryptography` below 49:
+```bash
+python -m pip install --upgrade "snowflake-connector-python>=4.7.2" cryptography pyopenssl
+```
+
+Then restart QGIS. If the mismatch persists, a copy in your per-user site-packages (e.g. `%APPDATA%\Python\PythonXX\site-packages` on Windows) may be shadowing QGIS's bundled packages; the two layers can hold different versions that no resolver ever validated together. The plugin's `__init__.py` catches this and logs a diagnostic with the resolved versions and paths.
+
 ### "cannot import name 'ExtensionOID' from 'cryptography.hazmat._oid'"
 
-Outdated `cryptography` package. Fix: `python3 -m pip install --upgrade cryptography pyopenssl`, then restart QGIS. The plugin's `__init__.py` catches this and logs a diagnostic message.
+Outdated `cryptography` package. Fix, using QGIS's own interpreter (on Windows, the OSGeo4W Shell): `python -m pip install --upgrade cryptography pyopenssl` — always upgrade the pair together, never `cryptography` alone. Then restart QGIS. The plugin's `__init__.py` catches this and logs a diagnostic message.
 
 ### "required dependencies could not be installed"
 

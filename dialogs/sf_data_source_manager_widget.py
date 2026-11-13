@@ -26,7 +26,7 @@ from .sf_connection_string_dialog import SFConnectionStringDialog
 from ..ui.sf_data_source_manager_widget import Ui_QgsDbSourceSelectBase
 from qgis.core import QgsApplication
 from qgis.gui import QgsAbstractDataSourceWidget
-from qgis.PyQt.QtCore import QModelIndex
+from qgis.PyQt.QtCore import QModelIndex, Qt
 from qgis.PyQt.QtGui import QStandardItemModel, QStandardItem
 from qgis.PyQt.QtWidgets import QMessageBox, QWidget, QComboBox, QTabWidget
 import typing
@@ -43,6 +43,11 @@ class SFDataSourceManagerWidget(QgsAbstractDataSourceWidget, Ui_QgsDbSourceSelec
         super().__init__(parent)
         self.setupUi(self)
         self.cmbConnections: QComboBox
+        self._running_tasks = {}
+        # SNOW-4134147: invalidate in-flight catalog completions when the user
+        # switches connection so stale rows from another alias cannot be used.
+        self._catalog_generation = 0
+        self._catalog_connection: typing.Optional[str] = None
         self.btnNew.clicked.connect(self.on_btn_new_clicked)
         self.btnConnect.clicked.connect(self.on_btn_connect_clicked)
         self.btnEdit.clicked.connect(self.on_btn_edit_clicked)
@@ -50,12 +55,14 @@ class SFDataSourceManagerWidget(QgsAbstractDataSourceWidget, Ui_QgsDbSourceSelec
         self.mTablesTreeView.doubleClicked.connect(
             self.on_m_tables_tree_view_double_clicked
         )
+        self.cmbConnections.currentIndexChanged.connect(
+            self._on_connection_selection_changed
+        )
         self.settings = get_qsettings()
         self.model = QStandardItemModel()
         self.set_headers_model()
         self.update_cmb_connections()
         self.deactivate_temp()
-        self._running_tasks = {}
 
     def deactivate_temp(self) -> None:
         """
@@ -68,6 +75,44 @@ class SFDataSourceManagerWidget(QgsAbstractDataSourceWidget, Ui_QgsDbSourceSelec
         self.cbxAllowGeometrylessTables.setVisible(False)
         self.mHoldDialogOpen.setVisible(False)
         self.buttonBox.setVisible(False)
+
+    def _show_information(self, title: str, text: str) -> None:
+        """Display an information dialog that renders ``text`` as plain text.
+
+        Snowflake catalog identifiers (schema/table names) come from a Data
+        Sharing/Marketplace provider or co-tenant, and the error strings that
+        echo them back are equally provider-controlled. A crafted quoted
+        identifier can embed rich text such as an ``<img>`` tag whose source is
+        a UNC path. QMessageBox's default AutoText format runs
+        ``Qt::mightBeRichText()`` on the message and, on a match, renders it as
+        HTML and auto-resolves the image source, forcing an outbound SMB/NTLM
+        handshake that leaks the endpoint's NetNTLM credentials. Forcing
+        ``Qt.TextFormat.PlainText`` renders the value literally and closes the
+        CWE-116 output-encoding gap for every dialog raised by this widget
+        (SNOW-4134147).
+        """
+        msg_box = QMessageBox(None)
+        msg_box.setIcon(QMessageBox.Icon.Information)
+        msg_box.setWindowTitle(title)
+        msg_box.setTextFormat(Qt.TextFormat.PlainText)
+        msg_box.setText(text)
+        msg_box.exec()
+
+    def _on_connection_selection_changed(self, *_args) -> None:
+        """Clear the catalog tree when the selected connection changes.
+
+        currentIndexChanged also fires while the combo is rebuilt (clear() +
+        re-add in update_cmb_connections), which would otherwise wipe a valid
+        tree. Only invalidate when a real, different connection is selected.
+        """
+        selected_connection = self.cmbConnections.currentText()
+        if not selected_connection:
+            return
+        if selected_connection == self._catalog_connection:
+            return
+        self._catalog_generation += 1
+        self._catalog_connection = None
+        self.clean_items_from_model()
 
     def on_m_tables_tree_view_double_clicked(self, index: QModelIndex) -> bool:
         """
@@ -94,6 +139,19 @@ class SFDataSourceManagerWidget(QgsAbstractDataSourceWidget, Ui_QgsDbSourceSelec
             data_type = model.data(qmi_data_type)
 
             selected_connection = self.cmbConnections.currentText()
+            # Reject stale rows left over from another connection's catalog
+            # completion (SNOW-4134147).
+            if (
+                self._catalog_connection is None
+                or self._catalog_connection != selected_connection
+            ):
+                self._show_information(
+                    "Stale Catalog Selection",
+                    "The selected table belongs to a previous connection. "
+                    "Please click Connect again for the current connection "
+                    "before loading a layer.",
+                )
+                return False
             auth_information = get_auth_information(selected_connection)
 
             context_information = {
@@ -158,8 +216,7 @@ class SFDataSourceManagerWidget(QgsAbstractDataSourceWidget, Ui_QgsDbSourceSelec
             return True
 
         except Exception as e:
-            QMessageBox.information(
-                None,
+            self._show_information(
                 "Double-clicked on Table",
                 f"Double-clicked on table failed.\n\nExtended error information:\n{str(e)}",
             )
@@ -197,8 +254,7 @@ class SFDataSourceManagerWidget(QgsAbstractDataSourceWidget, Ui_QgsDbSourceSelec
 
             self.refresh()
         except Exception as e:
-            QMessageBox.information(
-                None,
+            self._show_information(
                 "Refreshing Connection List",
                 f"Refreshing connection list failed.\n\nExtended error information:\n{str(e)}",
             )
@@ -225,8 +281,7 @@ class SFDataSourceManagerWidget(QgsAbstractDataSourceWidget, Ui_QgsDbSourceSelec
                 )
                 self.update_cmb_connections()
         except Exception as e:
-            QMessageBox.information(
-                None,
+            self._show_information(
                 "Deleting Connection",
                 f"Deleting connection failed.\n\nExtended error information:\n{str(e)}",
             )
@@ -297,8 +352,7 @@ class SFDataSourceManagerWidget(QgsAbstractDataSourceWidget, Ui_QgsDbSourceSelec
                     )
                 another_window.exec()
         except Exception as e:
-            QMessageBox.information(
-                None,
+            self._show_information(
                 "Editing Connection",
                 f"Editing connection failed.\n\nExtended error information:\n{str(e)}",
             )
@@ -339,40 +393,62 @@ class SFDataSourceManagerWidget(QgsAbstractDataSourceWidget, Ui_QgsDbSourceSelec
         try:
             selected_connection = self.cmbConnections.currentText()
             if selected_connection is not None and selected_connection != "":
-                task = SFConnectTask(selected_connection)
+                # SNOW-4134147: do not trust the tree until this connection's
+                # own catalog response arrives. Leaving _catalog_connection set
+                # here would let a double-click on the previous connection's
+                # still-visible rows pass the stale-selection guard. It is only
+                # set in on_data_ready once the generation and alias match.
+                self._catalog_generation += 1
+                generation = self._catalog_generation
+                self._catalog_connection = None
+                self.clean_items_from_model()
+                task = SFConnectTask(
+                    selected_connection, catalog_generation=generation
+                )
                 task.on_data_ready.connect(self.on_data_ready)
                 task.on_handle_error.connect(on_handle_error)
                 QgsApplication.taskManager().addTask(task)
             else:
-                QMessageBox.information(
-                    None,
+                self._show_information(
                     "No Connection Selected",
                     f"No connection selected. {selected_connection}",
                 )
         except Exception as e:
-            QMessageBox.information(
-                None,
+            self._show_information(
                 "Connect Database",
                 f"Connection failed - Check settings and try again.\n\nExtended error information:\n{str(e)}",
             )
 
-    def on_data_ready(self, rows_items: typing.List[QStandardItem]) -> None:
+    def on_data_ready(
+        self,
+        connection_name: str,
+        catalog_generation: int,
+        rows_items: typing.List[QStandardItem],
+    ) -> None:
         """
         Handle the event when data is ready.
 
         Args:
-            rows_items (List[QStandardItem]): A list of QStandardItem objects representing the rows of data.
+            connection_name (str): Connection alias that produced the rows.
+            catalog_generation (int): Generation token captured when Connect ran.
+            rows_items (List[QStandardItem]): Catalog rows for the tree model.
 
         Returns:
             None
         """
         try:
+            # Discard completions that no longer match the live selection
+            # (user switched connection or started a newer Connect).
+            if catalog_generation != self._catalog_generation:
+                return
+            if connection_name != self.cmbConnections.currentText():
+                return
+            self._catalog_connection = connection_name
             self.clean_items_from_model()
             for row in rows_items:
                 self.model.appendRow(row)
         except Exception as e:
-            QMessageBox.information(
-                None,
+            self._show_information(
                 "Data Ready",
                 f"Data ready failed.\n\nExtended error information:\n{str(e)}",
             )
@@ -396,8 +472,7 @@ class SFDataSourceManagerWidget(QgsAbstractDataSourceWidget, Ui_QgsDbSourceSelec
             )
             self.sf_connection_string_dialog.exec()
         except Exception as e:
-            QMessageBox.information(
-                None,
+            self._show_information(
                 "New Connection",
                 f"Creating new connection failed.\n\nExtended error information:\n{str(e)}",
             )
