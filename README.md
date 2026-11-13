@@ -30,6 +30,35 @@ Note: Sometimes, the account locator would look like locator.region.azure. For e
 4. Use standard features for reading/writing geospatial data
 <img src ='assets/snowflake_qgis.jpg'  width=800>
 
+## Snowflake toolbar
+
+After the plugin loads, a **Snowflake** toolbar (and Plugins → Snowflake menu) provides:
+
+- **Execute SQL…** — open the SQL query dialog for the selected Snowflake layer’s connection (or the first saved connection).
+- **Reload from Snowflake** — call `reloadData()` on selected Snowflake layers.
+- **Toggle map-extent loading** — add or remove `extent_mode=1` on selected Snowflake layers.
+- **Ask Snowflake (Cortex)…** — draft a read-only SELECT from a natural-language question.
+- **Describe map (Cortex)…** — send the current map image plus legend context to a multimodal Cortex model.
+
+## Map-extent loading (#106)
+
+For tables too large to sample wholesale, right-click a spatial table in the Browser and choose **Add with map-extent loading**. The layer URI includes `extent_mode=1`. Each map render issues a query filtered to the current canvas rectangle with a per-request row LIMIT, so warehouse cost stays proportional to what you see. You can also toggle this mode from the toolbar for an existing Snowflake layer.
+
+## Attribute-only tables (#105)
+
+Tables without a GEOGRAPHY/GEOMETRY/H3 column appear under **Tables (no geometry)** in the Browser. Double-click one to open it as a Snowflake attribute layer (attribute table, filters, and editing with a primary key).
+
+## Cortex tools
+
+Both Cortex actions use `AI_COMPLETE` on your existing Snowflake connection.
+
+**Ask Snowflake** needs Cortex access and a text model available in your account/region (default `llama3.1-70b`). Generated SQL must pass the plugin’s read-only check before it can open in the SQL editor.
+
+**Describe map** needs:
+
+- Cortex access to a multimodal model (default `claude-3-5-sonnet`)
+- `CREATE STAGE` on the selected schema (the plugin creates a temporary SSE-encrypted stage, PUTs the canvas PNG, calls `AI_COMPLETE` with `TO_FILE`, then REMOVEs the file)
+
 ## Support
 If you found bugs or have suggestions for improving the plugin, please [submit](https://github.com/snowflakedb/qgis-snowflake-connector/issues) the issue or contribute by creating a pull request.
 

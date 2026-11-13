@@ -37,11 +37,16 @@ helpers/
   layer_creation.py # Build QgsVectorLayer from query results
   wrapper.py      # parse_uri (delegates to provider metadata)
   messages.py     # UI message boxes
+  toolbar.py      # Toolbar URI helpers (extent_mode toggle)
+  cortex.py       # Cortex prompt builders / SQL extract / renderer summary
+  map_capture.py  # Canvas PNG render + map context for Describe map
 
 dialogs/
   sf_connection_string_dialog.py     # Connection settings (auth, key pair, SSO)
   sf_data_source_manager_widget.py   # Data Source Manager tab
   sf_sql_query_dialog.py             # SQL query execution dialog
+  sf_ask_dialog.py                   # Ask Snowflake (Cortex) question -> SQL
+  sf_describe_map_dialog.py          # Describe map (Cortex)
   sf_new_table_dialog.py / sf_new_schema_dialog.py
 
 tasks/
@@ -49,6 +54,8 @@ tasks/
   sf_convert_column_to_layer_task.py # Column -> map layer
   sf_convert_sql_query_to_layer_task.py
   sf_execute_sql_query_task.py
+  sf_cortex_complete_task.py         # AI_COMPLETE (text)
+  sf_describe_map_task.py            # Stage PUT + AI_COMPLETE(TO_FILE)
 
 ui/    # Generated PyQt .py/.ui files (do NOT hand-edit .py files)
 test/  # Regression tests (see testing section below)
@@ -65,6 +72,13 @@ connection_name=MyConn schema_name=PUBLIC table_name=CITIES
 srid=4326 geom_column=GEOM geometry_type=Point
 geo_column_type=GEOGRAPHY primary_key=ID
 ```
+
+Optional flags:
+
+- `load_all_rows=1` — skip the random sample cap
+- `single_geom_layer=1` — column has a single geometry family
+- `extent_mode=1` — map-extent loading (#106): per-render `ST_INTERSECTS` + LIMIT, no shared feature cache
+- empty `geom_column` / `geo_column_type` — attribute-only table layer (#105)
 
 Parsed by `helpers/wrapper.py:parse_uri()` and `helpers/utils.py:decodeUri()`.
 
@@ -111,7 +125,7 @@ For deep dives into specific subsystems, see the companion files:
 
 ## Testing
 
-Tests live in `test/test_issue_regressions.py`. They use source-file assertions (no Snowflake connection needed):
+Tests live in `test/test_issue_regressions.py` and `test/test_extent_mode_and_cortex.py`. They use source-file assertions and pure-helper unit tests (no Snowflake connection needed):
 
 ```bash
 python -c "

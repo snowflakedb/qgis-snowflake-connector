@@ -15,9 +15,27 @@ SFVectorDataProvider          (base, handles fields, URI parsing, capabilities)
         - extent via H3_CELL_TO_BOUNDARY lat/lon bounds
 ```
 
-Factory: `SFVectorDataProvider.createProvider(uri, options, flags)` reads `_geo_column_type` from the parsed URI and returns the correct subclass.
+Factory: `SFVectorDataProvider.createProvider(uri, options, flags)` reads `_geo_column_type` from the parsed URI and returns the correct subclass. Empty / unknown `geo_column_type` keeps the base provider for attribute-only tables (#105).
 
 Provider key: `"snowflakedb"`
+
+## Map-extent loading (`extent_mode=1`)
+
+When the URI includes `extent_mode=1`:
+
+- Provider skips the whole-table row-count probe (`_is_limited_unordered` stays False).
+- Feature iterator never writes the shared `_features` cache.
+- Each request with a filter rectangle pushes `ST_INTERSECTS` and applies `LIMIT` (not `SAMPLE`).
+- Last-result cache on the provider (`_extent_cache_key` / `_extent_cache_features`) reuses an identical rectangle + filter for repaints; `reloadData()` clears it.
+
+## Attribute-only layers
+
+URI with empty `geom_column` / `geo_column_type`:
+
+- `wkbType()` → `NoGeometry`
+- Iterator skips geometry-type predicates, spatial filters, and `ST_ASWKB`
+- Base `featureCount()` uses cheap row count / `COUNT(*)`
+- `extent()` returns an empty rectangle
 
 ## Fields
 

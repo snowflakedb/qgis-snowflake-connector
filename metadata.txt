@@ -7,7 +7,7 @@ name=Snowflake Connector for QGIS
 qgisMinimumVersion=3.34.1
 qgisMaximumVersion=4.99
 description=This package includes the Snowflake Connector for QGIS.
-version=1.0.28
+version=1.1.0
 author=Snowflake Inc.
 email=erick.cuberojimenez@snowflake.com
 
@@ -20,7 +20,20 @@ repository=https://github.com/snowflakedb/qgis-snowflake-connector/
 # Recommended items:
 
 hasProcessingProvider=yes
-changelog=1.0.28 - Packaging re-release of 1.0.27: ship the plugin as a
+changelog=1.1.0 - Map-extent loading, toolbar, attribute tables, Cortex tools:
+ * Map-extent loading (#106): layers with extent_mode=1 fetch only features
+   intersecting the current map extent (per-request LIMIT), with a last-extent
+   cache for repaints. Right-click a table in the Browser and choose
+   "Add with map-extent loading", or toggle it from the Snowflake toolbar.
+ * Snowflake toolbar and Plugins menu: Execute SQL, Reload from Snowflake,
+   Toggle map-extent loading, Ask Snowflake (Cortex), Describe map (Cortex).
+ * Attribute-only tables (#105): tables without a geometry column open as
+   Snowflake attribute layers from the Browser (no longer blocked).
+ * Ask Snowflake (Cortex): natural-language question to a read-only SELECT via
+   AI_COMPLETE; open the result in the existing SQL editor to load as a layer.
+ * Describe map (Cortex): render the canvas to PNG, upload to a temporary
+   SSE-encrypted stage, and ask a multimodal Cortex model to describe the map.
+ 1.0.28 - Packaging re-release of 1.0.27: ship the plugin as a
  properly packaged ZIP whose top-level folder is "qgis-snowflake-connector"
  (no version suffix), so installing via Plugins > Install from ZIP no longer
  fails with "ModuleNotFoundError: No module named 'qgis-snowflake-connector-1'"
