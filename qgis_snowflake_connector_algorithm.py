@@ -63,7 +63,7 @@ from qgis.core import (
     QgsVectorLayer,
 )
 
-from .managers.sf_connection_manager import SFConnectionManager
+from .managers.sf_connection_manager import SFConnectionManager, build_op_tag
 
 from .helpers.data_base import (
     create_schema,
@@ -318,7 +318,8 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
                 "AND data_type IN ('VARIANT', 'OBJECT', 'ARRAY')"
             )
             cur = self.sf_data_provider.execute_query(
-                variant_query, selected_connection
+                variant_query, selected_connection,
+                op_tag=build_op_tag("export", connection_name=selected_connection),
             )
             variant_columns = {row[0] for row in cur.fetchall()}
             cur.close()
@@ -447,7 +448,8 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
 
             if rows_in_batch >= 5000:
                 cur = self.sf_data_provider.execute_query(
-                    query + query_values_alias, selected_connection
+                    query + query_values_alias, selected_connection,
+                    op_tag=build_op_tag("export", connection_name=selected_connection),
                 )
                 cur.close()
                 rows_inserted += rows_in_batch
@@ -460,7 +462,8 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
 
         if not feedback.isCanceled() and rows_in_batch > 0:
             cur = self.sf_data_provider.execute_query(
-                query + query_values_alias, selected_connection
+                query + query_values_alias, selected_connection,
+                op_tag=build_op_tag("export", connection_name=selected_connection),
             )
             cur.close()
             rows_inserted += rows_in_batch
@@ -572,6 +575,7 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
                 _primary_key,
                 _load_all_rows,
                 _single_geom_layer,
+                _extent_mode,
             ) = parse_uri(provider.dataSourceUri())
         except Exception:
             return False
@@ -659,7 +663,8 @@ class QGISSnowflakeConnectorAlgorithm(QgsProcessingAlgorithm):
                         AND TABLE_NAME ILIKE {quote_literal(selected_table)}
                     """  # nosec B608 - values escaped via quote_literal
                     cur_select_columns = self.sf_data_provider.execute_query(
-                        query_select_columns, selected_connection
+                        query_select_columns, selected_connection,
+                        op_tag=build_op_tag("export", connection_name=selected_connection),
                     )
                     available_columns = []
                     column_found = False

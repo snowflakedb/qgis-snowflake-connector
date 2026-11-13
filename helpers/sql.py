@@ -104,6 +104,8 @@ _FORBIDDEN_SQL_VERBS = re.compile(
     re.IGNORECASE,
 )
 
+_SYSTEM_FUNCTION = re.compile(r"\bSYSTEM\$", re.IGNORECASE)
+
 
 def sql_statement_is_read_only(sql: str) -> bool:
     """Return True when ``sql`` is a single read-only Snowflake statement.
@@ -114,6 +116,8 @@ def sql_statement_is_read_only(sql: str) -> bool:
     if not sql or predicate_has_statement_breakers(sql):
         return False
     if not _READ_ONLY_SQL_START.match(sql):
+        return False
+    if _SYSTEM_FUNCTION.search(sql):
         return False
     return _FORBIDDEN_SQL_VERBS.search(sql) is None
 

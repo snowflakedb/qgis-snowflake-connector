@@ -1,5 +1,6 @@
 import typing
 from ..providers.sf_data_source_provider import SFDataProvider
+from ..managers.sf_connection_manager import build_op_tag
 from ..helpers.sql import qualified_table_name, quote_identifier
 from ..helpers.mappings import create_qgs_field
 from qgis.core import (
@@ -268,6 +269,7 @@ def check_table_exceeds_size(
     cur_count = sf_data_provider.execute_query(
         query=qre,
         connection_name=connection_name,
+        op_tag=build_op_tag("layer_create", connection_name=connection_name),
     )
 
     count_tuple = cur_count.fetchone()
@@ -326,6 +328,7 @@ def get_srid_from_table(
         query=qre,
         connection_name=connection_name,
         context_information=context_information,
+        op_tag=build_op_tag("layer_create", connection_name=connection_name),
     )
 
     srid = cur_srid.fetchone()[0]

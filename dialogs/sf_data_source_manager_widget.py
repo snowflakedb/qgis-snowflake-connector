@@ -2,6 +2,7 @@ from ..helpers.data_base import (
     check_table_exceeds_size,
 )
 from ..helpers.limits import (
+    H3_COLUMN_TYPES,
     limit_size_for_table,
 )
 from ..helpers.messages import (
@@ -24,7 +25,7 @@ from ..tasks.sf_convert_column_to_layer_task import (
 )
 from .sf_connection_string_dialog import SFConnectionStringDialog
 from ..ui.sf_data_source_manager_widget import Ui_QgsDbSourceSelectBase
-from qgis.core import QgsApplication
+from qgis.core import Qgis, QgsApplication, QgsMessageLog
 from qgis.gui import QgsAbstractDataSourceWidget
 from qgis.PyQt.QtCore import QModelIndex, Qt
 from qgis.PyQt.QtGui import QStandardItemModel, QStandardItem
@@ -170,21 +171,32 @@ class SFDataSourceManagerWidget(QgsAbstractDataSourceWidget, Ui_QgsDbSourceSelec
             limit_size = limit_size_for_table(context_information=context_information)
 
             load_all_rows = False
+            extent_mode = False
             if table_exceeds_size:
-                choice = get_large_dataset_choice(
-                    "SFConvertColumnToLayerTask Dataset is too large",
-                    (
-                        "The dataset is too large. Please consider using "
-                        '"Execute SQL" to limit the result set.\n\n'
-                        f'"Load sample" will load a random sample of {limit_size // 1000} '
-                        "thousand rows.\n"
-                        '"Load all rows" will load the full dataset '
-                        "(this may be slow and memory-intensive)."
-                    ),
-                )
-                if choice == LargeDatasetChoice.CANCEL:
-                    return False
-                load_all_rows = choice == LargeDatasetChoice.LOAD_ALL
+                if data_type in H3_COLUMN_TYPES:
+                    extent_mode = True
+                    QgsMessageLog.logMessage(
+                        f"H3 table {table} exceeds the "
+                        f"{limit_size // 1000}k-row cap; enabling map-extent "
+                        "loading (viewport ST_INTERSECTS + LIMIT).",
+                        "Snowflake Plugin",
+                        Qgis.MessageLevel.Info,
+                    )
+                else:
+                    choice = get_large_dataset_choice(
+                        "SFConvertColumnToLayerTask Dataset is too large",
+                        (
+                            "The dataset is too large. Please consider using "
+                            '"Execute SQL" to limit the result set.\n\n'
+                            f'"Load sample" will load a random sample of {limit_size // 1000} '
+                            "thousand rows.\n"
+                            '"Load all rows" will load the full dataset '
+                            "(this may be slow and memory-intensive)."
+                        ),
+                    )
+                    if choice == LargeDatasetChoice.CANCEL:
+                        return False
+                    load_all_rows = choice == LargeDatasetChoice.LOAD_ALL
 
             context_information["primary_key"] = prompt_and_get_primary_key(
                 context_information=context_information, data_type=data_type
@@ -201,6 +213,7 @@ class SFDataSourceManagerWidget(QgsAbstractDataSourceWidget, Ui_QgsDbSourceSelec
                     context_information=context_information,
                     path=path,
                     load_all_rows=load_all_rows,
+                    extent_mode=extent_mode,
                 )
                 self._running_tasks[path] = True
                 snowflake_covert_column_to_layer_task.on_handle_error.connect(

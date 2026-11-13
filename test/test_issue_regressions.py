@@ -831,6 +831,27 @@ class TestPhase3PredicateInjection(unittest.TestCase):
             "WHERE clause must be validated before being appended",
         )
 
+    def test_spatial_filter_where_clause_is_guarded(self):
+        """Spatial-filter free-text WHERE must be validated before it is
+        concatenated into the SELECT (same guard as Import from Snowflake)."""
+        content = (ROOT / "dialogs" / "sf_spatial_filter_dialog.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("predicate_has_statement_breakers", content)
+        build_idx = content.index("def build_sql(")
+        validate_idx = content.index("def _validate_and_accept(")
+        build_body = content[build_idx:validate_idx]
+        self.assertIn("predicate_has_statement_breakers(where_clause)", build_body)
+        guard_idx = build_body.index("predicate_has_statement_breakers(where_clause)")
+        append_idx = build_body.index('conditions.append(f"({where_clause})")')
+        self.assertLess(
+            guard_idx, append_idx,
+            "WHERE clause must be validated before being appended",
+        )
+        validate_body = content[validate_idx:content.index("def get_parameters(")]
+        self.assertIn("predicate_has_statement_breakers(where_clause)", validate_body)
+        self.assertIn("Invalid WHERE clause", validate_body)
+
 
 class TestPhase4ProjectFileTrust(unittest.TestCase):
     """Phase 4: values restored verbatim from an (untrusted) .qgs/.qgz project
@@ -963,15 +984,21 @@ class TestPhase5Hardening(unittest.TestCase):
 
     def test_no_geom_dialog_forces_plain_text(self):
         """SNOW-3712087: the server-controlled table name must be shown as plain
-        text so a <img src=UNC> name cannot trigger an SMB/NTLM leak."""
+        text so a <img src=UNC> name cannot trigger an SMB/NTLM leak.
+
+        Attribute-only tables now load as layers (#105); the failure path still
+        shows the table name and must force PlainText.
+        """
         content = (ROOT / "entities" / "sf_data_item.py").read_text(
             encoding="utf-8"
         )
-        idx = content.index('if self.item_type == "table_no_geom":')
-        block = content[idx:idx + 900]
+        self.assertIn("_start_add_attribute_table_layer", content)
+        idx = content.index("def _start_add_attribute_table_layer")
+        block = content[idx:idx + 4000]
         self.assertIn("setTextFormat(Qt.TextFormat.PlainText)", block)
-        # The vulnerable auto-format static call must be gone from this branch.
+        # The vulnerable auto-format static call must be gone from this path.
         self.assertNotIn("QMessageBox.information(", block)
+        self.assertNotIn("QMessageBox.warning(", block)
 
     def test_dialog_skips_cleartext_password_when_encrypted(self):
         """SNOW-3712079: the dialog must not capture the Basic-tab password when
@@ -1304,7 +1331,13 @@ class TestUIBoundary(unittest.TestCase):
     def test_dialogs_import_from_ui(self):
         """Each dialog wrapper should import its generated UI base class."""
         dialogs_dir = ROOT / "dialogs"
-        skip = {"__init__.py", "sf_spatial_filter_dialog.py"}
+        # Code-built dialogs (no .ui file) mirror sf_spatial_filter_dialog.py.
+        skip = {
+            "__init__.py",
+            "sf_spatial_filter_dialog.py",
+            "sf_ask_dialog.py",
+            "sf_map_brief_dialog.py",
+        }
         for py_file in sorted(dialogs_dir.glob("*.py")):
             if py_file.name in skip:
                 continue
@@ -2183,6 +2216,17 @@ class TestGeometryTypeCountFilter(unittest.TestCase):
         self.assertIn("{self._geometry_type_filter()}", content)
         # The old single-type ILIKE form must be gone.
         self.assertNotIn(":type ILIKE ", content)
+
+    def test_extent_handles_null_min_max_bounds(self):
+        """Empty MIN/MAX rows must not be unpacked into QgsRectangle(*bounds)."""
+        content = self._provider_content()
+        self.assertIn("def _rectangle_from_bounds(extent_bounds)", content)
+        self.assertIn("any(v is None for v in extent_bounds[:4])", content)
+        self.assertIn(
+            "self._extent = self._rectangle_from_bounds(extent_bounds)",
+            content,
+        )
+        self.assertNotIn("QgsRectangle(*extent_bounds)", content)
 
 
 class TestIntegerColumnMapping(unittest.TestCase):

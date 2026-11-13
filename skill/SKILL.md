@@ -37,11 +37,18 @@ helpers/
   layer_creation.py # Build QgsVectorLayer from query results
   wrapper.py      # parse_uri (delegates to provider metadata)
   messages.py     # UI message boxes
+  toolbar.py      # Toolbar URI helpers (extent_mode toggle)
+  cortex.py       # Cortex prompt builders / SQL extract / Map brief sections
+  map_capture.py  # Canvas PNG render + Map brief layer context / view checks
+  map_stage.py    # Session-scoped temp SSE stage for Map brief images
+  map_outputs.py  # Print layout label + project notes outputs
 
 dialogs/
   sf_connection_string_dialog.py     # Connection settings (auth, key pair, SSO)
   sf_data_source_manager_widget.py   # Data Source Manager tab
   sf_sql_query_dialog.py             # SQL query execution dialog
+  sf_ask_dialog.py                   # Ask Snowflake (Cortex) question -> SQL
+  sf_map_brief_dialog.py             # Map brief (Cortex)
   sf_new_table_dialog.py / sf_new_schema_dialog.py
 
 tasks/
@@ -49,6 +56,8 @@ tasks/
   sf_convert_column_to_layer_task.py # Column -> map layer
   sf_convert_sql_query_to_layer_task.py
   sf_execute_sql_query_task.py
+  sf_cortex_complete_task.py         # AI_COMPLETE (text)
+  sf_map_brief_task.py               # AI_COMPLETE(TO_FILE) against MapImageSession
 
 ui/    # Generated PyQt .py/.ui files (do NOT hand-edit .py files)
 test/  # Regression tests (see testing section below)
@@ -65,6 +74,14 @@ connection_name=MyConn schema_name=PUBLIC table_name=CITIES
 srid=4326 geom_column=GEOM geometry_type=Point
 geo_column_type=GEOGRAPHY primary_key=ID
 ```
+
+Optional flags:
+
+- `load_all_rows=1` — skip the random sample cap
+- `single_geom_layer=1` — column has a single geometry family
+- `extent_mode=1` — map-extent loading (#106): per-render `ST_INTERSECTS` + LIMIT, no shared feature cache
+- empty `geom_column` / `geo_column_type` — attribute-only table layer (#105)
+- `sql_query=…` — one-shot SQL layer (Execute SQL / Download with spatial filter)
 
 Parsed by `helpers/wrapper.py:parse_uri()` and `helpers/utils.py:decodeUri()`.
 
@@ -104,14 +121,14 @@ NUMBER maps to Double, TEXT/VARCHAR to QString. Be aware that H3 cell indices st
 
 For deep dives into specific subsystems, see the companion files:
 
-- [connection-manager.md](connection-manager.md) -- Connection lifecycle, auth types, reconnect
+- [connection-manager.md](connection-manager.md) -- Connection lifecycle, auth types, reconnect, QUERY_TAG telemetry
 - [data-providers.md](data-providers.md) -- Provider hierarchy, fields, features, H3 conversion
 - [export-algorithm.md](export-algorithm.md) -- Export to Snowflake, H3-aware export, VARIANT handling
 - [troubleshooting.md](troubleshooting.md) -- Common errors, debugging strategies, known issues
 
 ## Testing
 
-Tests live in `test/test_issue_regressions.py`. They use source-file assertions (no Snowflake connection needed):
+Tests live in `test/test_issue_regressions.py` and `test/test_extent_mode_and_cortex.py`. They use source-file assertions and pure-helper unit tests (no Snowflake connection needed):
 
 ```bash
 python -c "
@@ -131,7 +148,17 @@ The `qgis` module must be stubbed because the test environment has no QGIS runti
 
 ## Packaging
 
-Build the installable zip (must have a root folder matching the plugin directory name):
+Preferred local build (root folder is **always** `qgis-snowflake-connector/` — never versioned):
+
+```bash
+python scripts/build_package.py -o /tmp/dist
+```
+
+Writes `qgis-snowflake-connector.zip` by default (Install from ZIP). Pass `--also-versioned` for an extra `qgis-snowflake-connector-<version>.zip` (release archives). Exits non-zero if the ZIP root is not exactly `qgis-snowflake-connector/`. That stable root is what makes QGIS upgrade the existing plugin instead of installing a second one.
+
+Tagged releases: push a tag `vX.Y.Z` that matches `metadata.txt` `version`. The `.github/workflows/release.yml` workflow runs `build_package.py --also-versioned`, attaches both ZIPs, and re-checks the zip root.
+
+Manual packaging (must have a root folder matching the plugin directory name):
 
 ```bash
 rm -rf /tmp/build && mkdir -p /tmp/build/qgis-snowflake-connector
@@ -148,6 +175,7 @@ Common packaging mistakes:
 - Missing root folder -> "No root folder was found inside"
 - Missing `tasks/` or other directories -> ImportError on load
 - Trailing `/` on rsync directory args flattens structure
+- Installing GitHub’s auto source archive instead of the CI-built ZIP
 
 ## SQL Safety
 

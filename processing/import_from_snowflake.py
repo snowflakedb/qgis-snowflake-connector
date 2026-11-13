@@ -136,7 +136,7 @@ class ImportFromSnowflakeAlgorithm(QgsProcessingAlgorithm):
             predicate_has_statement_breakers,
         )
         from ..helpers.mappings import create_qgs_field
-        from ..managers.sf_connection_manager import SFConnectionManager
+        from ..managers.sf_connection_manager import SFConnectionManager, build_op_tag
 
         connection_name = self.parameterAsString(parameters, self.CONNECTION, context)
         schema = self.parameterAsString(parameters, self.SCHEMA, context)
@@ -186,7 +186,10 @@ class ImportFromSnowflakeAlgorithm(QgsProcessingAlgorithm):
             f"AND TABLE_NAME ILIKE {quote_literal(table)} "
             f"ORDER BY ORDINAL_POSITION"
         )
-        col_cursor = mgr.execute_query(connection_name, col_query, {"schema_name": schema})
+        col_cursor = mgr.execute_query(
+            connection_name, col_query, {"schema_name": schema},
+            op_tag=build_op_tag("proc_import", connection_name=connection_name),
+        )
         col_rows = col_cursor.fetchall() if col_cursor else []
         if col_cursor:
             col_cursor.close()
@@ -237,7 +240,10 @@ class ImportFromSnowflakeAlgorithm(QgsProcessingAlgorithm):
             sql += f" LIMIT {limit}"
 
         feedback.pushInfo(f"Executing: {sql}")
-        row_cursor = mgr.execute_query(connection_name, sql, {"schema_name": schema})
+        row_cursor = mgr.execute_query(
+            connection_name, sql, {"schema_name": schema},
+            op_tag=build_op_tag("proc_import", connection_name=connection_name),
+        )
         rows = row_cursor.fetchall() if row_cursor else []
         if row_cursor:
             row_cursor.close()

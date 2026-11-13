@@ -84,6 +84,11 @@ class SFVectorDataProvider(QgsVectorDataProvider):
         self._feature_count = None
         self.filter_where_clause = None
         self._load_all_rows = False
+        self._extent_mode = False
+        # Last map-extent fetch cache: same render rectangle + filter reuses
+        # the previous result without another warehouse round-trip.
+        self._extent_cache_key = None
+        self._extent_cache_features = []
         # SNOW-3712083: cache for the "is the URI-supplied primary_key actually
         # unique?" check (None = not yet computed).
         self._primary_key_is_valid = None
@@ -100,6 +105,7 @@ class SFVectorDataProvider(QgsVectorDataProvider):
                 self._primary_key,
                 self._load_all_rows,
                 self._single_geom_layer,
+                self._extent_mode,
             ) = parse_uri(uri)
 
         except Exception as e:
@@ -148,7 +154,9 @@ class SFVectorDataProvider(QgsVectorDataProvider):
             # a malicious project file cannot force an unbounded fetch (client
             # OOM + uncapped warehouse spend). There is no table to consult for
             # a cheap ROW_COUNT, so probe the wrapped query directly.
-            if self._load_all_rows:
+            # Map-extent loading skips the probe: each render fetches only the
+            # visible rectangle with a per-request LIMIT (#106).
+            if self._load_all_rows or self._extent_mode:
                 self._is_limited_unordered = False
             else:
                 limit_size = limit_size_for_type(self._geo_column_type)
@@ -170,7 +178,7 @@ class SFVectorDataProvider(QgsVectorDataProvider):
                 )
             else:
                 self._from_clause = quote_identifier(self._table_name)
-            if self._load_all_rows:
+            if self._load_all_rows or self._extent_mode:
                 self._is_limited_unordered = False
             else:
                 limit_size = limit_size_for_type(self._geo_column_type)
@@ -278,6 +286,7 @@ class SFVectorDataProvider(QgsVectorDataProvider):
             or self._geo_column_type not in ("GEOGRAPHY", "GEOMETRY")
             or (self._sql_query is not None and self._sql_query != "")
             or self._is_limited_unordered
+            or getattr(self, "_extent_mode", False)
             or not self._validate_primary_key()
         ):
             reasons = []
@@ -291,6 +300,10 @@ class SFVectorDataProvider(QgsVectorDataProvider):
             # stable feature ids, so edits could hit the wrong rows.
             if self._is_limited_unordered:
                 reasons.append("row-capped/unordered result (unstable feature ids)")
+            if getattr(self, "_extent_mode", False):
+                reasons.append(
+                    "map-extent loading (feature ids are per-query fetch order)"
+                )
             # SNOW-3712083: refuse edits when the declared primary key cannot be
             # confirmed unique. Skip this reason for custom SQL query layers
             # (there is no base table to validate against, so it would only add
@@ -306,12 +319,15 @@ class SFVectorDataProvider(QgsVectorDataProvider):
                 and not self._validate_primary_key()
             ):
                 reasons.append("primary key is not verified unique")
-            QgsMessageLog.logMessage(
-                f"Layer read-only: {', '.join(reasons)} "
-                f"(table={getattr(self, '_table_name', '?')})",
-                "Snowflake Plugin",
-                Qgis.MessageLevel.Info,
-            )
+            # capabilities() is called often; log the reason once per provider.
+            if not getattr(self, "_logged_readonly_reason", False):
+                QgsMessageLog.logMessage(
+                    f"Layer read-only: {', '.join(reasons)} "
+                    f"(table={getattr(self, '_table_name', '?')})",
+                    "Snowflake Plugin",
+                    Qgis.MessageLevel.Info,
+                )
+                self._logged_readonly_reason = True
             return base_capabilities
 
         return (
@@ -418,6 +434,12 @@ class SFVectorDataProvider(QgsVectorDataProvider):
                         connection_name=self._connection_name,
                         query=query,
                         context_information=self._context_information,
+                        op_tag=build_op_tag(
+                            "fields",
+                            connection_name=self._connection_name,
+                            schema=self._schema_name,
+                            table=self._table_name,
+                        ),
                     )
 
                     field_info = cur.fetchall()
@@ -444,6 +466,12 @@ class SFVectorDataProvider(QgsVectorDataProvider):
                         connection_name=self._connection_name,
                         query=self._sql_query,
                         context_information=self._context_information,
+                        op_tag=build_op_tag(
+                            "fields",
+                            connection_name=self._connection_name,
+                            schema=self._schema_name,
+                            table=self._table_name,
+                        ),
                     )
                     description = cur.description
                     cur.close()
@@ -515,6 +543,7 @@ class SFVectorDataProvider(QgsVectorDataProvider):
         "connection_name", "authcfg", "sql_query", "sql", "schema_name",
         "table_name", "srid", "geom_column", "geometry_type",
         "geo_column_type", "primary_key", "load_all_rows",
+        "single_geom_layer", "extent_mode",
     )
 
     @classmethod
@@ -578,6 +607,12 @@ class SFVectorDataProvider(QgsVectorDataProvider):
             connection_name=self._connection_name,
             query=query,
             context_information=self._context_information,
+            op_tag=build_op_tag(
+                "is_view",
+                connection_name=self._connection_name,
+                schema=self._schema_name,
+                table=self._table_name,
+            ),
         )
         view_list = [elem[0] for elem in cur.fetchall()]
         cur.close()
@@ -606,6 +641,12 @@ class SFVectorDataProvider(QgsVectorDataProvider):
             connection_name=self._connection_name,
             query=query,
             context_information=self._context_information,
+            op_tag=build_op_tag(
+                "unique_values",
+                connection_name=self._connection_name,
+                schema=self._schema_name,
+                table=self._table_name,
+            ),
         )
 
         for elem in cur.fetchall():
@@ -675,6 +716,8 @@ class SFVectorDataProvider(QgsVectorDataProvider):
         self._features_loaded = False
         self._feature_count = None
         self._extent = None
+        self._extent_cache_key = None
+        self._extent_cache_features = []
         self.connect_database()
         # Notify QGIS so the layer-level feature cache (QgsVectorLayerCache)
         # and the attribute table model refresh without requiring the user
@@ -884,26 +927,66 @@ class SFVectorDataProvider(QgsVectorDataProvider):
         return True
 
     def extent(self) -> QgsRectangle:
-        """Returns the extent of the layer.
+        """Attribute-only layers have no spatial extent (#105)."""
+        if self._extent is None:
+            self._extent = QgsRectangle()
+        return self._extent
 
-        Currently, this method returns an empty QgsRectangle,
-        indicating that the extent is unknown or not applicable.
+    @staticmethod
+    def _rectangle_from_bounds(extent_bounds) -> QgsRectangle:
+        """Build a QgsRectangle from a Snowflake MIN/MAX row.
 
-        Returns:
-            QgsRectangle: An empty QgsRectangle.
+        Empty layers (or geometry-type filters that match nothing) return
+        ``(None, None, None, None)`` from MIN/MAX. Unpacking those into
+        ``QgsRectangle(*)`` raises TypeError on PyQGIS.
         """
-        return QgsRectangle()
+        if (
+            not extent_bounds
+            or len(extent_bounds) < 4
+            or any(v is None for v in extent_bounds[:4])
+        ):
+            return QgsRectangle()
+        return QgsRectangle(
+            float(extent_bounds[0]),
+            float(extent_bounds[1]),
+            float(extent_bounds[2]),
+            float(extent_bounds[3]),
+        )
 
     def featureCount(self) -> int:
-        """
-        Returns the number of features in the layer.
+        """Row count for attribute-only (no geometry) table layers (#105)."""
+        if self._feature_count is not None:
+            return self._feature_count
+        if not self._is_valid or not self._table_name:
+            self._feature_count = 0
+            return self._feature_count
+        if self._is_limited_unordered:
+            self._feature_count = limit_size_for_type(self._geo_column_type or "")
+            return self._feature_count
 
-        In this specific implementation, it always returns 0.
+        cheap = get_cheap_row_count(self._context_information)
+        if cheap is not None and not self.subsetString():
+            self._feature_count = cheap
+            return self._feature_count
 
-        Returns:
-            int: The feature count, which is 0.
-        """
-        return 0
+        where_clause = ""
+        if self.subsetString():
+            where_clause = f" WHERE {self.subsetString()}"  # nosec B608 - subsetString is compiler-validated
+        query = f"SELECT COUNT(*) FROM {self._from_clause}{where_clause}"  # nosec B608 - from_clause pre-quoted
+        cur = self.connection_manager.execute_query(
+            connection_name=self._connection_name,
+            query=query,
+            context_information=self._context_information,
+            op_tag=build_op_tag(
+                "featurecount",
+                connection_name=self._connection_name,
+                schema=self._schema_name,
+                table=self._table_name,
+            ),
+        )
+        self._feature_count = cur.fetchone()[0]
+        cur.close()
+        return self._feature_count
 
 
 class SFGeoVectorDataProvider(SFVectorDataProvider):
@@ -943,6 +1026,10 @@ class SFGeoVectorDataProvider(SFVectorDataProvider):
             else:
                 if self._is_limited_unordered:
                     self._feature_count = limit_size_for_type(self._geo_column_type)
+                elif getattr(self, "_extent_mode", False):
+                    # Avoid a full-table COUNT(*) on every extent-mode layer.
+                    cheap = get_cheap_row_count(self._context_information)
+                    self._feature_count = cheap if cheap is not None else -1
                 else:
                     # The feature iterator always restricts rows to this layer's
                     # geometry type (which also drops NULL geometries), so COUNT
@@ -982,7 +1069,7 @@ class SFGeoVectorDataProvider(SFVectorDataProvider):
 
     def extent(self) -> QgsRectangle:
         """Calculates the extent of the bend and returns a QgsRectangle"""
-        if not self._extent:
+        if self._extent is None:
             if not self._is_valid or not self._column_geom:
                 self._extent = QgsRectangle()
             else:
@@ -1014,7 +1101,7 @@ class SFGeoVectorDataProvider(SFVectorDataProvider):
                 extent_bounds = cur.fetchone()
                 cur.close()
 
-                self._extent = QgsRectangle(*extent_bounds)
+                self._extent = self._rectangle_from_bounds(extent_bounds)
 
         return self._extent
 
@@ -1036,6 +1123,12 @@ class SFH3VectorDataProvider(SFVectorDataProvider):
             connection_name=self._connection_name,
             query=query,
             context_information=self._context_information,
+            op_tag=build_op_tag(
+                "h3_validate",
+                connection_name=self._connection_name,
+                schema=self._schema_name,
+                table=self._table_name,
+            ),
         )
 
         self._is_valid = cur.fetchone()[0]
@@ -1048,6 +1141,10 @@ class SFH3VectorDataProvider(SFVectorDataProvider):
             else:
                 if self._is_limited_unordered:
                     self._feature_count = limit_size_for_type(self._geo_column_type)
+                    return self._feature_count
+                if getattr(self, "_extent_mode", False):
+                    cheap = get_cheap_row_count(self._context_information)
+                    self._feature_count = cheap if cheap is not None else -1
                     return self._feature_count
 
                 query = f"SELECT COUNT(*) FROM {self._from_clause}"  # nosec B608 - from_clause pre-quoted
@@ -1074,7 +1171,7 @@ class SFH3VectorDataProvider(SFVectorDataProvider):
 
     def extent(self) -> QgsRectangle:
         """Calculates the extent of the bend and returns a QgsRectangle"""
-        if not self._extent:
+        if self._extent is None:
             if not self._is_valid or not self._column_geom:
                 self._extent = QgsRectangle()
             else:
@@ -1103,6 +1200,6 @@ class SFH3VectorDataProvider(SFVectorDataProvider):
                 extent_bounds = cur.fetchone()
                 cur.close()
 
-                self._extent = QgsRectangle(*extent_bounds)
+                self._extent = self._rectangle_from_bounds(extent_bounds)
 
         return self._extent

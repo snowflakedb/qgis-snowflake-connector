@@ -82,7 +82,7 @@ class ExecuteSQLAlgorithm(QgsProcessingAlgorithm):
 
     def processAlgorithm(self, parameters, context, feedback):
         from ..helpers.utils import get_auth_information
-        from ..managers.sf_connection_manager import SFConnectionManager
+        from ..managers.sf_connection_manager import SFConnectionManager, build_op_tag
 
         connection_name = self.parameterAsString(parameters, self.CONNECTION, context)
         sql = self.parameterAsString(parameters, self.SQL, context)
@@ -102,7 +102,10 @@ class ExecuteSQLAlgorithm(QgsProcessingAlgorithm):
 
         feedback.pushInfo(f"Executing SQL on '{connection_name}'...")
         try:
-            cursor = mgr.execute_query(connection_name, sql)
+            cursor = mgr.execute_query(
+                connection_name, sql,
+                op_tag=build_op_tag("proc_sql", connection_name=connection_name),
+            )
             is_select = sql.lstrip().upper().startswith(("SELECT", "WITH", "SHOW", "DESCRIBE", "DESC"))
             if cursor is None:
                 summary = "Query executed successfully."
