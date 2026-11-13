@@ -831,6 +831,27 @@ class TestPhase3PredicateInjection(unittest.TestCase):
             "WHERE clause must be validated before being appended",
         )
 
+    def test_spatial_filter_where_clause_is_guarded(self):
+        """Spatial-filter free-text WHERE must be validated before it is
+        concatenated into the SELECT (same guard as Import from Snowflake)."""
+        content = (ROOT / "dialogs" / "sf_spatial_filter_dialog.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("predicate_has_statement_breakers", content)
+        build_idx = content.index("def build_sql(")
+        validate_idx = content.index("def _validate_and_accept(")
+        build_body = content[build_idx:validate_idx]
+        self.assertIn("predicate_has_statement_breakers(where_clause)", build_body)
+        guard_idx = build_body.index("predicate_has_statement_breakers(where_clause)")
+        append_idx = build_body.index('conditions.append(f"({where_clause})")')
+        self.assertLess(
+            guard_idx, append_idx,
+            "WHERE clause must be validated before being appended",
+        )
+        validate_body = content[validate_idx:content.index("def get_parameters(")]
+        self.assertIn("predicate_has_statement_breakers(where_clause)", validate_body)
+        self.assertIn("Invalid WHERE clause", validate_body)
+
 
 class TestPhase4ProjectFileTrust(unittest.TestCase):
     """Phase 4: values restored verbatim from an (untrusted) .qgs/.qgz project

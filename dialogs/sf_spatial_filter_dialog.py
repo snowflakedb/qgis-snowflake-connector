@@ -295,7 +295,7 @@ class SFSpatialFilterDialog(QDialog):
         return f"ST_INTERSECTS({quoted_geom}, TO_GEOGRAPHY('{wkt}'))"
 
     def build_sql(self):
-        from ..helpers.sql import quote_identifier
+        from ..helpers.sql import quote_identifier, predicate_has_statement_breakers
 
         qs = quote_identifier(self.schema)
         qt = quote_identifier(self.table)
@@ -306,14 +306,20 @@ class SFSpatialFilterDialog(QDialog):
         conditions = []
         xmin, ymin, xmax, ymax = self._extent_coords()
         if all([xmin, ymin, xmax, ymax]):
-            wkt = (
-                f"POLYGON(({xmin} {ymin}, {xmax} {ymin}, "
-                f"{xmax} {ymax}, {xmin} {ymax}, {xmin} {ymin}))"
-            )
-            conditions.append(self._spatial_predicate(qg, wkt))
+            try:
+                coords = [float(v) for v in (xmin, ymin, xmax, ymax)]
+            except ValueError:
+                coords = None
+            if coords is not None:
+                x0, y0, x1, y1 = coords
+                wkt = (
+                    f"POLYGON(({x0} {y0}, {x1} {y0}, "
+                    f"{x1} {y1}, {x0} {y1}, {x0} {y0}))"
+                )
+                conditions.append(self._spatial_predicate(qg, wkt))
 
         where_clause = self.where_edit.toPlainText().strip()
-        if where_clause:
+        if where_clause and not predicate_has_statement_breakers(where_clause):
             conditions.append(f"({where_clause})")
 
         if conditions:
@@ -326,8 +332,11 @@ class SFSpatialFilterDialog(QDialog):
         return sql
 
     def _validate_and_accept(self):
+        from ..helpers.sql import predicate_has_statement_breakers
+
         has_extent = self._has_complete_extent()
-        has_where = bool(self.where_edit.toPlainText().strip())
+        where_clause = self.where_edit.toPlainText().strip()
+        has_where = bool(where_clause)
         if not has_extent and not has_where:
             reply = QMessageBox.question(
                 self,
@@ -340,6 +349,15 @@ class SFSpatialFilterDialog(QDialog):
             )
             if reply != QMessageBox.StandardButton.Yes:
                 return
+        if has_where and predicate_has_statement_breakers(where_clause):
+            QMessageBox.warning(
+                self,
+                "Invalid WHERE clause",
+                "The WHERE clause contains disallowed SQL tokens "
+                "(comments, statement terminators, or set operators such "
+                "as UNION). Please provide a single boolean predicate.",
+            )
+            return
         if has_extent:
             try:
                 coords = [float(v) for v in self._extent_coords()]

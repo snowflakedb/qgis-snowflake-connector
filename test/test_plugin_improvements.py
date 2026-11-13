@@ -269,6 +269,14 @@ class TestSpatialFilterDialog(unittest.TestCase):
         self.assertIn("No filter selected", source)
         self.assertIn("_validate_and_accept", source)
 
+    def test_dialog_rejects_statement_breakers_in_where(self):
+        source = self._read("dialogs/sf_spatial_filter_dialog.py")
+        self.assertIn("predicate_has_statement_breakers", source)
+        self.assertIn("Invalid WHERE clause", source)
+        validate_idx = source.index("def _validate_and_accept(")
+        validate_body = source[validate_idx:source.index("def get_parameters(")]
+        self.assertIn("predicate_has_statement_breakers(where_clause)", validate_body)
+
     def _read(self, filename):
         path = os.path.join(_plugin_root, filename)
         with open(path) as f:

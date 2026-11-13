@@ -51,3 +51,6 @@ jobs:
 
       - name: Run repository precheck tests
         run: python test/test_precheck_repo.py -v
+
+      - name: Run QUERY_TAG telemetry tests
+        run: python test/test_query_tag_telemetry.py -v
