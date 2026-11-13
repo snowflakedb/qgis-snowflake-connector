@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Dict, Optional
 
 from qgis.core import (
+    Qgis,
     QgsLayoutItemLabel,
     QgsLayoutPoint,
     QgsLayoutSize,
@@ -12,10 +13,19 @@ from qgis.core import (
     QgsProject,
     QgsUnitTypes,
 )
+
 from .cortex import format_brief_label_text, format_project_notes_block
 
 
 LAYOUT_NAME = "Map brief"
+
+
+def _layout_mm():
+    """Prefer Qgis.LayoutUnit; fall back for older bindings."""
+    try:
+        return Qgis.LayoutUnit.Millimeters
+    except Exception:
+        return QgsUnitTypes.LayoutMillimeters
 
 
 def insert_brief_into_layout(
@@ -40,23 +50,33 @@ def insert_brief_into_layout(
     text = format_brief_label_text(sections)
     label = QgsLayoutItemLabel(layout)
     label.setText(text)
+    unit = _layout_mm()
+
+    # Set width first so height-to-text accounts for wrapping.
+    label.attemptResize(QgsLayoutSize(180, 40, unit))
     label.adjustSizeToText()
 
-    # Place below existing items when possible.
     y = 10.0
     try:
         for item in layout.items():
-            if isinstance(item, QgsLayoutItemLabel):
-                rect = item.rectWithFrame()
-                y = max(y, rect.y() + rect.height() + 5.0)
+            if not isinstance(item, QgsLayoutItemLabel):
+                continue
+            try:
+                pos = item.positionWithUnits()
+                size = item.sizeWithUnits()
+                y = max(y, float(pos.y()) + float(size.height()) + 5.0)
+            except Exception:
+                try:
+                    rect = item.sceneBoundingRect()
+                    y = max(y, float(rect.y()) + float(rect.height()) + 5.0)
+                except Exception:
+                    continue
     except Exception:
         y = 10.0
 
-    label.attemptMove(QgsLayoutPoint(10, y, QgsUnitTypes.LayoutMillimeters))
-    # Give the label a readable width; height adjusts with text.
-    label.attemptResize(
-        QgsLayoutSize(180, max(40.0, label.sizeWithUnits().height()), QgsUnitTypes.LayoutMillimeters)
-    )
+    label.attemptMove(QgsLayoutPoint(10, y, unit))
+    height = max(40.0, float(label.sizeWithUnits().height()))
+    label.attemptResize(QgsLayoutSize(180, height, unit))
     layout.addLayoutItem(label)
     return layout_name
 

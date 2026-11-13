@@ -7,13 +7,13 @@ import tempfile
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from qgis.core import (
+    Qgis,
     QgsCoordinateReferenceSystem,
     QgsCoordinateTransform,
     QgsMapRendererParallelJob,
     QgsMapSettings,
     QgsProject,
     QgsVectorLayer,
-    QgsWkbTypes,
 )
 from qgis.PyQt.QtCore import QSize
 from qgis.PyQt.QtGui import QColor, QImage
@@ -27,10 +27,13 @@ def _extent_as_4326_wkt(canvas) -> str:
     canvas_crs = canvas.mapSettings().destinationCrs()
     wgs84 = QgsCoordinateReferenceSystem("EPSG:4326")
     if canvas_crs.isValid() and canvas_crs != wgs84:
-        transform = QgsCoordinateTransform(
-            canvas_crs, wgs84, QgsProject.instance()
-        )
-        extent = transform.transformBoundingBox(extent)
+        try:
+            transform = QgsCoordinateTransform(
+                canvas_crs, wgs84, QgsProject.instance()
+            )
+            extent = transform.transformBoundingBox(extent)
+        except Exception:
+            return "extent unavailable"
     return extent.asWktPolygon()
 
 
@@ -38,11 +41,11 @@ def _geometry_kind(layer: QgsVectorLayer) -> str:
     try:
         gtype = layer.geometryType()
         mapping = {
-            QgsWkbTypes.GeometryType.PointGeometry: "points",
-            QgsWkbTypes.GeometryType.LineGeometry: "lines",
-            QgsWkbTypes.GeometryType.PolygonGeometry: "polygons",
-            QgsWkbTypes.GeometryType.NullGeometry: "none",
-            QgsWkbTypes.GeometryType.UnknownGeometry: "unknown",
+            Qgis.GeometryType.Point: "points",
+            Qgis.GeometryType.Line: "lines",
+            Qgis.GeometryType.Polygon: "polygons",
+            Qgis.GeometryType.Null: "none",
+            Qgis.GeometryType.Unknown: "unknown",
         }
         return mapping.get(gtype, str(gtype))
     except Exception:
@@ -212,8 +215,12 @@ def layers_intersect_canvas(canvas, layers: Sequence) -> bool:
     return False
 
 
-def image_is_nearly_uniform(image: QImage, sample_step: int = 32) -> bool:
-    """Heuristic: sampled pixels are all the same color."""
+def image_is_nearly_uniform(image: QImage, sample_step: int = 8) -> bool:
+    """Heuristic: sampled pixels are all the same color.
+
+    Uses a denser default grid so thin features on a flat background are not
+    mistaken for an empty view.
+    """
     if image is None or image.isNull():
         return True
     width = image.width()
@@ -226,6 +233,16 @@ def image_is_nearly_uniform(image: QImage, sample_step: int = 32) -> bool:
         for x in range(0, width, step):
             if image.pixel(x, y) != first:
                 return False
+    # Also check a few edge midpoints that a coarse grid can skip.
+    for x, y in (
+        (width // 2, 0),
+        (width // 2, height - 1),
+        (0, height // 2),
+        (width - 1, height // 2),
+        (width // 2, height // 2),
+    ):
+        if image.pixel(x, y) != first:
+            return False
     return True
 
 
@@ -277,6 +294,11 @@ def render_canvas_png(
 ) -> Tuple[str, QImage]:
     """Render the current canvas to a temporary PNG and return path + image."""
     settings: QgsMapSettings = canvas.mapSettings()
+    # Keep the upload size predictable on HiDPI screens.
+    try:
+        settings.setDevicePixelRatio(1)
+    except Exception:
+        pass
     size = settings.outputSize()
     width = max(size.width(), 1)
     height = max(size.height(), 1)
@@ -288,13 +310,26 @@ def render_canvas_png(
         settings.setOutputSize(QSize(width, height))
 
     job = QgsMapRendererParallelJob(settings)
+    try:
+        cache = canvas.mapRendererCache()
+        if cache is not None and hasattr(job, "setCache"):
+            job.setCache(cache)
+    except Exception:
+        pass
     job.start()
     job.waitForFinished()
     image: QImage = job.renderedImage()
 
+    created_temp = False
     if output_path is None:
         fd, output_path = tempfile.mkstemp(prefix="qgis_sf_map_", suffix=".png")
         os.close(fd)
+        created_temp = True
     if not image.save(output_path, "PNG"):
+        if created_temp and os.path.isfile(output_path):
+            try:
+                os.remove(output_path)
+            except Exception:
+                pass
         raise RuntimeError(f"Failed to save map image to {output_path}")
     return output_path, image

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 
 DEFAULT_SQL_MODEL = "llama3.1-70b"
@@ -31,13 +31,16 @@ _HEADING_RE = re.compile(
 def build_schema_context(
     columns_rows: Sequence[Sequence[Any]],
     max_tables: int = 40,
-) -> str:
+    max_chars: int = 12000,
+) -> Tuple[str, int]:
     """Build a compact TABLE(col TYPE, ...) listing from INFORMATION_SCHEMA rows.
 
     Expects rows of ``(table_name, column_name, data_type)``. Tables beyond
-    ``max_tables`` are omitted so the prompt stays within model context limits.
+    ``max_tables`` or the character budget are omitted. Returns
+    ``(context_text, omitted_table_count)``.
     """
     tables: dict[str, List[str]] = {}
+    seen_after_cap = 0
     for row in columns_rows:
         if len(row) < 3:
             continue
@@ -47,16 +50,25 @@ def build_schema_context(
         table_key = str(table_name)
         if table_key not in tables:
             if len(tables) >= max_tables:
+                seen_after_cap += 1
                 continue
             tables[table_key] = []
         type_label = str(data_type) if data_type is not None else "UNKNOWN"
         tables[table_key].append(f"{column_name} {type_label}")
 
     lines = []
+    omitted = seen_after_cap
     for table_name in sorted(tables.keys()):
         cols = ", ".join(tables[table_name])
-        lines.append(f"{table_name}({cols})")
-    return "\n".join(lines)
+        line = f"{table_name}({cols})"
+        candidate = "\n".join(lines + [line])
+        if lines and len(candidate) > max_chars:
+            omitted += 1
+            continue
+        if not lines and len(line) > max_chars:
+            line = line[: max_chars - 20] + "...[truncated]"
+        lines.append(line)
+    return "\n".join(lines), omitted
 
 
 def build_sql_prompt(
@@ -137,7 +149,7 @@ def assess_view(
     return warnings
 
 
-def format_layer_block(record: Dict[str, Any]) -> str:
+def format_layer_block(record: Dict[str, Any], max_chars: int = 1200) -> str:
     """Format one structured layer record into a multi-line context block."""
     name = record.get("name") or "unnamed"
     lines = [f"Layer: {name}"]
@@ -152,7 +164,10 @@ def format_layer_block(record: Dict[str, Any]) -> str:
         lines.append("  scale_dependent: yes")
     subset = record.get("subset_filter")
     if subset:
-        lines.append(f"  subset_filter: {subset}")
+        subset_text = str(subset)
+        if len(subset_text) > 200:
+            subset_text = subset_text[:197] + "..."
+        lines.append(f"  subset_filter: {subset_text}")
     renderer = record.get("renderer_kind")
     if renderer:
         lines.append(f"  renderer: {renderer}")
@@ -178,7 +193,10 @@ def format_layer_block(record: Dict[str, Any]) -> str:
         lines.append(f"  snowflake_table: {table}")
     if record.get("extent_mode"):
         lines.append("  map_extent_loading: on")
-    return "\n".join(lines)
+    text = "\n".join(lines)
+    if len(text) > max_chars:
+        return text[: max_chars - 20] + "\n...[truncated]"
+    return text
 
 
 def build_map_context(
@@ -214,6 +232,13 @@ def build_map_context(
         if len(candidate) > max_chars and kept:
             omitted = len(layer_blocks) - len(kept)
             break
+        if len(candidate) > max_chars and not kept:
+            # Truncate the first block so it still fits the budget.
+            room = max_chars - len(header_text) - 1
+            if room > 40:
+                kept.append(block[: room - 20] + "\n...[truncated]")
+            omitted = len(layer_blocks) - 1
+            break
         kept.append(block)
 
     parts = [header_text]
@@ -221,68 +246,7 @@ def build_map_context(
         parts.append("\n".join(kept))
     if omitted:
         parts.append(f"{omitted} lower layers omitted")
-    text = "\n".join(parts)
-    if len(text) > max_chars and not kept:
-        return text[: max_chars - 20] + "\n...[truncated]"
-    return text
-
-
-def summarize_renderer(renderer) -> str:
-    """Return a short plain-text summary of a QGIS vector renderer.
-
-    Accepts duck-typed renderer objects so unit tests can pass simple stubs
-    without importing PyQGIS.
-    """
-    if renderer is None:
-        return "renderer=none"
-    type_name = ""
-    if hasattr(renderer, "type"):
-        try:
-            type_name = str(renderer.type())
-        except Exception:
-            type_name = renderer.__class__.__name__
-    else:
-        type_name = renderer.__class__.__name__
-
-    bits = [f"renderer={type_name}"]
-    class_attr = getattr(renderer, "classAttribute", None)
-    if callable(class_attr):
-        try:
-            field = class_attr()
-            if field:
-                bits.append(f"field={field}")
-        except Exception:
-            pass
-
-    for attr in ("ranges", "categories", "rootRule"):
-        getter = getattr(renderer, attr, None)
-        if not callable(getter):
-            continue
-        try:
-            items = getter()
-        except Exception:
-            continue
-        labels: List[str] = []
-        if attr == "rootRule":
-            children = getattr(items, "children", lambda: [])()
-            for child in children[:12]:
-                label = getattr(child, "label", lambda: "")()
-                if label:
-                    labels.append(str(label))
-        else:
-            for item in list(items)[:12]:
-                label = None
-                if hasattr(item, "label") and callable(item.label):
-                    label = item.label()
-                elif hasattr(item, "label"):
-                    label = item.label
-                if label:
-                    labels.append(str(label))
-        if labels:
-            bits.append("classes=" + "; ".join(labels))
-        break
-
-    return ", ".join(bits)
+    return "\n".join(parts)
 
 
 def build_brief_prompt(
@@ -290,16 +254,19 @@ def build_brief_prompt(
     map_context: str,
     warnings: Optional[Sequence[str]] = None,
 ) -> str:
-    """Prompt that forces a four-section map brief."""
+    """Prompt that forces a four-section map brief.
+
+    Warnings are expected to already appear inside ``map_context`` when
+    present; they are not repeated here.
+    """
     focus_line = focus.strip() if focus else "(none)"
-    warning_block = ""
-    if warnings:
-        warning_block = (
-            "Automatic checks already run by QGIS:\n"
-            + "\n".join(f"- {w}" for w in warnings)
-            + "\n\n"
-        )
     headings = "\n".join(f"## {title}" for title in BRIEF_SECTIONS)
+    empty_rule = ""
+    if warnings:
+        empty_rule = (
+            "- If automatic checks warn that the view may be empty, say so "
+            "clearly.\n"
+        )
     return (
         "You are helping a QGIS user write a brief about the current map view.\n"
         "Respond with exactly these four Markdown headings and nothing else "
@@ -313,9 +280,8 @@ def build_brief_prompt(
         "concluded from the image or context.\n"
         "- Do not invent place names, counts, or statistics that are not in "
         "the image or context.\n"
-        "- If automatic checks warn that the view may be empty, say so clearly.\n"
+        f"{empty_rule}"
         f"\nFocus: {focus_line}\n\n"
-        f"{warning_block}"
         f"Map context:\n{map_context}\n"
     )
 
@@ -389,8 +355,6 @@ def format_brief_label_text(sections: Dict[str, str]) -> str:
     parts = []
     for section in BRIEF_SECTIONS:
         body = (sections.get(section) or "").strip()
-        if not body and section != "Other":
-            continue
         if body:
             parts.append(f"{section}\n{body}")
     other = (sections.get("Other") or "").strip()

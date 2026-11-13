@@ -4,11 +4,9 @@ from __future__ import annotations
 
 import os
 import typing
+import uuid
 
 from .sql import qualified_table_name
-
-
-STAGE_NAME = "QGIS_MAP_IMAGES"
 
 
 def _log_warning(message: str) -> None:
@@ -38,12 +36,22 @@ def _build_op_tag(action: str, connection_name: str, schema: str = "") -> str:
         return action
 
 
+def quote_put_file_uri(local_path: str) -> str:
+    """Build a Snowflake PUT file URI with quoting safe for spaces.
+
+    Uses forward slashes and single quotes; escapes any apostrophe in the path.
+    """
+    normalized = os.path.abspath(local_path).replace("\\", "/")
+    escaped = normalized.replace("'", "''")
+    return f"'file://{escaped}'"
+
+
 class MapImageSession:
     """Own one staged PNG for the lifetime of a Map brief dialog.
 
-    ``ensure_staged()`` creates a temporary SSE stage and PUTs the local file
-    once. ``release()`` REMOVEs the staged object. The AI_COMPLETE task does
-    not clean up the stage; the dialog does.
+    ``ensure_staged()`` creates a unique temporary SSE stage and PUTs the local
+    file once. ``release()`` REMOVEs the staged object. The AI_COMPLETE task does
+    not clean up the stage; the dialog does after the task finishes.
     """
 
     def __init__(
@@ -65,6 +73,19 @@ class MapImageSession:
         self.png_path: typing.Optional[str] = None
         self.staged_file: typing.Optional[str] = None
         self._staged = False
+        self._released = False
+        self._stage_created = False
+        # Unique per dialog session so we never collide with a permanent stage.
+        self._stage_name = f"QGIS_MAP_{uuid.uuid4().hex[:16].upper()}"
+
+    @property
+    def is_released(self) -> bool:
+        return self._released
+
+    def mark_needs_restage(self) -> None:
+        """Allow one re-PUT after a confirmed missing-file error."""
+        if not self._released:
+            self._staged = False
 
     def _get_manager(self):
         if self._manager is None:
@@ -74,7 +95,7 @@ class MapImageSession:
         return self._manager
 
     def qualified_stage(self) -> str:
-        return qualified_table_name(self.database, self.schema, STAGE_NAME)
+        return qualified_table_name(self.database, self.schema, self._stage_name)
 
     def stage_at(self) -> str:
         return f"@{self.qualified_stage()}"
@@ -84,9 +105,12 @@ class MapImageSession:
         self.png_path = png_path
         self.staged_file = os.path.basename(png_path)
         self._staged = False
+        self._released = False
 
     def ensure_staged(self) -> None:
         """CREATE TEMP STAGE if needed and PUT the local PNG once."""
+        if self._released:
+            raise RuntimeError("Map image session has already been released.")
         if self._staged and self.staged_file:
             return
         if not self.png_path or not os.path.isfile(self.png_path):
@@ -98,27 +122,31 @@ class MapImageSession:
         stage = self.qualified_stage()
         stage_at = self.stage_at()
 
-        create_sql = (
-            f"CREATE TEMPORARY STAGE IF NOT EXISTS {stage} "
-            "ENCRYPTION=(TYPE='SNOWFLAKE_SSE')"
-        )  # nosec B608 - stage built via qualified_table_name
-        cur = manager.execute_query(
-            connection_name=self.connection_name,
-            query=create_sql,
-            context_information=self.context_information,
-            op_tag=_build_op_tag(
-                "map-brief-create-stage",
+        if not self._stage_created:
+            # Unique name: CREATE TEMPORARY STAGE without IF NOT EXISTS.
+            create_sql = (
+                f"CREATE TEMPORARY STAGE {stage} "
+                "ENCRYPTION=(TYPE='SNOWFLAKE_SSE')"
+            )  # nosec B608 - stage built via qualified_table_name
+            cur = manager.execute_query(
                 connection_name=self.connection_name,
-                schema=self.schema,
-            ),
-        )
-        if cur is not None:
-            cur.close()
+                query=create_sql,
+                context_information=self.context_information,
+                op_tag=_build_op_tag(
+                    "map-brief-create-stage",
+                    connection_name=self.connection_name,
+                    schema=self.schema,
+                ),
+            )
+            if cur is not None:
+                cur.close()
+            self._stage_created = True
 
+        put_uri = quote_put_file_uri(self.png_path)
         put_sql = (
-            f"PUT file://{self.png_path} {stage_at} "
+            f"PUT {put_uri} {stage_at} "
             "AUTO_COMPRESS=FALSE OVERWRITE=TRUE"
-        )  # nosec B608 - local temp path + qualified stage
+        )  # nosec B608 - quoted local path + qualified stage
         cur = manager.execute_query(
             connection_name=self.connection_name,
             query=put_sql,
@@ -135,6 +163,7 @@ class MapImageSession:
 
     def release(self) -> None:
         """REMOVE the staged file if one was uploaded."""
+        self._released = True
         if not self._staged or not self.staged_file:
             self._staged = False
             return
