@@ -5,7 +5,7 @@ from __future__ import annotations
 import typing
 
 from qgis.core import QgsApplication, QgsMessageLog, Qgis
-from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtCore import Qt, QSignalBlocker
 from qgis.PyQt.QtWidgets import (
     QComboBox,
     QDialog,
@@ -19,12 +19,7 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
-from ..helpers.cortex import (
-    DEFAULT_SQL_MODEL,
-    build_schema_context,
-    build_sql_prompt,
-    extract_sql,
-)
+from ..helpers.cortex import DEFAULT_SQL_MODEL, extract_sql
 from ..helpers.sql import quote_literal, sql_statement_is_read_only
 from ..helpers.utils import get_connection_child_groups, get_qsettings
 from ..managers.sf_connection_manager import SFConnectionManager, build_op_tag
@@ -44,6 +39,7 @@ class SFAskDialog(QDialog):
         self.settings = get_qsettings()
         self._task = None
         self._generated_sql = ""
+        self._closing = False
 
         self.setWindowTitle("Ask Snowflake (Cortex)")
         self.setMinimumWidth(640)
@@ -52,6 +48,14 @@ class SFAskDialog(QDialog):
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
+
+        notice = QLabel(
+            "Your question and selected schema metadata are sent to Snowflake "
+            "Cortex on your connection."
+        )
+        notice.setWordWrap(True)
+        notice.setTextFormat(Qt.TextFormat.PlainText)
+        layout.addWidget(notice)
 
         row = QHBoxLayout()
         row.addWidget(QLabel("Connection:"))
@@ -115,14 +119,15 @@ class SFAskDialog(QDialog):
         layout.addWidget(buttons)
 
     def _populate_connections(self) -> None:
-        self.connection_combo.clear()
         connections = get_connection_child_groups()
-        self.connection_combo.addItems(connections)
         preferred = self.context_information.get("connection_name")
-        if preferred and preferred in connections:
-            self.connection_combo.setCurrentText(preferred)
-        elif connections:
-            self.connection_combo.setCurrentIndex(0)
+        with QSignalBlocker(self.connection_combo):
+            self.connection_combo.clear()
+            self.connection_combo.addItems(connections)
+            if preferred and preferred in connections:
+                self.connection_combo.setCurrentText(preferred)
+            elif connections:
+                self.connection_combo.setCurrentIndex(0)
         self._on_connection_changed(self.connection_combo.currentText())
 
     def _on_connection_changed(self, connection_name: str) -> None:
@@ -139,7 +144,7 @@ class SFAskDialog(QDialog):
                 manager.connect(connection_name, auth)
             query = (
                 "SELECT DISTINCT TABLE_SCHEMA FROM INFORMATION_SCHEMA.TABLES "
-                f"WHERE TABLE_CATALOG ILIKE {quote_literal(database)} "
+                f"WHERE TABLE_CATALOG = {quote_literal(database)} "
                 "ORDER BY TABLE_SCHEMA"
             )
             cursor = manager.execute_query(
@@ -167,32 +172,6 @@ class SFAskDialog(QDialog):
                 Qgis.MessageLevel.Warning,
             )
 
-    def _fetch_schema_context(self, connection_name: str, schema: str, database: str) -> str:
-        manager = SFConnectionManager.get_instance()
-        query = (
-            "SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE "
-            "FROM INFORMATION_SCHEMA.COLUMNS "
-            f"WHERE TABLE_CATALOG ILIKE {quote_literal(database)} "
-            f"AND TABLE_SCHEMA ILIKE {quote_literal(schema)} "
-            "ORDER BY TABLE_NAME, ORDINAL_POSITION"
-        )
-        cursor = manager.execute_query(
-            connection_name=connection_name,
-            query=query,
-            context_information={
-                "connection_name": connection_name,
-                "schema_name": schema,
-            },
-            op_tag=build_op_tag(
-                "ask-schema-context",
-                connection_name=connection_name,
-                schema=schema,
-            ),
-        )
-        rows = cursor.fetchall()
-        cursor.close()
-        return build_schema_context(rows)
-
     def _on_generate(self) -> None:
         connection_name = self.connection_combo.currentText().strip()
         schema = self.schema_combo.currentText().strip()
@@ -211,22 +190,11 @@ class SFAskDialog(QDialog):
 
             auth = get_authentification_information(self.settings, connection_name)
             database = auth.get("database", "")
-            schema_context = self._fetch_schema_context(
-                connection_name, schema, database
-            )
-            if not schema_context:
-                QMessageBox.information(
-                    self,
-                    "Ask Snowflake (Cortex)",
-                    f"No columns found in schema {schema}.",
-                )
-                return
-            prompt = build_sql_prompt(question, schema_context, database, schema)
         except Exception as e:
             QMessageBox.information(
                 self,
                 "Ask Snowflake (Cortex)",
-                f"Could not build schema context.\n\n{e}",
+                f"Could not read connection settings.\n\n{e}",
             )
             return
 
@@ -242,16 +210,33 @@ class SFAskDialog(QDialog):
         self._task = SFCortexCompleteTask(
             connection_name=connection_name,
             model=model,
-            prompt=prompt,
             context_information=context,
+            question=question,
+            database=database,
+            schema=schema,
         )
         self._task.on_handle_error.connect(self._on_task_error)
         self._task.on_complete.connect(self._on_task_complete)
         QgsApplication.taskManager().addTask(self._task)
 
+    def _disconnect_task(self) -> None:
+        if self._task is None:
+            return
+        try:
+            self._task.on_handle_error.disconnect(self._on_task_error)
+        except Exception:
+            pass
+        try:
+            self._task.on_complete.disconnect(self._on_task_complete)
+        except Exception:
+            pass
+
     def _on_task_error(self, title: str, message: str) -> None:
+        self._task = None
         self.generate_btn.setEnabled(True)
         self.sql_preview.setPlainText("")
+        if self._closing:
+            return
         msg_box = QMessageBox(self)
         msg_box.setIcon(QMessageBox.Icon.Warning)
         msg_box.setWindowTitle(title)
@@ -260,12 +245,22 @@ class SFAskDialog(QDialog):
         msg_box.exec()
 
     def _on_task_complete(self, response: str) -> None:
+        task = self._task
+        omitted = getattr(task, "omitted_tables", 0) if task is not None else 0
+        self._task = None
         self.generate_btn.setEnabled(True)
         sql = extract_sql(response)
         self._generated_sql = sql
         self.sql_preview.setPlainText(sql or response)
         can_open = bool(sql) and sql_statement_is_read_only(sql)
         self.open_btn.setEnabled(can_open)
+        if omitted:
+            QMessageBox.information(
+                self,
+                "Ask Snowflake (Cortex)",
+                f"{omitted} table(s) were omitted from the schema context "
+                "to keep the prompt within size limits.",
+            )
         if sql and not can_open:
             QMessageBox.information(
                 self,
@@ -290,3 +285,21 @@ class SFAskDialog(QDialog):
         dialog.set_query(self._generated_sql)
         self.accept()
         dialog.exec()
+
+    def _cleanup_task(self) -> None:
+        self._closing = True
+        if self._task is not None:
+            try:
+                self._task.cancel()
+            except Exception:
+                pass
+            self._disconnect_task()
+            self._task = None
+
+    def reject(self) -> None:
+        self._cleanup_task()
+        super().reject()
+
+    def closeEvent(self, event) -> None:
+        self._cleanup_task()
+        super().closeEvent(event)

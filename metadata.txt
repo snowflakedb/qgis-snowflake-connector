@@ -22,18 +22,20 @@ repository=https://github.com/snowflakedb/qgis-snowflake-connector/
 hasProcessingProvider=yes
 changelog=1.1.0 - Map-extent loading, toolbar, attribute tables, Cortex tools:
  * Map-extent loading (#106): layers with extent_mode=1 fetch only features
-   intersecting the current map extent (per-request LIMIT), with a last-extent
-   cache for repaints. Right-click a table in the Browser and choose
-   "Add with map-extent loading", or toggle it from the Snowflake toolbar.
+   intersecting the current map extent (per-request LIMIT), with a completed-
+   snapshot last-extent cache for repaints. These layers are read-only.
+   Right-click a table in the Browser and choose "Add with map-extent loading",
+   or toggle it from the Snowflake toolbar.
  * Snowflake toolbar and Plugins menu: Execute SQL, Reload from Snowflake,
    Toggle map-extent loading, Ask Snowflake (Cortex), Map brief (Cortex).
  * Attribute-only tables (#105): tables without a geometry column open as
-   Snowflake attribute layers from the Browser (no longer blocked).
+   read-only Snowflake attribute layers from the Browser (no longer blocked).
  * Ask Snowflake (Cortex): natural-language question to a read-only SELECT via
    AI_COMPLETE; open the result in the existing SQL editor to load as a layer.
  * Map brief (Cortex): local view checks, prioritized layer context, four
-   sectioned answer panels, session-scoped follow-ups on the same staged PNG,
-   and outputs to a print layout label or project notes.
+   sectioned answer panels, session-scoped follow-ups on the same staged PNG
+   (PROMPT includes the image via {0}), and outputs to a print layout label or
+   project notes.
  1.0.28 - Packaging re-release of 1.0.27: ship the plugin as a
  properly packaged ZIP whose top-level folder is "qgis-snowflake-connector"
  (no version suffix), so installing via Plugins > Install from ZIP no longer

@@ -42,11 +42,11 @@ After the plugin loads, a **Snowflake** toolbar (and Plugins → Snowflake menu)
 
 ## Map-extent loading (#106)
 
-For tables too large to sample wholesale, right-click a spatial table in the Browser and choose **Add with map-extent loading**. The layer URI includes `extent_mode=1`. Each map render issues a query filtered to the current canvas rectangle with a per-request row LIMIT, so warehouse cost stays proportional to what you see. You can also toggle this mode from the toolbar for an existing Snowflake layer.
+For tables too large to sample wholesale, right-click a spatial table in the Browser and choose **Add with map-extent loading**. The layer URI includes `extent_mode=1`. Each map render issues a query filtered to the current canvas rectangle with a per-request row LIMIT. Results are capped, so a dense view may show a truncated subset; selection and feature ids are per query and these layers are read-only. Warehouse cost still depends on clustering and pruning—`ADD SEARCH OPTIMIZATION ON GEO(<geom_column>)` helps. You can also toggle this mode from the toolbar for an existing Snowflake layer.
 
 ## Attribute-only tables (#105)
 
-Tables without a GEOGRAPHY/GEOMETRY/H3 column appear under **Tables (no geometry)** in the Browser. Double-click one to open it as a Snowflake attribute layer (attribute table, filters, and editing with a primary key).
+Tables without a GEOGRAPHY/GEOMETRY/H3 column appear under **Tables (no geometry)** in the Browser. Double-click one to open it as a Snowflake attribute layer (attribute table and filters). These layers are read-only.
 
 ## Cortex tools
 
@@ -59,7 +59,7 @@ Both Cortex actions use `AI_COMPLETE` on your existing Snowflake connection.
 - Cortex access to a multimodal model (default `claude-3-5-sonnet`)
 - `CREATE STAGE` on the selected schema (the plugin creates a temporary SSE-encrypted stage, PUTs the canvas PNG once per dialog session, calls `AI_COMPLETE` with `TO_FILE`, and REMOVEs the file when the dialog closes)
 
-Before calling Cortex, the dialog runs local checks (no visible layers, layers off the current extent, nearly blank image) and shows warnings. The model returns four fixed sections: Seen in the image, From layer settings, Not determinable from this view, and Suggested next steps. You can ask follow-up questions about the same captured view, re-capture the canvas, insert the brief into a print layout label, or append it to the project notes (metadata abstract).
+Before calling Cortex, the dialog runs local checks (no visible layers, layers off the current extent, nearly blank image) and shows warnings. The model returns four fixed sections: Seen in the image, From layer settings, Not determinable from this view, and Suggested next steps. You can ask follow-up questions about the same captured view, insert the brief into a print layout label, or append it to the project notes (metadata abstract). The map image and visible layer details are sent to Cortex on your connection.
 
 ## Support
 If you found bugs or have suggestions for improving the plugin, please [submit](https://github.com/snowflakedb/qgis-snowflake-connector/issues) the issue or contribute by creating a pull request.

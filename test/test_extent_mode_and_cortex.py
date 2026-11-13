@@ -164,7 +164,7 @@ class TestCortexSqlHelpers(unittest.TestCase):
     def test_build_schema_context(self):
         from helpers.cortex import build_schema_context
 
-        text = build_schema_context(
+        text, omitted = build_schema_context(
             [
                 ("CITIES", "ID", "NUMBER"),
                 ("CITIES", "GEOM", "GEOGRAPHY"),
@@ -173,13 +173,23 @@ class TestCortexSqlHelpers(unittest.TestCase):
         )
         self.assertIn("CITIES(ID NUMBER, GEOM GEOGRAPHY)", text)
         self.assertIn("ROADS(NAME TEXT)", text)
+        self.assertEqual(omitted, 0)
 
     def test_build_schema_context_respects_max_tables(self):
         from helpers.cortex import build_schema_context
 
         rows = [(f"T{i}", "C", "TEXT") for i in range(5)]
-        text = build_schema_context(rows, max_tables=2)
+        text, omitted = build_schema_context(rows, max_tables=2)
         self.assertEqual(text.count("("), 2)
+        self.assertEqual(omitted, 3)
+
+    def test_system_dollar_rejected_as_not_readonly(self):
+        from helpers.sql import sql_statement_is_read_only
+
+        self.assertTrue(sql_statement_is_read_only("SELECT 1"))
+        self.assertFalse(
+            sql_statement_is_read_only("SELECT SYSTEM$CANCEL_ALL_QUERIES()")
+        )
 
     def test_build_sql_prompt_mentions_rules(self):
         from helpers.cortex import build_sql_prompt
@@ -240,31 +250,6 @@ class TestMapBriefHelpers(unittest.TestCase):
         )
         self.assertEqual(assess_view(1, True, False), [])
 
-    def test_summarize_renderer_graduated(self):
-        from helpers.cortex import summarize_renderer
-
-        class _Range:
-            def __init__(self, label):
-                self._label = label
-
-            def label(self):
-                return self._label
-
-        class _Renderer:
-            def type(self):
-                return "graduatedSymbol"
-
-            def classAttribute(self):
-                return "CRASHES"
-
-            def ranges(self):
-                return [_Range("0-10"), _Range("10-50")]
-
-        summary = summarize_renderer(_Renderer())
-        self.assertIn("renderer=graduatedSymbol", summary)
-        self.assertIn("field=CRASHES", summary)
-        self.assertIn("0-10", summary)
-
     def test_layer_context_budget_omits_lower_layers(self):
         from helpers.cortex import build_map_context, format_layer_block
 
@@ -324,16 +309,23 @@ class TestMapBriefHelpers(unittest.TestCase):
     def test_build_brief_prompt_contains_headings_and_warnings(self):
         from helpers.cortex import BRIEF_SECTIONS, build_brief_prompt
 
+        map_context = (
+            "CRS: EPSG:4326\n"
+            "Automatic checks:\n"
+            "- No visible layers on the map canvas."
+        )
         prompt = build_brief_prompt(
             "road safety",
-            "CRS: EPSG:4326",
+            map_context,
             warnings=["No visible layers on the map canvas."],
         )
         for title in BRIEF_SECTIONS:
             self.assertIn(title, prompt)
-        self.assertIn("Automatic checks", prompt)
+        self.assertIn("automatic checks", prompt.lower())
         self.assertIn("No visible layers", prompt)
         self.assertIn("road safety", prompt)
+        # Warnings are not duplicated outside map context.
+        self.assertEqual(prompt.count("No visible layers"), 1)
 
     def test_project_notes_and_label_text(self):
         from datetime import datetime, timezone
@@ -396,6 +388,8 @@ class TestMapBriefHelpers(unittest.TestCase):
             ]
             self.assertEqual(len(puts), 1)
             self.assertEqual(len(creates), 1)
+            self.assertIn("'file://", puts[0])
+            self.assertNotIn("IF NOT EXISTS", creates[0])
             session.release()
             removes = [q for q in manager.queries if q.startswith("REMOVE ")]
             self.assertEqual(len(removes), 1)
@@ -407,20 +401,37 @@ class TestMapBriefHelpers(unittest.TestCase):
             if os.path.isfile(path):
                 os.remove(path)
 
-    def test_map_brief_task_does_not_remove(self):
+    def test_quote_put_file_uri(self):
+        from helpers.map_stage import quote_put_file_uri
+
+        uri = quote_put_file_uri(r"C:\Users\First Last\tmp\map.png")
+        self.assertTrue(uri.startswith("'file://"))
+        self.assertTrue(uri.endswith("'"))
+        self.assertIn("First Last", uri)
+        self.assertNotIn("\\", uri)
+
+    def test_map_brief_task_prompt_template(self):
         task = _read("tasks/sf_map_brief_task.py")
-        self.assertIn("class SFMapBriefTask", task)
-        self.assertIn("TO_FILE", task)
+        self.assertIn('PROMPT_TEMPLATE = "{0}\\n\\n{1}"', task)
+        self.assertIn("PROMPT(%(template)s, TO_FILE(", task)
+        self.assertIn("%(prompt)s)", task)
+        self.assertIn("on_handle_error.emit", task)
+        self.assertIn("def finished", task)
         self.assertNotIn("REMOVE", task)
-        self.assertIn("ensure_staged", task)
+        self.assertNotIn("restage_on_missing", task)
 
     def test_map_brief_dialog_and_capture_exist(self):
         dialog = _read("dialogs/sf_map_brief_dialog.py")
         self.assertIn("class SFMapBriefDialog", dialog)
         self.assertIn("Ask about this view", dialog)
+        self.assertIn("Follow-up answers", dialog)
         self.assertIn("Insert into print layout", dialog)
         self.assertIn("Save to project notes", dialog)
+        self.assertIn("sent to", dialog)
+        self.assertIn("Snowflake Cortex", dialog)
+        self.assertNotIn("Re-capture", dialog)
         self.assertNotIn("Save...", dialog)
+        self.assertIn("QSignalBlocker", dialog)
         capture = _read("helpers/map_capture.py")
         self.assertIn("def render_canvas_png", capture)
         self.assertIn("def build_canvas_map_context", capture)
@@ -428,6 +439,92 @@ class TestMapBriefHelpers(unittest.TestCase):
         stage = _read("helpers/map_stage.py")
         self.assertIn("class MapImageSession", stage)
         self.assertIn("SNOWFLAKE_SSE", stage)
+        self.assertIn("quote_put_file_uri", stage)
+
+
+class TestExtentCacheAndCapabilities(unittest.TestCase):
+    """Source and pure checks for map-extent cache safety."""
+
+    def test_extent_cache_publishes_only_when_complete(self):
+        iterator = _read("providers/sf_feature_iterator.py")
+        self.assertIn("_extent_cache_buffer", iterator)
+        self.assertIn("_publish_extent_cache_if_complete", iterator)
+        self.assertIn("_extent_cache_pending_key", iterator)
+        # Key must not be published before fetch starts.
+        publish_block = iterator[
+            iterator.index("self._populate_extent_cache = (")
+            : iterator.index("self._extent_limit_n = None")
+        ]
+        self.assertNotIn("_extent_cache_key =", publish_block)
+
+    def test_extent_cache_key_includes_attrs_and_crs(self):
+        iterator = _read("providers/sf_feature_iterator.py")
+        key_fn = iterator[
+            iterator.index("def _build_extent_cache_key")
+            : iterator.index("def _publish_extent_cache_if_complete")
+        ]
+        self.assertIn("nog=", key_fn)
+        self.assertIn("attrs=", key_fn)
+        self.assertIn("crs=", key_fn)
+        self.assertIn("SubsetOfAttributes", key_fn)
+        self.assertIn("destinationCrs", key_fn)
+
+    def test_extent_mode_geometry_srid_and_single_geom_skip(self):
+        iterator = _read("providers/sf_feature_iterator.py")
+        self.assertIn("ST_GEOMETRYFROMWKT(", iterator)
+        self.assertIn("_srid", iterator)
+        self.assertIn("_single_geom_layer", iterator)
+        self.assertIn("{quoted_geom} IS NOT NULL", iterator)
+
+    def test_extent_mode_capabilities_readonly(self):
+        provider = _read("providers/sf_vector_data_provider.py")
+        caps = provider[
+            provider.index("def capabilities")
+            : provider.index("return base_capabilities")
+        ]
+        self.assertIn('_extent_mode', caps)
+        self.assertIn("map-extent loading", caps)
+
+    def test_encode_uri_round_trip_keys(self):
+        meta = _read("providers/sf_metadata_provider.py")
+        self.assertIn('parts.get("sql_query"', meta)
+        self.assertIn('parts.get("geom_column"', meta)
+        self.assertIn("extent_mode=1", meta)
+        self.assertIn("load_all_rows=1", meta)
+        self.assertIn("single_geom_layer=1", meta)
+        self.assertNotIn("sql={sql_query}", meta)
+        self.assertNotIn("geo_column={geo_column}", meta)
+
+    def test_convert_task_adds_layers_in_finished(self):
+        task = _read("tasks/sf_convert_column_to_layer_task.py")
+        run_fn = task[task.index("def run") : task.index("def cancel")]
+        finished_fn = task[task.index("def finished") :]
+        self.assertNotIn("QgsVectorLayer", run_fn)
+        self.assertNotIn("addMapLayer", run_fn)
+        self.assertIn("QgsVectorLayer", finished_fn)
+        self.assertIn("addMapLayer", finished_fn)
+
+    def test_attribute_only_passes_geom_type(self):
+        data_item = _read("entities/sf_data_item.py")
+        block = data_item[
+            data_item.index("def _start_add_attribute_table_layer")
+            : data_item.index("primary_key = prompt_and_get_primary_key")
+        ]
+        self.assertIn('"geom_type": ""', block)
+        self.assertNotIn("{**context_information, \"geom_type\": \"\"}", block)
+
+    def test_ask_dialog_hardening(self):
+        ask = _read("dialogs/sf_ask_dialog.py")
+        self.assertIn("QSignalBlocker", ask)
+        self.assertIn("TABLE_CATALOG =", ask)
+        self.assertNotIn("ILIKE", ask)
+        self.assertIn("sent to Snowflake", ask)
+        self.assertIn("Cortex on your connection", ask)
+        self.assertIn("_cleanup_task", ask)
+        cortex = _read("tasks/sf_cortex_complete_task.py")
+        self.assertIn("_fetch_schema_context", cortex)
+        self.assertNotIn("TO_FILE", cortex)
+        self.assertNotIn("CREATE STAGE", cortex)
 
 
 if __name__ == "__main__":
