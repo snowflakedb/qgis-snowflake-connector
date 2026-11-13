@@ -108,5 +108,32 @@ class TestExtentModeBrowserAction(unittest.TestCase):
         self.assertIn('uri += " extent_mode=1"', task)
 
 
+class TestToolbarHelpers(unittest.TestCase):
+    """Pure helpers for the Snowflake toolbar."""
+
+    def test_toggle_extent_mode_uri(self):
+        from helpers.toolbar import toggle_extent_mode_uri, uri_has_extent_mode
+
+        base = "connection_name=c schema_name=s table_name=t"
+        on = toggle_extent_mode_uri(base)
+        self.assertTrue(uri_has_extent_mode(on))
+        self.assertIn("extent_mode=1", on)
+        off = toggle_extent_mode_uri(on)
+        self.assertFalse(uri_has_extent_mode(off))
+        self.assertNotIn("extent_mode=1", off)
+
+    def test_plugin_registers_toolbar_actions(self):
+        plugin = _read("qgis_snowflake_connector.py")
+        self.assertIn("_init_toolbar", plugin)
+        self.assertIn("Execute SQL...", plugin)
+        self.assertIn("Reload from Snowflake", plugin)
+        self.assertIn("Toggle map-extent loading", plugin)
+        self.assertIn("Ask Snowflake (Cortex)...", plugin)
+        self.assertIn("Describe map (Cortex)...", plugin)
+        self.assertIn("on_reload_from_snowflake", plugin)
+        self.assertIn("toolbar.deleteLater", plugin)
+
+
 if __name__ == "__main__":
     unittest.main()
+

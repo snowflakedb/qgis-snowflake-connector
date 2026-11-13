@@ -54,6 +54,8 @@ from qgis.core import (
     QgsApplication,
     QgsProviderRegistry,
 )
+from qgis.PyQt.QtGui import QIcon
+from qgis.PyQt.QtWidgets import QAction, QMessageBox
 
 from .providers.sf_metadata_provider import SFMetadataProvider
 from .qgis_snowflake_connector_provider import QGISSnowflakeConnectorProvider
@@ -61,8 +63,17 @@ from .providers.sf_data_item_provider import SFDataItemProvider
 from .providers.sf_source_select_provider import SFSourceSelectProvider
 from .sf_locator_filter import SFLocatorFilter
 from .sf_expression_functions import register_sf_functions, unregister_sf_functions
+from .helpers.toolbar import (
+    connection_context_from_layer,
+    selected_snowflake_layers,
+    toggle_extent_mode_uri,
+)
+from .helpers.utils import get_connection_child_groups
 
 from qgis.gui import QgsGui
+
+_PLUGIN_DIR = os.path.dirname(__file__)
+_ICON_PATH = os.path.join(_PLUGIN_DIR, "icon.png")
 
 
 def get_plugin_version():
@@ -79,6 +90,9 @@ class QGISSnowflakeConnectorPlugin(object):
     def __init__(self):
         self.provider = None
         self.locator_filter = None
+        self.toolbar = None
+        self.menu = None
+        self.actions = []
 
     def initProcessing(self):
         self.provider = QGISSnowflakeConnectorProvider()
@@ -202,11 +216,152 @@ class QGISSnowflakeConnectorPlugin(object):
         except Exception:  # nosec B110 - locator filter is optional; missing iface or registration failure must not prevent plugin init
             pass
 
+        if self.iface is not None:
+            self._init_toolbar()
+
         register_sf_functions()
 
         threading.Thread(
             target=self._check_for_updates, daemon=True
         ).start()
+
+    def _init_toolbar(self):
+        """Create the Snowflake toolbar and Plugins submenu."""
+        self.menu = self.iface.pluginMenu().addMenu(
+            QIcon(_ICON_PATH), "Snowflake"
+        )
+        self.toolbar = self.iface.addToolBar("Snowflake")
+        self.toolbar.setObjectName("SnowflakeConnectorToolbar")
+
+        action_specs = [
+            ("Execute SQL...", self.on_execute_sql),
+            ("Reload from Snowflake", self.on_reload_from_snowflake),
+            ("Toggle map-extent loading", self.on_toggle_extent_mode),
+            ("Ask Snowflake (Cortex)...", self.on_ask_snowflake),
+            ("Describe map (Cortex)...", self.on_describe_map),
+        ]
+        for title, slot in action_specs:
+            action = QAction(QIcon(_ICON_PATH), title, self.iface.mainWindow())
+            action.triggered.connect(slot)
+            self.toolbar.addAction(action)
+            self.menu.addAction(action)
+            self.actions.append(action)
+
+    def _selected_layers(self):
+        if self.iface is None:
+            return []
+        try:
+            return list(self.iface.layerTreeView().selectedLayers())
+        except Exception:
+            return []
+
+    def _context_for_dialogs(self) -> dict:
+        """Connection context from the first selected Snowflake layer, or first saved connection."""
+        sf_layers = selected_snowflake_layers(self._selected_layers())
+        if sf_layers:
+            return connection_context_from_layer(sf_layers[0])
+        connections = get_connection_child_groups()
+        if connections:
+            return {"connection_name": connections[0]}
+        return {}
+
+    def on_execute_sql(self):
+        from .dialogs.sf_sql_query_dialog import SFSQLQueryDialog
+
+        context = self._context_for_dialogs()
+        if not context.get("connection_name"):
+            QMessageBox.information(
+                self.iface.mainWindow() if self.iface else None,
+                "Execute SQL",
+                "Create a Snowflake connection first (Layer > Data Source Manager > Snowflake).",
+            )
+            return
+        dialog = SFSQLQueryDialog(
+            context_information=context,
+            parent=self.iface.mainWindow() if self.iface else None,
+        )
+        dialog.exec()
+
+    def on_reload_from_snowflake(self):
+        layers = selected_snowflake_layers(self._selected_layers())
+        if not layers:
+            QMessageBox.information(
+                self.iface.mainWindow() if self.iface else None,
+                "Reload from Snowflake",
+                "Select one or more Snowflake layers in the layer tree.",
+            )
+            return
+        for layer in layers:
+            provider = layer.dataProvider()
+            if provider is not None:
+                provider.reloadData()
+            layer.triggerRepaint()
+
+    def on_toggle_extent_mode(self):
+        layers = selected_snowflake_layers(self._selected_layers())
+        if not layers:
+            QMessageBox.information(
+                self.iface.mainWindow() if self.iface else None,
+                "Toggle map-extent loading",
+                "Select one or more Snowflake layers in the layer tree.",
+            )
+            return
+        for layer in layers:
+            provider = layer.dataProvider()
+            if provider is None:
+                continue
+            new_uri = toggle_extent_mode_uri(provider.dataSourceUri())
+            layer.setDataSource(new_uri, layer.name(), "snowflakedb")
+            layer.triggerRepaint()
+
+    def on_ask_snowflake(self):
+        try:
+            from .dialogs.sf_ask_dialog import SFAskDialog
+        except ImportError:
+            QMessageBox.information(
+                self.iface.mainWindow() if self.iface else None,
+                "Ask Snowflake (Cortex)",
+                "The Ask Snowflake dialog is not available in this build.",
+            )
+            return
+        context = self._context_for_dialogs()
+        if not context.get("connection_name"):
+            QMessageBox.information(
+                self.iface.mainWindow() if self.iface else None,
+                "Ask Snowflake (Cortex)",
+                "Create a Snowflake connection first (Layer > Data Source Manager > Snowflake).",
+            )
+            return
+        dialog = SFAskDialog(
+            context_information=context,
+            parent=self.iface.mainWindow() if self.iface else None,
+        )
+        dialog.exec()
+
+    def on_describe_map(self):
+        try:
+            from .dialogs.sf_describe_map_dialog import SFDescribeMapDialog
+        except ImportError:
+            QMessageBox.information(
+                self.iface.mainWindow() if self.iface else None,
+                "Describe map (Cortex)",
+                "The Describe map dialog is not available in this build.",
+            )
+            return
+        context = self._context_for_dialogs()
+        if not context.get("connection_name"):
+            QMessageBox.information(
+                self.iface.mainWindow() if self.iface else None,
+                "Describe map (Cortex)",
+                "Create a Snowflake connection first (Layer > Data Source Manager > Snowflake).",
+            )
+            return
+        dialog = SFDescribeMapDialog(
+            context_information=context,
+            iface=self.iface,
+            parent=self.iface.mainWindow() if self.iface else None,
+        )
+        dialog.exec()
 
     def unload(self):
         if self.provider:
@@ -221,5 +376,18 @@ class QGISSnowflakeConnectorPlugin(object):
 
         if self.locator_filter and self.iface:
             self.iface.deregisterLocatorFilter(self.locator_filter)
+
+        if self.iface is not None:
+            for action in self.actions:
+                self.iface.removePluginMenu("Snowflake", action)
+                if self.toolbar is not None:
+                    self.toolbar.removeAction(action)
+            self.actions = []
+            if self.menu is not None:
+                self.iface.pluginMenu().removeAction(self.menu.menuAction())
+                self.menu = None
+            if self.toolbar is not None:
+                self.toolbar.deleteLater()
+                self.toolbar = None
 
         unregister_sf_functions()
