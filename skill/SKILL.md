@@ -148,7 +148,15 @@ The `qgis` module must be stubbed because the test environment has no QGIS runti
 
 ## Packaging
 
-Build the installable zip (must have a root folder matching the plugin directory name):
+Preferred local build (root folder is always `qgis-snowflake-connector/`):
+
+```bash
+python scripts/build_package.py -o /tmp/dist
+```
+
+Tagged releases: push a tag `vX.Y.Z` that matches `metadata.txt` `version`. The `.github/workflows/release.yml` workflow runs `build_package.py`, attaches both `qgis-snowflake-connector-X.Y.Z.zip` and the stable alias `qgis-snowflake-connector.zip` to the GitHub Release, and fails if the tag and metadata versions differ.
+
+Manual packaging (must have a root folder matching the plugin directory name):
 
 ```bash
 rm -rf /tmp/build && mkdir -p /tmp/build/qgis-snowflake-connector
@@ -165,6 +173,7 @@ Common packaging mistakes:
 - Missing root folder -> "No root folder was found inside"
 - Missing `tasks/` or other directories -> ImportError on load
 - Trailing `/` on rsync directory args flattens structure
+- Installing GitHub’s auto source archive instead of the CI-built ZIP
 
 ## SQL Safety
 

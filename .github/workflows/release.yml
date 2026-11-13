@@ -1,0 +1,66 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Check tag matches metadata.txt version
+        id: version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          META=$(python - <<'PY'
+          import configparser
+          cfg = configparser.ConfigParser()
+          cfg.read("metadata.txt")
+          print(cfg.get("general", "version", fallback="").strip())
+          PY
+          )
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "meta=$META" >> "$GITHUB_OUTPUT"
+          if [ "$TAG" != "$META" ]; then
+            echo "Tag version '$TAG' does not match metadata.txt version '$META'"
+            exit 1
+          fi
+          echo "Version OK: $TAG"
+
+      - name: Build plugin ZIP
+        run: |
+          mkdir -p dist
+          python scripts/build_package.py -o dist
+          VERSION="${{ steps.version.outputs.tag }}"
+          VERSIONED="dist/qgis-snowflake-connector-${VERSION}.zip"
+          if [ ! -f "$VERSIONED" ]; then
+            echo "Expected package not found: $VERSIONED"
+            ls -la dist || true
+            exit 1
+          fi
+          cp "$VERSIONED" dist/qgis-snowflake-connector.zip
+          ls -la dist
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/qgis-snowflake-connector-${{ steps.version.outputs.tag }}.zip
+            dist/qgis-snowflake-connector.zip
+          fail_on_unmatched_files: true
+          body: |
+            Install via **Plugins → Install from ZIP** using `qgis-snowflake-connector.zip`.
+            After upgrading an existing install, fully restart QGIS so the vector provider reloads.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

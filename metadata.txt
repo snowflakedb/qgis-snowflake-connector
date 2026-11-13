@@ -39,6 +39,10 @@ changelog=1.1.0 - Map-extent loading, toolbar, attribute tables, Cortex tools:
    sectioned answer panels, session-scoped follow-ups on the same staged PNG
    (PROMPT includes the image via {0}), and outputs to a print layout label or
    project notes.
+ * Tagged releases: GitHub Actions builds and attaches
+   qgis-snowflake-connector.zip (plus a versioned copy) on v* tags.
+ * README outcome paths for connect, load, map-extent, spatial filter, SQL,
+   and Cortex.
  1.0.28 - Packaging re-release of 1.0.27: ship the plugin as a
  properly packaged ZIP whose top-level folder is "qgis-snowflake-connector"
  (no version suffix), so installing via Plugins > Install from ZIP no longer
