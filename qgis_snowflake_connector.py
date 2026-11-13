@@ -74,6 +74,7 @@ from qgis.gui import QgsGui
 
 _PLUGIN_DIR = os.path.dirname(__file__)
 _ICON_PATH = os.path.join(_PLUGIN_DIR, "icon.png")
+_TOOLBAR_ICONS_DIR = os.path.join(_PLUGIN_DIR, "ui", "images", "toolbar")
 
 
 def get_plugin_version():
@@ -234,14 +235,15 @@ class QGISSnowflakeConnectorPlugin(object):
         self.toolbar.setObjectName("SnowflakeConnectorToolbar")
 
         action_specs = [
-            ("Execute SQL...", self.on_execute_sql),
-            ("Reload from Snowflake", self.on_reload_from_snowflake),
-            ("Toggle map-extent loading", self.on_toggle_extent_mode),
-            ("Ask Snowflake (Cortex)...", self.on_ask_snowflake),
-            ("Map brief (Cortex)...", self.on_map_brief),
+            ("Execute SQL...", "execute_sql.svg", self.on_execute_sql),
+            ("Reload from Snowflake", "reload.svg", self.on_reload_from_snowflake),
+            ("Toggle map-extent loading", "extent_mode.svg", self.on_toggle_extent_mode),
+            ("Ask Snowflake (Cortex)...", "ask_cortex.svg", self.on_ask_snowflake),
+            ("Map brief (Cortex)...", "map_brief.svg", self.on_map_brief),
         ]
-        for title, slot in action_specs:
-            action = QAction(QIcon(_ICON_PATH), title, self.iface.mainWindow())
+        for title, icon_name, slot in action_specs:
+            icon = QIcon(os.path.join(_TOOLBAR_ICONS_DIR, icon_name))
+            action = QAction(icon, title, self.iface.mainWindow())
             action.triggered.connect(slot)
             self.toolbar.addAction(action)
             self.menu.addAction(action)

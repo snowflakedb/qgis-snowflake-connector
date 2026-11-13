@@ -39,7 +39,7 @@ class SFLocatorFilter(QgsLocatorFilter):
         try:
             from .helpers.utils import get_connection_child_groups, get_auth_information
             from .helpers.sql import quote_literal
-            from .managers.sf_connection_manager import SFConnectionManager
+            from .managers.sf_connection_manager import SFConnectionManager, build_op_tag
 
             connections = get_connection_child_groups()
 
@@ -60,7 +60,10 @@ class SFLocatorFilter(QgsLocatorFilter):
                         f"AND TABLE_SCHEMA != 'INFORMATION_SCHEMA' "
                         f"ORDER BY TABLE_NAME LIMIT 20"
                     )
-                    cursor = mgr.execute_query(conn_name, sql)
+                    cursor = mgr.execute_query(
+                        conn_name, sql,
+                        op_tag=build_op_tag("locator", connection_name=conn_name),
+                    )
                     rows = cursor.fetchall() if cursor else []
                     cursor.close() if cursor else None
 
@@ -122,7 +125,8 @@ class SFLocatorFilter(QgsLocatorFilter):
                 f"ORDER BY ORDINAL_POSITION"
             )
             cursor = mgr.execute_query(
-                conn_name, geo_query, {"schema_name": schema}
+                conn_name, geo_query, {"schema_name": schema},
+                op_tag=build_op_tag("locator", connection_name=conn_name),
             )
             geo_rows = cursor.fetchall() if cursor else []
             cursor.close() if cursor else None

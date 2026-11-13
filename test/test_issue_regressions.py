@@ -2196,6 +2196,17 @@ class TestGeometryTypeCountFilter(unittest.TestCase):
         # The old single-type ILIKE form must be gone.
         self.assertNotIn(":type ILIKE ", content)
 
+    def test_extent_handles_null_min_max_bounds(self):
+        """Empty MIN/MAX rows must not be unpacked into QgsRectangle(*bounds)."""
+        content = self._provider_content()
+        self.assertIn("def _rectangle_from_bounds(extent_bounds)", content)
+        self.assertIn("any(v is None for v in extent_bounds[:4])", content)
+        self.assertIn(
+            "self._extent = self._rectangle_from_bounds(extent_bounds)",
+            content,
+        )
+        self.assertNotIn("QgsRectangle(*extent_bounds)", content)
+
 
 class TestIntegerColumnMapping(unittest.TestCase):
     """Regression: NUMBER/DECIMAL columns with scale 0 (including primary keys)

@@ -319,12 +319,15 @@ class SFVectorDataProvider(QgsVectorDataProvider):
                 and not self._validate_primary_key()
             ):
                 reasons.append("primary key is not verified unique")
-            QgsMessageLog.logMessage(
-                f"Layer read-only: {', '.join(reasons)} "
-                f"(table={getattr(self, '_table_name', '?')})",
-                "Snowflake Plugin",
-                Qgis.MessageLevel.Info,
-            )
+            # capabilities() is called often; log the reason once per provider.
+            if not getattr(self, "_logged_readonly_reason", False):
+                QgsMessageLog.logMessage(
+                    f"Layer read-only: {', '.join(reasons)} "
+                    f"(table={getattr(self, '_table_name', '?')})",
+                    "Snowflake Plugin",
+                    Qgis.MessageLevel.Info,
+                )
+                self._logged_readonly_reason = True
             return base_capabilities
 
         return (
@@ -431,6 +434,12 @@ class SFVectorDataProvider(QgsVectorDataProvider):
                         connection_name=self._connection_name,
                         query=query,
                         context_information=self._context_information,
+                        op_tag=build_op_tag(
+                            "fields",
+                            connection_name=self._connection_name,
+                            schema=self._schema_name,
+                            table=self._table_name,
+                        ),
                     )
 
                     field_info = cur.fetchall()
@@ -457,6 +466,12 @@ class SFVectorDataProvider(QgsVectorDataProvider):
                         connection_name=self._connection_name,
                         query=self._sql_query,
                         context_information=self._context_information,
+                        op_tag=build_op_tag(
+                            "fields",
+                            connection_name=self._connection_name,
+                            schema=self._schema_name,
+                            table=self._table_name,
+                        ),
                     )
                     description = cur.description
                     cur.close()
@@ -592,6 +607,12 @@ class SFVectorDataProvider(QgsVectorDataProvider):
             connection_name=self._connection_name,
             query=query,
             context_information=self._context_information,
+            op_tag=build_op_tag(
+                "is_view",
+                connection_name=self._connection_name,
+                schema=self._schema_name,
+                table=self._table_name,
+            ),
         )
         view_list = [elem[0] for elem in cur.fetchall()]
         cur.close()
@@ -620,6 +641,12 @@ class SFVectorDataProvider(QgsVectorDataProvider):
             connection_name=self._connection_name,
             query=query,
             context_information=self._context_information,
+            op_tag=build_op_tag(
+                "unique_values",
+                connection_name=self._connection_name,
+                schema=self._schema_name,
+                table=self._table_name,
+            ),
         )
 
         for elem in cur.fetchall():
@@ -905,6 +932,27 @@ class SFVectorDataProvider(QgsVectorDataProvider):
             self._extent = QgsRectangle()
         return self._extent
 
+    @staticmethod
+    def _rectangle_from_bounds(extent_bounds) -> QgsRectangle:
+        """Build a QgsRectangle from a Snowflake MIN/MAX row.
+
+        Empty layers (or geometry-type filters that match nothing) return
+        ``(None, None, None, None)`` from MIN/MAX. Unpacking those into
+        ``QgsRectangle(*)`` raises TypeError on PyQGIS.
+        """
+        if (
+            not extent_bounds
+            or len(extent_bounds) < 4
+            or any(v is None for v in extent_bounds[:4])
+        ):
+            return QgsRectangle()
+        return QgsRectangle(
+            float(extent_bounds[0]),
+            float(extent_bounds[1]),
+            float(extent_bounds[2]),
+            float(extent_bounds[3]),
+        )
+
     def featureCount(self) -> int:
         """Row count for attribute-only (no geometry) table layers (#105)."""
         if self._feature_count is not None:
@@ -1021,7 +1069,7 @@ class SFGeoVectorDataProvider(SFVectorDataProvider):
 
     def extent(self) -> QgsRectangle:
         """Calculates the extent of the bend and returns a QgsRectangle"""
-        if not self._extent:
+        if self._extent is None:
             if not self._is_valid or not self._column_geom:
                 self._extent = QgsRectangle()
             else:
@@ -1053,7 +1101,7 @@ class SFGeoVectorDataProvider(SFVectorDataProvider):
                 extent_bounds = cur.fetchone()
                 cur.close()
 
-                self._extent = QgsRectangle(*extent_bounds)
+                self._extent = self._rectangle_from_bounds(extent_bounds)
 
         return self._extent
 
@@ -1075,6 +1123,12 @@ class SFH3VectorDataProvider(SFVectorDataProvider):
             connection_name=self._connection_name,
             query=query,
             context_information=self._context_information,
+            op_tag=build_op_tag(
+                "h3_validate",
+                connection_name=self._connection_name,
+                schema=self._schema_name,
+                table=self._table_name,
+            ),
         )
 
         self._is_valid = cur.fetchone()[0]
@@ -1117,7 +1171,7 @@ class SFH3VectorDataProvider(SFVectorDataProvider):
 
     def extent(self) -> QgsRectangle:
         """Calculates the extent of the bend and returns a QgsRectangle"""
-        if not self._extent:
+        if self._extent is None:
             if not self._is_valid or not self._column_geom:
                 self._extent = QgsRectangle()
             else:
@@ -1146,6 +1200,6 @@ class SFH3VectorDataProvider(SFVectorDataProvider):
                 extent_bounds = cur.fetchone()
                 cur.close()
 
-                self._extent = QgsRectangle(*extent_bounds)
+                self._extent = self._rectangle_from_bounds(extent_bounds)
 
         return self._extent

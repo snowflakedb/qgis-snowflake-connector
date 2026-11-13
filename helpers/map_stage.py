@@ -26,10 +26,16 @@ def _build_op_tag(action: str, connection_name: str, schema: str = "") -> str:
     try:
         from ..managers.sf_connection_manager import build_op_tag
 
+        op = {
+            "create": "stage_create",
+            "put": "stage_put",
+            "remove": "stage_remove",
+        }.get(action, f"stage_{action}")
         return build_op_tag(
-            action,
+            op,
             connection_name=connection_name,
             schema=schema,
+            kind="ddl",
         )
     except Exception:
         # Unit tests inject a fake manager without loading PyQGIS.
@@ -133,7 +139,7 @@ class MapImageSession:
                 query=create_sql,
                 context_information=self.context_information,
                 op_tag=_build_op_tag(
-                    "map-brief-create-stage",
+                    "create",
                     connection_name=self.connection_name,
                     schema=self.schema,
                 ),
@@ -152,7 +158,7 @@ class MapImageSession:
             query=put_sql,
             context_information=self.context_information,
             op_tag=_build_op_tag(
-                "map-brief-put",
+                "put",
                 connection_name=self.connection_name,
                 schema=self.schema,
             ),
@@ -177,7 +183,7 @@ class MapImageSession:
                 query=remove_sql,
                 context_information=self.context_information,
                 op_tag=_build_op_tag(
-                    "map-brief-remove",
+                    "remove",
                     connection_name=self.connection_name,
                     schema=self.schema,
                 ),

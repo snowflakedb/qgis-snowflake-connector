@@ -122,7 +122,16 @@ def extract_sql(response_text: Optional[str]) -> str:
 
     if ";" in text:
         text = text.split(";", 1)[0].strip()
-    return text.rstrip(";").strip()
+    text = text.rstrip(";").strip()
+    # Models sometimes wrap the statement in quotes: "SELECT …"
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "'\"":
+        inner = text[1:-1].strip()
+        upper = inner.lstrip("(").upper()
+        if upper.startswith(
+            ("SELECT", "WITH", "SHOW", "DESCRIBE", "DESC ", "EXPLAIN")
+        ):
+            text = inner
+    return text
 
 
 def assess_view(

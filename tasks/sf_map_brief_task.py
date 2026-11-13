@@ -82,9 +82,11 @@ class SFMapBriefTask(QgsTask):
                 },
                 context_information=self.session.context_information,
                 op_tag=build_op_tag(
-                    "map-brief-complete",
+                    "cortex_map_brief",
                     connection_name=self.session.connection_name,
                     schema=self.session.schema,
+                    model=self.model,
+                    kind="cortex",
                 ),
             )
             return cur.fetchone()

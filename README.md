@@ -35,6 +35,8 @@ A **Snowflake** toolbar (and **Plugins → Snowflake**) also provides Execute SQ
 ## Large tables (map-extent loading)
 For tables too large to sample wholesale, right-click a spatial table in the Browser and choose **Add with map-extent loading**. The layer URI includes `extent_mode=1`. Each map render issues a query filtered to the current canvas rectangle with a per-request row LIMIT. Results are capped, so a dense view may show a truncated subset; selection and feature ids are per query and these layers are read-only. Warehouse cost still depends on clustering and pruning—`ADD SEARCH OPTIMIZATION ON GEO(<geom_column>)` helps. You can also toggle this mode from the toolbar for an existing Snowflake layer.
 
+**H3:** when an H3 table exceeds the H3 row cap (~500k), Browser and Data Source Manager adds enable map-extent loading automatically (no random full-table sample). Already-open sampled layers also re-fetch the current map rectangle with `LIMIT` on pan/zoom instead of serving a sparse global sample.
+
 ## One-shot spatial filter
 For a filtered download (not live map-extent loading), right-click a spatial table and choose **Download with spatial filter…**. Set the extent from the current map canvas, another project layer, or by drawing a rectangle; optionally add a WHERE clause and a row limit. The dialog previews the `ST_INTERSECTS` SQL. On OK the plugin loads the SQL as a Snowflake query layer in the background, reports progress and cancel/empty/failure in the message bar, and zooms to the new layer.
 
@@ -48,6 +50,26 @@ Use the toolbar **Execute SQL…** or Browser **Execute SQL…** to run a SELECT
 - **Reload from Snowflake** — refresh selected Snowflake layers (`reloadData()`).
 - **Ask Snowflake (Cortex)…** — natural-language question to a read-only SELECT via `AI_COMPLETE` (needs Cortex text-model access; default `llama3.1-70b`). Review the SQL in the editor before loading as a layer.
 - **Map brief (Cortex)…** — four-section brief of the current map view via a multimodal Cortex model (default `claude-3-5-sonnet`). Needs `CREATE STAGE` on the selected schema for a temporary staged PNG. You can ask follow-ups on the same capture, insert into a print layout label, or append to project notes.
+
+## Query telemetry (QUERY_TAG)
+Every plugin SQL statement and Cortex `AI_COMPLETE` call sets a structured Snowflake session `QUERY_TAG` (JSON). Tags appear on rows in `QUERY_HISTORY` / `ACCOUNT_USAGE.QUERY_HISTORY` so you can attribute warehouse time by operation, layer, and model—without a custom audit table.
+
+Example (current session):
+
+```sql
+SELECT query_id, start_time, query_type,
+       TRY_PARSE_JSON(query_tag):op::string AS op,
+       TRY_PARSE_JSON(query_tag):model::string AS model,
+       TRY_PARSE_JSON(query_tag):layer::string AS layer,
+       total_elapsed_time, rows_produced
+FROM TABLE(INFORMATION_SCHEMA.QUERY_HISTORY())
+WHERE TRY_PARSE_JSON(query_tag):app::string = 'qgis-snowflake-connector'
+ORDER BY start_time DESC;
+```
+
+Use `TRY_PARSE_JSON` (not `PARSE_JSON`) so rows tagged by other tools with non-JSON `QUERY_TAG` values do not abort the scan.
+
+For longer retention across the account, use `SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY` (latency of up to ~45 minutes). Tag fields include `app`, `ver` (plugin version), `op`, `kind` (`sql` | `cortex` | `ddl` | `dml`), and optionally `conn`, `layer`, and `model`.
 
 ## Support
 If you found bugs or have suggestions for improving the plugin, please [submit](https://github.com/snowflakedb/qgis-snowflake-connector/issues) the issue or contribute by creating a pull request.

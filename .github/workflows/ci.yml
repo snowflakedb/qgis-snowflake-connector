@@ -24,7 +24,7 @@ jobs:
         run: |
           pip install flake8
           flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics \
-            --exclude=ui/,scripts/,.git,__pycache__
+            --exclude=ui/,scripts/,.git,__pycache__,.cursor
 
       - name: Compile check (all .py files)
         run: |
@@ -42,6 +42,12 @@ jobs:
 
       - name: Run pure-Python tests (regressions)
         run: python test/test_issue_regressions.py -v
+
+      - name: Run map-extent / Cortex / spatial-filter tests
+        run: python test/test_extent_mode_and_cortex.py -v
+
+      - name: Run plugin-improvement tests
+        run: python test/test_plugin_improvements.py -v
 
       - name: Run repository precheck tests
         run: python test/test_precheck_repo.py -v

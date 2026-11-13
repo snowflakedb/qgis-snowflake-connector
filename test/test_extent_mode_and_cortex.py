@@ -77,20 +77,33 @@ class TestExtentModeIterator(unittest.TestCase):
 
     def test_extent_mode_uses_limit_not_sample(self):
         iterator = _read("providers/sf_feature_iterator.py")
-        self.assertIn("if self._extent_mode:", iterator)
+        self.assertIn("if self._use_extent_style_fetch:", iterator)
         self.assertIn("LIMIT {int(limit_n)}", iterator)
         # SAMPLE remains for the non-extent limited path.
         self.assertIn("SAMPLE ({sample_n} ROWS)", iterator)
 
     def test_extent_mode_never_writes_shared_cache(self):
         iterator = _read("providers/sf_feature_iterator.py")
-        self.assertIn("not self._extent_mode", iterator)
+        self.assertIn("not self._use_extent_style_fetch", iterator)
         self.assertIn("_populate_extent_cache", iterator)
         self.assertIn("_serving_extent_cache", iterator)
 
     def test_extent_cache_key_helper_exists(self):
         iterator = _read("providers/sf_feature_iterator.py")
         self.assertIn("def _build_extent_cache_key", iterator)
+
+    def test_limited_viewport_uses_extent_style_fetch(self):
+        """Oversized sampled layers re-fetch the canvas rect with LIMIT + cache."""
+        iterator = _read("providers/sf_feature_iterator.py")
+        self.assertIn("self._viewport_candidate", iterator)
+        self.assertIn("self._use_extent_style_fetch", iterator)
+        self.assertIn("self._limited_unordered", iterator)
+        self.assertIn("or self._viewport_candidate", iterator)
+        # Shared sample cache must not win over an active viewport SQL fetch.
+        self.assertIn(
+            "not getattr(self, \"_use_extent_style_fetch\", False)",
+            iterator,
+        )
 
 
 class TestExtentModeBrowserAction(unittest.TestCase):
@@ -113,6 +126,19 @@ class TestExtentModeBrowserAction(unittest.TestCase):
         task = _read("tasks/sf_convert_column_to_layer_task.py")
         self.assertIn("extent_mode: bool = False", task)
         self.assertIn('uri += " extent_mode=1"', task)
+
+    def test_large_h3_auto_enables_extent_mode(self):
+        data_item = _read("entities/sf_data_item.py")
+        dsm = _read("dialogs/sf_data_source_manager_widget.py")
+        for src, label in ((data_item, "Browser"), (dsm, "DSM")):
+            self.assertIn("H3_COLUMN_TYPES", src, label)
+            self.assertIn("enabling map-extent", src, label)
+        self.assertIn("effective_extent_mode = True", data_item)
+        self.assertIn("extent_mode=effective_extent_mode", data_item)
+        self.assertIn("extent_mode=extent_mode", dsm)
+        # Oversized H3 skips the sample/load-all dialog.
+        self.assertIn("if self.geom_type in H3_COLUMN_TYPES:", data_item)
+        self.assertIn("if data_type in H3_COLUMN_TYPES:", dsm)
 
     def test_convert_and_sql_tasks_report_progress_and_zoom(self):
         convert = _read("tasks/sf_convert_column_to_layer_task.py")
@@ -237,6 +263,12 @@ class TestCortexSqlHelpers(unittest.TestCase):
 
         sql = extract_sql("SELECT 1; DELETE FROM T;")
         self.assertEqual(sql, "SELECT 1")
+
+    def test_extract_sql_strips_wrapping_quotes(self):
+        from helpers.cortex import extract_sql
+
+        self.assertEqual(extract_sql('"SELECT 1"'), "SELECT 1")
+        self.assertEqual(extract_sql("'SELECT * FROM T'"), "SELECT * FROM T")
 
     def test_ask_dialog_and_task_exist(self):
         self.assertIn("class SFAskDialog", _read("dialogs/sf_ask_dialog.py"))
@@ -503,6 +535,7 @@ class TestExtentCacheAndCapabilities(unittest.TestCase):
         ]
         self.assertIn('_extent_mode', caps)
         self.assertIn("map-extent loading", caps)
+        self.assertIn("_logged_readonly_reason", caps)
 
     def test_encode_uri_round_trip_keys(self):
         meta = _read("providers/sf_metadata_provider.py")

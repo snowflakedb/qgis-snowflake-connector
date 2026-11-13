@@ -41,15 +41,27 @@ jobs:
       - name: Build plugin ZIP
         run: |
           mkdir -p dist
-          python scripts/build_package.py -o dist
+          python scripts/build_package.py -o dist --also-versioned
           VERSION="${{ steps.version.outputs.tag }}"
           VERSIONED="dist/qgis-snowflake-connector-${VERSION}.zip"
-          if [ ! -f "$VERSIONED" ]; then
-            echo "Expected package not found: $VERSIONED"
+          ALIAS="dist/qgis-snowflake-connector.zip"
+          if [ ! -f "$VERSIONED" ] || [ ! -f "$ALIAS" ]; then
+            echo "Expected versioned + stable-alias packages missing"
             ls -la dist || true
             exit 1
           fi
-          cp "$VERSIONED" dist/qgis-snowflake-connector.zip
+          # Fail the release if the ZIP root is not the stable plugin folder.
+          python - <<'PY'
+          import zipfile, sys
+          from pathlib import Path
+          expected = "qgis-snowflake-connector"
+          for path in Path("dist").glob("*.zip"):
+              roots = {n.split("/")[0] for n in zipfile.ZipFile(path).namelist() if n}
+              if roots != {expected}:
+                  print(f"{path}: roots={sorted(roots)} expected={expected!r}")
+                  sys.exit(1)
+              print(f"OK {path.name} root={expected}")
+          PY
           ls -la dist
 
       - name: Publish GitHub Release

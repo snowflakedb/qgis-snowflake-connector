@@ -8,6 +8,7 @@ from ..helpers.data_base import (
     get_table_geo_columns,
     get_table_iterator,
 )
+from ..helpers.limits import H3_COLUMN_TYPES
 from ..helpers.map_zoom import zoom_canvas_to_layer
 from ..helpers.messages import (
     LargeDatasetChoice,
@@ -38,6 +39,7 @@ from qgis.core import (
     Qgis,
     QgsApplication,
     QgsErrorItem,
+    QgsMessageLog,
     QgsProject,
     QgsVectorLayer
 )
@@ -604,9 +606,10 @@ ORDER BY {column_name}"""  # nosec B608 - column_name is a fixed literal; values
         }
 
         load_all_rows = False
+        effective_extent_mode = extent_mode
         # Map-extent loading already caps per-request fetches; skip the
         # whole-table sample/load-all prompt.
-        if not extent_mode:
+        if not effective_extent_mode:
             limit_size = limit_size_for_table(
                 context_information=context_information
             )
@@ -614,22 +617,34 @@ ORDER BY {column_name}"""  # nosec B608 - column_name is a fixed literal; values
                 context_information=context_information,
             )
             if table_exceeds_size:
-                choice = get_large_dataset_choice(
-                    "SFConvertColumnToLayerTask Dataset is too large",
-                    (
-                        "The dataset is too large. Please consider using "
-                        '"Execute SQL" to limit the result set.\n\n'
-                        f'"Load sample" will load a random sample of {limit_size // 1000} '
-                        "thousand rows.\n"
-                        '"Load all rows" will load the full dataset '
-                        "(this may be slow and memory-intensive).\n"
-                        'Or right-click the table and choose '
-                        '"Add with map-extent loading".'
-                    ),
-                )
-                if choice == LargeDatasetChoice.CANCEL:
-                    return False
-                load_all_rows = choice == LargeDatasetChoice.LOAD_ALL
+                # Oversized H3 tables flicker/feel slow under random SAMPLE;
+                # default them to map-extent loading instead of the dialog.
+                if self.geom_type in H3_COLUMN_TYPES:
+                    effective_extent_mode = True
+                    QgsMessageLog.logMessage(
+                        f"H3 table {self.clean_name} exceeds the "
+                        f"{limit_size // 1000}k-row cap; enabling map-extent "
+                        "loading (viewport ST_INTERSECTS + LIMIT).",
+                        "Snowflake Plugin",
+                        Qgis.MessageLevel.Info,
+                    )
+                else:
+                    choice = get_large_dataset_choice(
+                        "SFConvertColumnToLayerTask Dataset is too large",
+                        (
+                            "The dataset is too large. Please consider using "
+                            '"Execute SQL" to limit the result set.\n\n'
+                            f'"Load sample" will load a random sample of {limit_size // 1000} '
+                            "thousand rows.\n"
+                            '"Load all rows" will load the full dataset '
+                            "(this may be slow and memory-intensive).\n"
+                            'Or right-click the table and choose '
+                            '"Add with map-extent loading".'
+                        ),
+                    )
+                    if choice == LargeDatasetChoice.CANCEL:
+                        return False
+                    load_all_rows = choice == LargeDatasetChoice.LOAD_ALL
 
         context_information["primary_key"] = prompt_and_get_primary_key(
             context_information=context_information, data_type=self.geom_type
@@ -640,7 +655,7 @@ ORDER BY {column_name}"""  # nosec B608 - column_name is a fixed literal; values
             context_information=context_information,
             path=self.path(),
             load_all_rows=load_all_rows,
-            extent_mode=extent_mode,
+            extent_mode=effective_extent_mode,
         )
         snowflake_covert_column_to_layer_task.on_handle_error.connect(
             slot=on_handle_error

@@ -230,7 +230,7 @@ class SFMapBriefDialog(QDialog):
                 query=query,
                 context_information={"connection_name": connection_name},
                 op_tag=build_op_tag(
-                    "map-brief-list-schemas", connection_name=connection_name
+                    "list_schemas", connection_name=connection_name, kind="sql"
                 ),
             )
             schemas = [row[0] for row in cursor.fetchall() if row and row[0]]

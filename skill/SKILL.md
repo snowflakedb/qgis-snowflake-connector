@@ -121,7 +121,7 @@ NUMBER maps to Double, TEXT/VARCHAR to QString. Be aware that H3 cell indices st
 
 For deep dives into specific subsystems, see the companion files:
 
-- [connection-manager.md](connection-manager.md) -- Connection lifecycle, auth types, reconnect
+- [connection-manager.md](connection-manager.md) -- Connection lifecycle, auth types, reconnect, QUERY_TAG telemetry
 - [data-providers.md](data-providers.md) -- Provider hierarchy, fields, features, H3 conversion
 - [export-algorithm.md](export-algorithm.md) -- Export to Snowflake, H3-aware export, VARIANT handling
 - [troubleshooting.md](troubleshooting.md) -- Common errors, debugging strategies, known issues
@@ -148,13 +148,15 @@ The `qgis` module must be stubbed because the test environment has no QGIS runti
 
 ## Packaging
 
-Preferred local build (root folder is always `qgis-snowflake-connector/`):
+Preferred local build (root folder is **always** `qgis-snowflake-connector/` — never versioned):
 
 ```bash
 python scripts/build_package.py -o /tmp/dist
 ```
 
-Tagged releases: push a tag `vX.Y.Z` that matches `metadata.txt` `version`. The `.github/workflows/release.yml` workflow runs `build_package.py`, attaches both `qgis-snowflake-connector-X.Y.Z.zip` and the stable alias `qgis-snowflake-connector.zip` to the GitHub Release, and fails if the tag and metadata versions differ.
+Writes `qgis-snowflake-connector.zip` by default (Install from ZIP). Pass `--also-versioned` for an extra `qgis-snowflake-connector-<version>.zip` (release archives). Exits non-zero if the ZIP root is not exactly `qgis-snowflake-connector/`. That stable root is what makes QGIS upgrade the existing plugin instead of installing a second one.
+
+Tagged releases: push a tag `vX.Y.Z` that matches `metadata.txt` `version`. The `.github/workflows/release.yml` workflow runs `build_package.py --also-versioned`, attaches both ZIPs, and re-checks the zip root.
 
 Manual packaging (must have a root folder matching the plugin directory name):
 

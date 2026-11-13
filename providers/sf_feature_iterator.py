@@ -89,7 +89,16 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
 
         # Map-extent loading (#106): never use the shared full-layer cache.
         # Each request streams against the current render rectangle.
+        # Limited (sampled) layers also use extent-style viewport fetches when
+        # the canvas supplies a filterRect, so pan/zoom is not a random SAMPLE.
         self._extent_mode = bool(getattr(self._provider, "_extent_mode", False))
+        self._limited_unordered = bool(
+            getattr(self._provider, "_is_limited_unordered", False)
+        )
+        self._viewport_candidate = (
+            self._limited_unordered and not filter_rect.isNull()
+        )
+        self._use_extent_style_fetch = False
         self._serving_extent_cache = False
         self._populate_extent_cache = False
 
@@ -107,7 +116,10 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                 if ftype == QgsFeatureRequest.FilterType.FilterFid
                 else list(self._request.filterFids())
             )
-            if self._extent_mode:
+            if self._extent_mode or (
+                self._viewport_candidate
+                and self._provider._extent_cache_key is not None
+            ):
                 # Resolve fids only from a completed extent-cache snapshot.
                 if self._provider._extent_cache_key is not None:
                     self._serving_extent_cache = True
@@ -117,9 +129,9 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                 for _ in self._provider.getFeatures(QgsFeatureRequest()):
                     pass
 
-        # Serve a previous map-extent result when the rectangle + filters match.
+        # Serve a previous map-extent / viewport result when the key matches.
         if (
-            self._extent_mode
+            (self._extent_mode or self._viewport_candidate)
             and not filter_rect.isNull()
             and self._provider._extent_cache_key is not None
         ):
@@ -129,8 +141,13 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                 self._index = 0
                 return
 
-        # Shared full-layer cache is only used when map-extent loading is off.
-        if self._extent_mode or not self._provider._features_loaded:
+        # Shared full-layer cache is only used when map-extent loading is off
+        # and we are not doing a limited-layer viewport re-fetch.
+        if (
+            self._extent_mode
+            or not self._provider._features_loaded
+            or self._viewport_candidate
+        ):
             geom_column = self._provider.get_geometry_column()
 
             # Mapping between the field type and the conversion function
@@ -277,15 +294,35 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                 if filter_geom_clause != "":
                     filter_geom_clause = f"and {filter_geom_clause}"
 
+            # Viewport-style fetch: explicit extent_mode, or a limited layer
+            # with a successful spatial pushdown for the canvas rectangle.
+            self._use_extent_style_fetch = self._extent_mode or (
+                self._limited_unordered
+                and has_geometry
+                and not filter_rect.isNull()
+                and filter_geom_clause != ""
+            )
+
+            # Entered only for a viewport candidate but spatial pushdown failed:
+            # prefer an already-loaded shared sample over another SAMPLE query.
+            if (
+                self._viewport_candidate
+                and not self._use_extent_style_fetch
+                and not self._extent_mode
+                and self._provider._features_loaded
+            ):
+                self._index = 0
+                return
+
             # A query is only safe to cache into the provider-shared feature
             # list when it carried no per-request row filter. Otherwise a
             # filtered render/identify would poison the cache and cap every
             # later full-extent request to that subset. subsetString() is a
             # stable provider-level filter (reloadData() clears the cache when
             # it changes), so it is intentionally not part of this check.
-            # Map-extent loading never writes the shared cache (#106).
+            # Map-extent / viewport-style loading never writes the shared cache.
             self._should_cache_features = (
-                not self._extent_mode
+                not self._use_extent_style_fetch
                 and not getattr(self._provider, "_load_all_rows", False)
                 and self._target_fids is None
                 and self._expression == ""
@@ -293,7 +330,9 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
             )
             # Accumulate locally; publish only when the cursor is exhausted.
             self._populate_extent_cache = (
-                self._extent_mode and has_geometry and not filter_rect.isNull()
+                self._use_extent_style_fetch
+                and has_geometry
+                and not filter_rect.isNull()
             )
             self._extent_cache_buffer = []
             self._extent_cache_pending_key = (
@@ -386,10 +425,10 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                 )
 
             geo_type_for_limit = self._provider._geo_column_type or ""
-            if self._extent_mode:
-                # Per-request LIMIT for map-extent loading (#106). With a
-                # rectangle the ST_INTERSECTS pushdown already restricts the
-                # result; without one (attribute table) we still cap the fetch.
+            if self._use_extent_style_fetch:
+                # Per-request LIMIT for map-extent / limited viewport loading.
+                # With a rectangle the ST_INTERSECTS pushdown already restricts
+                # the result; without one (attribute table) we still cap.
                 limit_n = limit_size_for_type(geo_type_for_limit)
                 self._extent_limit_n = int(limit_n)
                 self.final_query = (
@@ -411,7 +450,7 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                 query=self.final_query,
                 context_information=self._provider._context_information,
                 op_tag=build_op_tag(
-                    "layer-load",
+                    "features",
                     connection_name=self._provider._connection_name,
                     schema=self._provider._schema_name,
                     table=self._provider._table_name,
@@ -519,7 +558,11 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
                 self._index += 1
                 return True
 
-            if self._provider._features_loaded and not self._extent_mode:
+            if (
+                self._provider._features_loaded
+                and not self._extent_mode
+                and not getattr(self, "_use_extent_style_fetch", False)
+            ):
                 if not self._provider.isValid():
                     f.setValid(False)
                     return False
@@ -722,6 +765,12 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
             connection_name=self._provider._connection_name,
             query=self.final_query,
             context_information=self._provider._context_information,
+            op_tag=build_op_tag(
+                "features",
+                connection_name=self._provider._connection_name,
+                schema=self._provider._schema_name,
+                table=self._provider._table_name,
+            ),
         )
         self._provider._features = []
         self._provider._features_loaded = False

@@ -128,6 +128,7 @@ class SpatialJoinAlgorithm(QgsProcessingAlgorithm):
     def _get_columns(self, mgr, connection_name, schema, table, ctx):
         """Return list of column names for a table."""
         from ..helpers.sql import quote_literal
+        from ..managers.sf_connection_manager import build_op_tag
         cursor = mgr.execute_query(
             connection_name,
             f"SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "  # nosec B608 - values escaped via quote_literal
@@ -135,12 +136,13 @@ class SpatialJoinAlgorithm(QgsProcessingAlgorithm):
             f"AND TABLE_NAME ILIKE {quote_literal(table)} "
             f"ORDER BY ORDINAL_POSITION",
             ctx,
+            op_tag=build_op_tag("proc_join", connection_name=connection_name),
         )
         return [r[0] for r in cursor.fetchall()] if cursor else []
 
     def processAlgorithm(self, parameters, context, feedback):
         from ..helpers.utils import get_auth_information
-        from ..managers.sf_connection_manager import SFConnectionManager
+        from ..managers.sf_connection_manager import SFConnectionManager, build_op_tag
         from ..helpers.sql import quote_identifier, quote_literal
 
         connection_name = self.parameterAsString(parameters, self.CONNECTION, context)
@@ -198,6 +200,7 @@ class SpatialJoinAlgorithm(QgsProcessingAlgorithm):
                 f"WHERE TABLE_SCHEMA ILIKE {quote_literal(schema)} "
                 f"AND TABLE_NAME ILIKE {quote_literal(output)}",
                 ctx,
+                op_tag=build_op_tag("proc_join", connection_name=connection_name),
             )
             exists_row = exists_cursor.fetchone() if exists_cursor else None
             if exists_row and exists_row[0] > 0:
@@ -243,11 +246,15 @@ class SpatialJoinAlgorithm(QgsProcessingAlgorithm):
         feedback.pushInfo(f"Running spatial join: {sql}")
 
         try:
-            mgr.execute_query(connection_name, sql, ctx)
+            mgr.execute_query(
+                connection_name, sql, ctx,
+                op_tag=build_op_tag("proc_join", connection_name=connection_name),
+            )
             count_cursor = mgr.execute_query(
                 connection_name,
                 f"SELECT COUNT(*) FROM {qs}.{qo}",  # nosec B608 - identifiers escaped via quote_identifier
                 ctx,
+                op_tag=build_op_tag("proc_join", connection_name=connection_name),
             )
             count_result = count_cursor.fetchone() if count_cursor else None
             row_count = count_result[0] if count_result else 0

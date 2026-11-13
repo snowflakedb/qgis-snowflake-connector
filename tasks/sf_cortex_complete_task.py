@@ -61,9 +61,10 @@ class SFCortexCompleteTask(QgsTask):
                 query=query,
                 context_information=self.context_information,
                 op_tag=build_op_tag(
-                    "ask-schema-context",
+                    "ask_schema",
                     connection_name=self.connection_name,
                     schema=self.schema,
+                    kind="sql",
                 ),
             )
             rows = cursor.fetchall()
@@ -114,9 +115,11 @@ class SFCortexCompleteTask(QgsTask):
                 params=params,
                 context_information=self.context_information,
                 op_tag=build_op_tag(
-                    "cortex-complete",
+                    "cortex_complete",
                     connection_name=self.connection_name,
                     schema=self.context_information.get("schema_name"),
+                    model=self.model,
+                    kind="cortex",
                 ),
             )
             row = cursor.fetchone()

@@ -2,7 +2,7 @@ import typing
 
 from ..enums.snowflake_metadata_type import SnowflakeMetadataType
 
-from ..managers.sf_connection_manager import SFConnectionManager
+from ..managers.sf_connection_manager import SFConnectionManager, build_op_tag
 from ..helpers.utils import get_authentification_information, get_qsettings
 from ..helpers.sql import quote_identifier, quote_literal, qualified_table_name
 from qgis.PyQt.QtCore import QSettings
@@ -15,6 +15,25 @@ from ..helpers.mappings import (
     mapping_single_to_multi_geometry_type,
     mapping_multi_single_to_geometry_type,
 )
+
+
+def _op_tag(
+    op: str,
+    context_information: typing.Optional[dict] = None,
+    connection_name: typing.Optional[str] = None,
+    schema: typing.Optional[str] = None,
+    table: typing.Optional[str] = None,
+    **kwargs,
+) -> str:
+    """Build a QUERY_TAG for data_base helpers."""
+    ctx = context_information or {}
+    return build_op_tag(
+        op,
+        connection_name=connection_name or ctx.get("connection_name"),
+        schema=schema or ctx.get("schema_name"),
+        table=table or ctx.get("table_name"),
+        **kwargs,
+    )
 
 
 def get_schema_iterator(settings: QSettings, connection_name: str) -> SFFeatureIterator:
@@ -81,7 +100,11 @@ def filter_geo_columns(
                 LIMIT 1)""")  # nosec B608 - table/column sanitized via qualified_table_name/quote_identifier
     if len(number_queries) > 0:
         query = f"SELECT {','.join(number_queries)}"  # nosec B608 - subqueries pre-sanitized above
-        result = sf_data_provider.execute_query(query, connection_name).fetchall()[0]
+        result = sf_data_provider.execute_query(
+            query,
+            connection_name,
+            op_tag=_op_tag("h3_validate", connection_name=connection_name),
+        ).fetchall()[0]
         for i in range(len(result)):
             if result[i]:
                 geo_columns.append(h3_columns[i])
@@ -266,7 +289,14 @@ def get_columns_cursor(
         ORDER BY COLUMN_NAME
     """  # nosec B608 - values escaped via quote_literal
     return sf_data_provider.execute_query(
-        query=query_select_columns, connection_name=connection_name
+        query=query_select_columns,
+        connection_name=connection_name,
+        op_tag=_op_tag(
+            "list_columns",
+            connection_name=connection_name,
+            schema=schema,
+            table=table,
+        ),
     )
 
 
@@ -292,6 +322,11 @@ def get_cursor_description(
         query=query,
         connection_name=connection_name,
         context_information=context_information,
+        op_tag=_op_tag(
+            "fields",
+            connection_name=connection_name,
+            context_information=context_information,
+        ),
     )
     cur_description = cur_query.description
     cur_query.close()
@@ -299,7 +334,10 @@ def get_cursor_description(
 
 
 def __execute_query(
-    settings: QSettings, connection_name: str, query: str
+    settings: QSettings,
+    connection_name: str,
+    query: str,
+    op: str = "metadata",
 ) -> snowflake.connector.cursor.SnowflakeCursor:
     """
     Executes a SQL query using the provided Snowflake connection settings.
@@ -308,6 +346,7 @@ def __execute_query(
         settings (QSettings): The QSettings object containing the configuration settings.
         connection_name (str): The name of the Snowflake connection to use.
         query (str): The SQL query to be executed.
+        op (str): Telemetry operation code for QUERY_TAG.
 
     Returns:
         snowflake.connector.cursor.SnowflakeCursor: The cursor object resulting from the executed query.
@@ -316,7 +355,11 @@ def __execute_query(
         settings=settings, connection_name=connection_name
     )
     sf_data_provider = SFDataProvider(auth_information)
-    return sf_data_provider.execute_query(query=query, connection_name=connection_name)
+    return sf_data_provider.execute_query(
+        query=query,
+        connection_name=connection_name,
+        op_tag=_op_tag(op, connection_name=connection_name),
+    )
 
 
 def __get_cur_count(
@@ -448,6 +491,7 @@ def get_srid_from_table_geo_column(
         connection_name=context_information["connection_name"],
         query=query_srid,
         context_information=context_information,
+        op_tag=_op_tag("srid", context_information),
     )
     srid = cur.fetchone()[0]
     cur.close()
@@ -510,6 +554,7 @@ def get_geo_column_type(
         connection_name=context_information["connection_name"],
         query=query_geo_column_type,
         context_information=context_information,
+        op_tag=_op_tag("geo_column_type", context_information),
     )
     result_row = cur.fetchone()
     cur.close()
@@ -549,6 +594,7 @@ def get_cheap_row_count(
             connection_name=context_information["connection_name"],
             query=query,
             context_information=context_information,
+        op_tag=_op_tag("cheap_count", context_information),
         )
         row = cur.fetchone()
         cur.close()
@@ -614,6 +660,7 @@ def get_cursor_description_from_sql(
         connection_name=context_information["connection_name"],
         query=query,
         context_information=context_information,
+        op_tag=_op_tag("metadata", context_information),
     )
     cur_description = cur.description
     cur.close()
@@ -633,6 +680,7 @@ def get_srid_from_sql_query_geo_column(
         connection_name=context_information["connection_name"],
         query=query_srid,
         context_information=context_information,
+        op_tag=_op_tag("srid", context_information),
     )
     srid = cur.fetchone()[0]
     cur.close()
@@ -675,6 +723,7 @@ def get_geo_types_from_geo_json_column(
         connection_name=context_information["connection_name"],
         query=query_geo_type,
         context_information=context_information,
+        op_tag=_op_tag("geo_types", context_information),
     )
     geo_type_list = cur.fetchall()
     cleaned_geo_type_list = []
@@ -705,6 +754,7 @@ def get_geo_column_type_from_query(
         connection_name=context_information["connection_name"],
         query=query,
         context_information=context_information,
+        op_tag=_op_tag("geo_column_type", context_information),
     )
 
     for col in cur.description:
@@ -743,6 +793,7 @@ def check_from_clause_exceeds_size(
         connection_name=context_information["connection_name"],
         query=query,
         context_information=context_information,
+        op_tag=_op_tag("metadata", context_information),
     )
 
     count_tuple = cur.fetchone()
@@ -799,6 +850,7 @@ def get_limit_sql_query(
         connection_name=context_information["connection_name"],
         query=f"SELECT * FROM ({query}) LIMIT 0",  # nosec B608 - query is wrapped in subquery; LIMIT is a constant
         context_information=context_information,
+        op_tag=_op_tag("metadata", context_information),
     )
     cur_description = cur_desc.description
     cur_desc.close()
@@ -838,6 +890,7 @@ def get_limit_sql_query(
         connection_name=context_information["connection_name"],
         query=sub_query,
         context_information=context_information,
+        op_tag=_op_tag("metadata", context_information),
     )
 
     resultset = cur.fetchall()
@@ -874,6 +927,7 @@ def get_h3_columns_from_query(
             connection_name=context_information["connection_name"],
             query=sub_query,
             context_information=context_information,
+        op_tag=_op_tag("metadata", context_information),
         )
 
         resultset = cur.fetchall()
@@ -944,6 +998,7 @@ def get_declared_primary_key(
             connection_name=context_information["connection_name"],
             query=query,
             context_information=context_information,
+        op_tag=_op_tag("pk_check", context_information),
         )
         # SHOW PRIMARY KEYS column order is stable:
         # created_on, database_name, schema_name, table_name, column_name, ...
@@ -1013,6 +1068,7 @@ def get_table_columns(
         connection_name=context_information["connection_name"],
         query=query_table_columns,
         context_information=context_information,
+        op_tag=_op_tag("metadata", context_information),
     )
 
     result_rows = cur.fetchall()
@@ -1042,6 +1098,7 @@ def check_column_has_duplicates(
         connection_name=context_information["connection_name"],
         query=query,
         context_information=context_information,
+        op_tag=_op_tag("pk_check", context_information),
     )
     row = cur.fetchone()
     cur.close()
@@ -1050,13 +1107,7 @@ def check_column_has_duplicates(
 
 def _edit_op_tag(context_information: dict) -> str:
     """Build the QUERY_TAG payload used for every plugin-issued DML (E3)."""
-    from ..managers.sf_connection_manager import build_op_tag
-    return build_op_tag(
-        "edit",
-        connection_name=context_information.get("connection_name"),
-        schema=context_information.get("schema_name"),
-        table=context_information.get("table_name"),
-    )
+    return _op_tag("edit", context_information, kind="dml")
 
 
 def update_table_feature(
@@ -1272,6 +1323,7 @@ def get_next_primary_key_value(
             connection_name=context_information["connection_name"],
             query=sql,
             context_information=context_information,
+        op_tag=_op_tag("metadata", context_information),
         )
         row = cur.fetchone()
         cur.close()
