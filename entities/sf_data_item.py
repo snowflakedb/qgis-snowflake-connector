@@ -522,10 +522,11 @@ ORDER BY {column_name}"""  # nosec B608 - column_name is a fixed literal; values
             "database_name": auth_information["database"],
             "schema_name": schema_data_item.clean_name,
             "table_name": self.clean_name,
+            "geom_type": "",
         }
 
         limit_size = limit_size_for_table(
-            context_information={**context_information, "geom_type": ""}
+            context_information=context_information
         )
         table_exceeds_size = check_table_exceeds_size(
             context_information=context_information,
