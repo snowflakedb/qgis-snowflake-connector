@@ -50,6 +50,7 @@ Use the toolbar **Execute SQL…** or Browser **Execute SQL…** to run a SELECT
 - **Reload from Snowflake** — refresh selected Snowflake layers (`reloadData()`).
 - **Ask Snowflake (Cortex)…** — natural-language question to a read-only SELECT via `AI_COMPLETE` (needs Cortex text-model access; default `llama3.1-70b`). Review the SQL in the editor before loading as a layer.
 - **Map brief (Cortex)…** — four-section brief of the current map view via a multimodal Cortex model (default `claude-3-5-sonnet`). Needs `CREATE STAGE` on the selected schema for a temporary staged PNG. You can ask follow-ups on the same capture, insert into a print layout label, or append to project notes.
+- Model dropdowns in both dialogs are filled from `SHOW CORTEX BASE MODELS` for the connected role (with a static fallback if discovery fails).
 
 ## Query telemetry (QUERY_TAG)
 Every plugin SQL statement and Cortex `AI_COMPLETE` call sets a structured Snowflake session `QUERY_TAG` (JSON). Tags appear on rows in `QUERY_HISTORY` / `ACCOUNT_USAGE.QUERY_HISTORY` so you can attribute warehouse time by operation, layer, and model—without a custom audit table.
