@@ -289,9 +289,19 @@ class TestCortexSqlHelpers(unittest.TestCase):
             (None, "llama3.1-70b", "CORTEX_BASE", "SNOWFLAKE", "MODELS", None, "GA"),
             (None, "old-model", "CORTEX_BASE", "SNOWFLAKE", "MODELS", None, "EOL"),
             (None, "pixtral-large", "CORTEX_BASE", "SNOWFLAKE", "MODELS", None, "GA"),
+            (
+                None,
+                "secret-preview",
+                "CORTEX_BASE",
+                "SNOWFLAKE",
+                "MODELS",
+                None,
+                "PRIVATE PREVIEW",
+            ),
         ]
         names = parse_cortex_base_model_rows(rows)
         self.assertEqual(names, ["llama3.1-70b", "pixtral-large"])
+        self.assertNotIn("secret-preview", names)
 
     def test_parse_cortex_base_model_rows_uses_description(self):
         from helpers.cortex import parse_cortex_base_model_rows
@@ -304,6 +314,7 @@ class TestCortexSqlHelpers(unittest.TestCase):
         rows = [
             ("ts", "claude-sonnet-4-5", "GA"),
             ("ts", "dead-model", "EOL"),
+            ("ts", "private-model", "PRIVATE PREVIEW"),
         ]
         names = parse_cortex_base_model_rows(rows, description)
         self.assertEqual(names, ["claude-sonnet-4-5"])
@@ -322,19 +333,24 @@ class TestCortexSqlHelpers(unittest.TestCase):
             "pixtral-large",
             "claude-sonnet-4-5",
             "multilingual-e5-large",
+            "ARCTIC-EXTRACT",
+            "snowflake-arctic",
         ]
         ask = models_for_ask_snowflake(available)
         self.assertIn("llama3.1-70b", ask)
-        self.assertIn("pixtral-large", ask)
+        self.assertIn("snowflake-arctic", ask)
+        self.assertNotIn("pixtral-large", ask)
+        self.assertNotIn("claude-sonnet-4-5", ask)
         self.assertNotIn("multilingual-e5-large", ask)
+        self.assertNotIn("ARCTIC-EXTRACT", ask)
 
         brief = models_for_map_brief(available)
         self.assertEqual(brief, ["pixtral-large", "claude-sonnet-4-5"])
         self.assertEqual(models_for_map_brief([]), list(FALLBACK_MULTIMODAL_MODELS))
         self.assertEqual(models_for_ask_snowflake([]), list(FALLBACK_SQL_MODELS))
         self.assertEqual(
-            choose_model(ask, "PIXTRAL-LARGE", "llama3.1-70b"),
-            "pixtral-large",
+            choose_model(ask, "llama3.1-8b", "llama3.1-70b"),
+            "llama3.1-70b",
         )
 
 
@@ -415,6 +431,53 @@ class TestMapBriefHelpers(unittest.TestCase):
         self.assertEqual(sections["Seen in the image"], "Only this")
         self.assertEqual(sections["Suggested next steps"], "")
 
+        quoted = (
+            '" ## Seen in the image\nDots\n'
+            "## From layer settings\nRoads\n"
+            "## Not determinable from this view\nUnknown\n"
+            '## Suggested next steps\nZoom in"'
+        )
+        from helpers.cortex import normalize_cortex_text
+
+        cleaned = normalize_cortex_text(quoted)
+        self.assertFalse(cleaned.startswith('"'))
+        self.assertFalse(cleaned.endswith('"'))
+        sections = split_brief_sections(quoted)
+        self.assertIn("Dots", sections["Seen in the image"])
+        self.assertIn("Roads", sections["From layer settings"])
+        self.assertIn("Zoom in", sections["Suggested next steps"])
+        self.assertEqual(sections["Other"], "")
+
+        # AI_COMPLETE sometimes returns one line with literal \n escapes.
+        bn = "\\n"
+        escaped = (
+            '"## Seen in the image'
+            + bn
+            + "- Dots"
+            + bn
+            + bn
+            + "## From layer settings"
+            + bn
+            + "- Roads"
+            + bn
+            + bn
+            + "## Not determinable from this view"
+            + bn
+            + "- Unknown"
+            + bn
+            + bn
+            + "## Suggested next steps"
+            + bn
+            + '- Zoom in"'
+        )
+        self.assertNotIn("\n", escaped[1:-1])  # no real newlines inside quotes
+        sections = split_brief_sections(escaped)
+        self.assertIn("Dots", sections["Seen in the image"])
+        self.assertIn("Roads", sections["From layer settings"])
+        self.assertIn("Unknown", sections["Not determinable from this view"])
+        self.assertIn("Zoom in", sections["Suggested next steps"])
+        self.assertEqual(sections["Other"], "")
+
     def test_build_brief_prompt_contains_headings_and_warnings(self):
         from helpers.cortex import BRIEF_SECTIONS, build_brief_prompt
 
@@ -460,73 +523,45 @@ class TestMapBriefHelpers(unittest.TestCase):
         self.assertTrue(notes.startswith("Map brief (2026-03-13 12:00 UTC)"))
         self.assertIn("Dots", notes)
 
-    def test_map_image_session_puts_once(self):
+    def test_map_image_session_reads_local_png(self):
         import tempfile
 
         from helpers.map_stage import MapImageSession
 
-        class _Cursor:
-            def close(self):
-                return None
-
-        class _FakeManager:
-            def __init__(self):
-                self.queries = []
-
-            def execute_query(self, connection_name, query, **kwargs):
-                self.queries.append(query)
-                return _Cursor()
-
         fd, path = tempfile.mkstemp(suffix=".png")
-        os.close(fd)
         try:
-            manager = _FakeManager()
+            os.write(fd, b"\x89PNG\r\n\x1a\n")
+        finally:
+            os.close(fd)
+        try:
             session = MapImageSession(
                 connection_name="c",
                 database="DB",
                 schema="PUBLIC",
-                connection_manager=manager,
             )
             session.set_local_png(path)
-            session.ensure_staged()
-            session.ensure_staged()
-            session.ensure_staged()
-            puts = [q for q in manager.queries if q.startswith("PUT ")]
-            creates = [
-                q for q in manager.queries if "CREATE TEMPORARY STAGE" in q
-            ]
-            self.assertEqual(len(puts), 1)
-            self.assertEqual(len(creates), 1)
-            self.assertIn("'file://", puts[0])
-            self.assertNotIn("IF NOT EXISTS", creates[0])
+            self.assertEqual(session.read_png_bytes(), b"\x89PNG\r\n\x1a\n")
             session.release()
-            removes = [q for q in manager.queries if q.startswith("REMOVE ")]
-            self.assertEqual(len(removes), 1)
-            # Second release should not REMOVE again.
-            session.release()
-            removes = [q for q in manager.queries if q.startswith("REMOVE ")]
-            self.assertEqual(len(removes), 1)
+            with self.assertRaises(RuntimeError):
+                session.read_png_bytes()
+            session.cleanup_local_png()
+            self.assertFalse(os.path.isfile(path))
         finally:
             if os.path.isfile(path):
                 os.remove(path)
 
-    def test_quote_put_file_uri(self):
-        from helpers.map_stage import quote_put_file_uri
-
-        uri = quote_put_file_uri(r"C:\Users\First Last\tmp\map.png")
-        self.assertTrue(uri.startswith("'file://"))
-        self.assertTrue(uri.endswith("'"))
-        self.assertIn("First Last", uri)
-        self.assertNotIn("\\", uri)
-
     def test_map_brief_task_prompt_template(self):
         task = _read("tasks/sf_map_brief_task.py")
         self.assertIn('PROMPT_TEMPLATE = "{0}\\n\\n{1}"', task)
-        self.assertIn("PROMPT(%(template)s, TO_FILE(", task)
+        self.assertIn("PROMPT(%(template)s, TO_FILE(%(png_bytes)s, 'image/png')", task)
         self.assertIn("%(prompt)s)", task)
+        self.assertIn("read_png_bytes", task)
+        self.assertIn("normalize_cortex_text", task)
         self.assertIn("on_handle_error.emit", task)
         self.assertIn("def finished", task)
-        self.assertNotIn("REMOVE", task)
+        self.assertNotIn("stage_ref", task)
+        self.assertNotIn("ensure_staged", task)
+        self.assertNotIn("CREATE STAGE", task)
         self.assertNotIn("restage_on_missing", task)
 
     def test_map_brief_dialog_and_capture_exist(self):
@@ -538,6 +573,8 @@ class TestMapBriefHelpers(unittest.TestCase):
         self.assertIn("Save to project notes", dialog)
         self.assertIn("sent to", dialog)
         self.assertIn("Snowflake Cortex", dialog)
+        self.assertIn("self.help_btn", dialog)
+        self.assertIn("How to use Map brief", dialog)
         self.assertNotIn("Re-capture", dialog)
         self.assertNotIn("Save...", dialog)
         self.assertIn("QSignalBlocker", dialog)
@@ -549,8 +586,10 @@ class TestMapBriefHelpers(unittest.TestCase):
         self.assertIn("def collect_view_warnings", capture)
         stage = _read("helpers/map_stage.py")
         self.assertIn("class MapImageSession", stage)
-        self.assertIn("SNOWFLAKE_SSE", stage)
-        self.assertIn("quote_put_file_uri", stage)
+        self.assertIn("def read_png_bytes", stage)
+        self.assertNotIn("SNOWFLAKE_SSE", stage)
+        self.assertNotIn("CREATE TEMPORARY STAGE", stage)
+        self.assertNotIn("quote_put_file_uri", stage)
 
 
 class TestExtentCacheAndCapabilities(unittest.TestCase):
@@ -633,10 +672,42 @@ class TestExtentCacheAndCapabilities(unittest.TestCase):
         self.assertIn("sent to Snowflake", ask)
         self.assertIn("Cortex on your connection", ask)
         self.assertIn("_cleanup_task", ask)
+        self.assertIn("self.help_btn", ask)
+        self.assertIn("How to use Ask Snowflake", ask)
+        self.assertIn("FAILED TO AUTHENTICATE", ask)
+        brief = _read("dialogs/sf_map_brief_dialog.py")
+        self.assertIn("FAILED TO AUTHENTICATE", brief)
         cortex = _read("tasks/sf_cortex_complete_task.py")
         self.assertIn("_fetch_schema_context", cortex)
         self.assertNotIn("TO_FILE", cortex)
         self.assertNotIn("CREATE STAGE", cortex)
+
+    def test_blank_geometry_type_avoids_empty_in_list(self):
+        iterator = _read("providers/sf_feature_iterator.py")
+        self.assertIn(
+            'self._provider._geometry_type or ""',
+            iterator,
+        )
+        provider = _read("providers/sf_vector_data_provider.py")
+        start = provider.index("def _geometry_type_filter(self)")
+        # Next method after the helper (SFGeoVectorDataProvider.featureCount).
+        end = provider.index("\n    def featureCount(self)", start)
+        filter_fn = provider[start:end]
+        self.assertIn('if not (self._geometry_type or "").strip():', filter_fn)
+        self.assertIn("IS NOT NULL", filter_fn)
+
+    def test_blank_geometry_type_discovery_helper(self):
+        provider = _read("providers/sf_vector_data_provider.py")
+        self.assertIn("def _discover_geometry_type_if_blank(self)", provider)
+        self.assertIn("discover_geom_type", provider)
+        self.assertIn("_discover_geometry_type_if_blank()", provider)
+
+    def test_provider_init_pusherror_on_probe_failure(self):
+        provider = _read("providers/sf_vector_data_provider.py")
+        self.assertIn("self.pushError(message)", provider)
+        self.assertIn("self.setError(QgsError(message, \"Snowflake\"))", provider)
+        self.assertIn("Provider init failed:", provider)
+        self.assertIn("QgsError,", provider)
 
 
 if __name__ == "__main__":

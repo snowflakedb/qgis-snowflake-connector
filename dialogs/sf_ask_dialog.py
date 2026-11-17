@@ -15,6 +15,7 @@ from qgis.PyQt.QtWidgets import (
     QMessageBox,
     QPushButton,
     QTextEdit,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -56,13 +57,20 @@ class SFAskDialog(QDialog):
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
 
+        header = QHBoxLayout()
         notice = QLabel(
             "Your question and selected schema metadata are sent to Snowflake "
             "Cortex on your connection."
         )
         notice.setWordWrap(True)
         notice.setTextFormat(Qt.TextFormat.PlainText)
-        layout.addWidget(notice)
+        header.addWidget(notice, stretch=1)
+        self.help_btn = QToolButton()
+        self.help_btn.setText("?")
+        self.help_btn.setToolTip("How to use Ask Snowflake")
+        self.help_btn.clicked.connect(self._on_help)
+        header.addWidget(self.help_btn, alignment=Qt.AlignmentFlag.AlignTop)
+        layout.addLayout(header)
 
         row = QHBoxLayout()
         row.addWidget(QLabel("Connection:"))
@@ -112,6 +120,24 @@ class SFAskDialog(QDialog):
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def _on_help(self) -> None:
+        QMessageBox.information(
+            self,
+            "Ask Snowflake help",
+            "How to use Ask Snowflake (Cortex)\n\n"
+            "1. Choose a Snowflake connection and schema that contain the "
+            "tables you want to query.\n"
+            "2. Pick a text Cortex model (the list comes from SHOW CORTEX "
+            "BASE MODELS for your role).\n"
+            "3. Describe what you want in plain language, then click "
+            "Generate SQL.\n"
+            "4. Review the generated SELECT, then Open in SQL editor to run "
+            "or load it as a layer.\n\n"
+            "What is sent to Cortex: your question text and compact schema "
+            "metadata (table and column names/types) for the selected schema. "
+            "No map images are sent.",
+        )
 
     def _populate_connections(self) -> None:
         connections = get_connection_child_groups()
@@ -188,12 +214,27 @@ class SFAskDialog(QDialog):
                     self.schema_combo.setEditText(str(preferred))
             self._refresh_models(connection_name)
         except Exception as e:
+            message = str(e)
             QgsMessageLog.logMessage(
-                f"Ask Snowflake: could not list schemas: {e}",
+                f"Ask Snowflake: could not list schemas: {message}",
                 "Snowflake Plugin",
                 Qgis.MessageLevel.Warning,
             )
             self._populate_model_combo(FALLBACK_SQL_MODELS)
+            upper = message.upper()
+            if any(
+                token in upper
+                for token in ("MFA", "TOTP", "FAILED TO AUTHENTICATE")
+            ):
+                msg_box = QMessageBox(self)
+                msg_box.setIcon(QMessageBox.Icon.Warning)
+                msg_box.setWindowTitle("Ask Snowflake (Cortex)")
+                msg_box.setTextFormat(Qt.TextFormat.PlainText)
+                msg_box.setText(
+                    "Could not connect or list schemas for this connection.\n\n"
+                    f"{message}"
+                )
+                msg_box.exec()
 
     def _on_generate(self) -> None:
         connection_name = self.connection_combo.currentText().strip()

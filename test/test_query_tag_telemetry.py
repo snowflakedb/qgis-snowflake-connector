@@ -194,13 +194,13 @@ class TestQueryTagSourceCoverage(unittest.TestCase):
         cortex = self._read("helpers/cortex.py")
         self.assertIn('"list_cortex_models"', cortex)
 
-    def test_map_stage_ops(self):
+    def test_map_session_local_png(self):
         src = self._read("helpers/map_stage.py")
-        for action in ("create", "put", "remove"):
-            self.assertIn(f'"{action}"', src)
-        self.assertIn("stage_create", src)
-        self.assertIn("stage_put", src)
-        self.assertIn("stage_remove", src)
+        self.assertIn("def read_png_bytes", src)
+        self.assertIn("def cleanup_local_png", src)
+        self.assertNotIn("stage_create", src)
+        self.assertNotIn("stage_put", src)
+        self.assertNotIn("stage_remove", src)
 
     def test_processing_entrypoints_tag(self):
         expectations = {

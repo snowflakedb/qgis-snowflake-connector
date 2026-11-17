@@ -40,7 +40,7 @@ helpers/
   toolbar.py      # Toolbar URI helpers (extent_mode toggle)
   cortex.py       # Cortex prompt builders / SQL extract / Map brief sections
   map_capture.py  # Canvas PNG render + Map brief layer context / view checks
-  map_stage.py    # Session-scoped temp SSE stage for Map brief images
+  map_stage.py    # Session-scoped local PNG for Map brief images
   map_outputs.py  # Print layout label + project notes outputs
 
 dialogs/
@@ -57,7 +57,7 @@ tasks/
   sf_convert_sql_query_to_layer_task.py
   sf_execute_sql_query_task.py
   sf_cortex_complete_task.py         # AI_COMPLETE (text)
-  sf_map_brief_task.py               # AI_COMPLETE(TO_FILE) against MapImageSession
+  sf_map_brief_task.py               # AI_COMPLETE(TO_FILE BINARY) against MapImageSession
 
 ui/    # Generated PyQt .py/.ui files (do NOT hand-edit .py files)
 test/  # Regression tests (see testing section below)

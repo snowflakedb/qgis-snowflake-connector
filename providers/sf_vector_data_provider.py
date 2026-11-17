@@ -6,6 +6,7 @@ from qgis.core import (
     Qgis,
     QgsCoordinateReferenceSystem,
     QgsDataProvider,
+    QgsError,
     QgsFeature,
     QgsFeatureIterator,
     QgsFeatureRequest,
@@ -109,11 +110,14 @@ class SFVectorDataProvider(QgsVectorDataProvider):
             ) = parse_uri(uri)
 
         except Exception as e:
+            message = f"URI parse error: {e}"
             QgsMessageLog.logMessage(
-                f"Provider init failed: URI parse error: {e}",
+                f"Provider init failed: {message}",
                 "Snowflake Plugin",
                 Qgis.MessageLevel.Warning,
             )
+            self.pushError(message)
+            self.setError(QgsError(message, "Snowflake"))
             self._is_valid = False
             return
 
@@ -139,62 +143,79 @@ class SFVectorDataProvider(QgsVectorDataProvider):
         self.connect_database()
         self._is_limited_unordered = False
 
-        if self._sql_query and not self._table_name:
-            if not sql_statement_is_read_only(self._sql_query):
-                QgsMessageLog.logMessage(
-                    "Custom SQL query layers must be read-only SELECT-style "
-                    "statements; refusing to load the layer.",
-                    "Snowflake Plugin",
-                    Qgis.MessageLevel.Critical,
-                )
-                self._is_valid = False
-                return
-            self._from_clause = f"({self._sql_query})"
-            # SNOW-3712076: a custom sql_query layer must still be row-capped so
-            # a malicious project file cannot force an unbounded fetch (client
-            # OOM + uncapped warehouse spend). There is no table to consult for
-            # a cheap ROW_COUNT, so probe the wrapped query directly.
-            # Map-extent loading skips the probe: each render fetches only the
-            # visible rectangle with a per-request LIMIT (#106).
-            if self._load_all_rows or self._extent_mode:
-                self._is_limited_unordered = False
-            else:
-                limit_size = limit_size_for_type(self._geo_column_type)
-                self._is_limited_unordered = check_from_clause_exceeds_size(
-                    from_clause=self._from_clause,
-                    context_information=self._context_information,
-                    limit_size=limit_size,
-                )
-        else:
-            # SNOW-3712xxx: fully-qualify the table so COUNT/extent/iteration
-            # target the layer's own database.schema.table instead of relying on
-            # the session's current schema (a shared connection can be pointed
-            # at another schema by a concurrent layer between USE SCHEMA and the
-            # SELECT). Fall back to the bare quoted name when db/schema unknown.
-            database_name = self._context_information.get("database_name")
-            if database_name and self._schema_name:
-                self._from_clause = qualified_table_name(
-                    database_name, self._schema_name, self._table_name
-                )
-            else:
-                self._from_clause = quote_identifier(self._table_name)
-            if self._load_all_rows or self._extent_mode:
-                self._is_limited_unordered = False
-            else:
-                limit_size = limit_size_for_type(self._geo_column_type)
-                # A4: try the free INFORMATION_SCHEMA path before falling back
-                # to a blocking COUNT(*). For views / subqueries / tables that
-                # don't expose ROW_COUNT we still pay for the scan, but that's
-                # rare and unavoidable.
-                cheap = get_cheap_row_count(self._context_information)
-                if cheap is not None:
-                    self._is_limited_unordered = cheap > limit_size
+        try:
+            if self._sql_query and not self._table_name:
+                if not sql_statement_is_read_only(self._sql_query):
+                    message = (
+                        "Custom SQL query layers must be read-only SELECT-style "
+                        "statements; refusing to load the layer."
+                    )
+                    QgsMessageLog.logMessage(
+                        message,
+                        "Snowflake Plugin",
+                        Qgis.MessageLevel.Critical,
+                    )
+                    self.pushError(message)
+                    self.setError(QgsError(message, "Snowflake"))
+                    self._is_valid = False
+                    return
+                self._from_clause = f"({self._sql_query})"
+                # SNOW-3712076: a custom sql_query layer must still be row-capped so
+                # a malicious project file cannot force an unbounded fetch (client
+                # OOM + uncapped warehouse spend). There is no table to consult for
+                # a cheap ROW_COUNT, so probe the wrapped query directly.
+                # Map-extent loading skips the probe: each render fetches only the
+                # visible rectangle with a per-request LIMIT (#106).
+                if self._load_all_rows or self._extent_mode:
+                    self._is_limited_unordered = False
                 else:
+                    limit_size = limit_size_for_type(self._geo_column_type)
                     self._is_limited_unordered = check_from_clause_exceeds_size(
                         from_clause=self._from_clause,
                         context_information=self._context_information,
                         limit_size=limit_size,
                     )
+            else:
+                # SNOW-3712xxx: fully-qualify the table so COUNT/extent/iteration
+                # target the layer's own database.schema.table instead of relying on
+                # the session's current schema (a shared connection can be pointed
+                # at another schema by a concurrent layer between USE SCHEMA and the
+                # SELECT). Fall back to the bare quoted name when db/schema unknown.
+                database_name = self._context_information.get("database_name")
+                if database_name and self._schema_name:
+                    self._from_clause = qualified_table_name(
+                        database_name, self._schema_name, self._table_name
+                    )
+                else:
+                    self._from_clause = quote_identifier(self._table_name)
+                if self._load_all_rows or self._extent_mode:
+                    self._is_limited_unordered = False
+                else:
+                    limit_size = limit_size_for_type(self._geo_column_type)
+                    # A4: try the free INFORMATION_SCHEMA path before falling back
+                    # to a blocking COUNT(*). For views / subqueries / tables that
+                    # don't expose ROW_COUNT we still pay for the scan, but that's
+                    # rare and unavoidable.
+                    cheap = get_cheap_row_count(self._context_information)
+                    if cheap is not None:
+                        self._is_limited_unordered = cheap > limit_size
+                    else:
+                        self._is_limited_unordered = check_from_clause_exceeds_size(
+                            from_clause=self._from_clause,
+                            context_information=self._context_information,
+                            limit_size=limit_size,
+                        )
+        except Exception as e:
+            message = str(e)
+            QgsMessageLog.logMessage(
+                f"Provider init failed: {message}",
+                "Snowflake Plugin",
+                Qgis.MessageLevel.Critical,
+            )
+            self.pushError(message)
+            self.setError(QgsError(message, "Snowflake"))
+            self._is_valid = False
+            return
 
         self.get_geometry_column()
 
@@ -999,6 +1020,55 @@ class SFGeoVectorDataProvider(SFVectorDataProvider):
         flags=QgsDataProvider.ReadFlags(),
     ):
         super().__init__(uri, providerOptions, flags)
+        if self._is_valid:
+            self._discover_geometry_type_if_blank()
+
+    def _discover_geometry_type_if_blank(self) -> None:
+        """Fill blank geometry_type from one sample GeoJSON type for WKB/CRS UI."""
+        if not self._column_geom:
+            return
+        if (self._geometry_type or "").strip():
+            return
+        if self._geo_column_type not in ("GEOGRAPHY", "GEOMETRY"):
+            return
+        qgeom = quote_identifier(self._column_geom)
+        query = (
+            f"SELECT ST_ASGEOJSON({qgeom}):type::string "  # nosec B608 - identifier escaped; from_clause pre-quoted
+            f"FROM {self._from_clause} "
+            f"WHERE {qgeom} IS NOT NULL LIMIT 1"
+        )
+        cur = None
+        try:
+            cur = self.connection_manager.execute_query(
+                connection_name=self._connection_name,
+                query=query,
+                context_information=self._context_information,
+                op_tag=build_op_tag(
+                    "discover_geom_type",
+                    connection_name=self._connection_name,
+                    schema=self._schema_name,
+                    table=self._table_name,
+                ),
+            )
+            row = cur.fetchone() if cur is not None else None
+            if not row or not row[0]:
+                return
+            geo_type = str(row[0]).strip()
+            if geo_type in mapping_snowflake_qgis_geometry:
+                self._geometry_type = geo_type
+                self._wkb_type = None
+        except Exception as e:
+            QgsMessageLog.logMessage(
+                f"Could not discover geometry_type: {e}",
+                "Snowflake Plugin",
+                Qgis.MessageLevel.Warning,
+            )
+        finally:
+            if cur is not None:
+                try:
+                    cur.close()
+                except Exception:
+                    pass
 
     def _geometry_type_filter(self) -> str:
         """Return the geometry-type predicate the feature iterator uses so
@@ -1007,9 +1077,12 @@ class SFGeoVectorDataProvider(SFVectorDataProvider):
         A GEOGRAPHY/GEOMETRY column can mix geometry families; the plugin
         splits those into one layer per type, so featureCount()/extent() must
         restrict to this layer's type (plus its single/multi partner) instead
-        of counting the whole table.
+        of counting the whole table. Blank geometry_type (incomplete URI) uses
+        a NULL check so we never emit ``IN ('')``.
         """
         qgeom = quote_identifier(self._column_geom)
+        if not (self._geometry_type or "").strip():
+            return f"{qgeom} IS NOT NULL"
         types = [self._geometry_type]
         mapped = mapping_multi_single_to_geometry_type.get(self._geometry_type)
         if mapped:
@@ -1038,7 +1111,9 @@ class SFGeoVectorDataProvider(SFVectorDataProvider):
                     # NULL" is an exact equivalent that avoids the per-row
                     # ST_ASGEOJSON parse the type predicate would cost.
                     where_parts = []
-                    if getattr(self, "_single_geom_layer", False):
+                    if getattr(self, "_single_geom_layer", False) or not (
+                        self._geometry_type or ""
+                    ).strip():
                         where_parts.append(
                             f"{quote_identifier(self._column_geom)} IS NOT NULL"  # nosec B608 - identifier escaped via quote_identifier
                         )
@@ -1075,7 +1150,9 @@ class SFGeoVectorDataProvider(SFVectorDataProvider):
             else:
                 qgeom = quote_identifier(self._column_geom)
                 where_clause = f"{qgeom} IS NOT NULL"
-                if not getattr(self, "_single_geom_layer", False):
+                if not getattr(self, "_single_geom_layer", False) and (
+                    self._geometry_type or ""
+                ).strip():
                     where_clause += f" AND {self._geometry_type_filter()}"
                 query = (
                     f'SELECT MIN(ST_XMIN({qgeom})), '  # nosec B608 - identifier escaped via quote_identifier; from_clause pre-quoted; geometry-type filter escaped in _geometry_type_filter
@@ -1131,7 +1208,15 @@ class SFH3VectorDataProvider(SFVectorDataProvider):
             ),
         )
 
-        self._is_valid = cur.fetchone()[0]
+        # Empty tables (or all-NULL H3 columns) return no row; treat as invalid
+        # instead of crashing on fetchone()[0].
+        row = cur.fetchone() if cur is not None else None
+        self._is_valid = bool(row[0]) if row else False
+        if cur is not None:
+            try:
+                cur.close()
+            except Exception:
+                pass
 
     def featureCount(self) -> int:
         """returns the number of entities in the table"""

@@ -40,7 +40,7 @@ _EMBEDDING_NAME_HINTS = (
     "embed",
     "nv-embed",
 )
-_EXCLUDED_LIFECYCLE = frozenset({"EOL"})
+_EXCLUDED_LIFECYCLE = frozenset({"EOL", "PRIVATE PREVIEW"})
 
 BRIEF_SECTIONS = (
     "Seen in the image",
@@ -66,6 +66,11 @@ def is_likely_embedding_model(name: str) -> bool:
     return bool(lowered) and any(hint in lowered for hint in _EMBEDDING_NAME_HINTS)
 
 
+def is_arctic_task_model(name: str) -> bool:
+    """Return True for ARCTIC-* task models (not snowflake-arctic chat)."""
+    return (name or "").strip().upper().startswith("ARCTIC-")
+
+
 def is_likely_multimodal_model(name: str) -> bool:
     """Return True when ``name`` looks usable with image/PROMPT+TO_FILE inputs."""
     lowered = (name or "").strip().lower()
@@ -74,16 +79,41 @@ def is_likely_multimodal_model(name: str) -> bool:
     )
 
 
+def normalize_cortex_text(text: Optional[str]) -> str:
+    """Strip quote-wrapping that AI_COMPLETE sometimes adds around plain text.
+
+    When the model returns a single line with literal ``\\n`` escapes (no real
+    newlines), expand those escapes so Map brief section headings can parse.
+    """
+    if not text:
+        return ""
+    result = str(text).strip()
+    if len(result) >= 2 and result[0] == result[-1] == '"':
+        result = result[1:-1].strip()
+    if result.startswith('"'):
+        result = result[1:].lstrip()
+    if result.endswith('"'):
+        result = result[:-1].rstrip()
+    # Only unescape when there are no real newlines — otherwise leave intact.
+    if "\n" not in result and "\\n" in result:
+        result = (
+            result.replace("\\n", "\n")
+            .replace("\\t", "\t")
+            .replace('\\"', '"')
+        )
+    return result
+
+
 def parse_cortex_base_model_rows(
     rows: Sequence[Sequence[Any]],
     description: Optional[Sequence[Sequence[Any]]] = None,
 ) -> List[str]:
     """Extract usable Cortex base model names from a SHOW result.
 
-    Skips blank names and models whose lifecycle status is ``EOL``. When
-    ``description`` is omitted, column 1 is treated as ``name`` and column 6
-    (0-based index 6) as ``lifecycle_status``, matching the documented
-    ``SHOW CORTEX BASE MODELS`` output order.
+    Skips blank names and models whose lifecycle status is ``EOL`` or
+    ``PRIVATE PREVIEW``. When ``description`` is omitted, column 1 is treated
+    as ``name`` and column 6 (0-based index 6) as ``lifecycle_status``,
+    matching the documented ``SHOW CORTEX BASE MODELS`` output order.
     """
     name_idx = 1
     lifecycle_idx: Optional[int] = 6
@@ -120,7 +150,10 @@ def models_for_ask_snowflake(available: Sequence[str]) -> List[str]:
     filtered = [
         name
         for name in available
-        if name and not is_likely_embedding_model(name)
+        if name
+        and not is_likely_embedding_model(name)
+        and not is_arctic_task_model(name)
+        and not is_likely_multimodal_model(name)
     ]
     return filtered or list(FALLBACK_SQL_MODELS)
 
@@ -501,12 +534,13 @@ def split_brief_sections(text: Optional[str]) -> Dict[str, str]:
     """
     result = {section: "" for section in BRIEF_SECTIONS}
     result["Other"] = ""
+    text = normalize_cortex_text(text)
     if not text:
         return result
 
     current = "Other"
     buckets: Dict[str, List[str]] = {key: [] for key in result}
-    for raw_line in str(text).splitlines():
+    for raw_line in text.splitlines():
         match = _HEADING_RE.match(raw_line)
         if match:
             normalized = _normalize_heading(match.group("title"))

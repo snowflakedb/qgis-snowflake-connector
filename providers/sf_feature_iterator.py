@@ -394,8 +394,11 @@ class SFFeatureIterator(QgsAbstractFeatureIterator):
             if has_geometry:
                 if self._provider._geo_column_type in ["NUMBER", "TEXT"]:
                     filter_geo_type = f'H3_IS_VALID_CELL({quoted_geom})'
-                elif getattr(self._provider, "_single_geom_layer", False):
-                    # Single-geometry-family layers need only a NULL check.
+                elif getattr(self._provider, "_single_geom_layer", False) or not (
+                    self._provider._geometry_type or ""
+                ).strip():
+                    # Single-geometry-family layers (and incomplete URIs with a
+                    # blank geometry_type) need only a NULL check — never IN ('').
                     filter_geo_type = f"{quoted_geom} IS NOT NULL"
                 else:
                     mapped_type = mapping_multi_single_to_geometry_type.get(

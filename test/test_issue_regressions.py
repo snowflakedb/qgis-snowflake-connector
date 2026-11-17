@@ -2228,6 +2228,15 @@ class TestGeometryTypeCountFilter(unittest.TestCase):
         )
         self.assertNotIn("QgsRectangle(*extent_bounds)", content)
 
+    def test_h3_provider_handles_empty_validate_row(self):
+        """Empty/all-NULL H3 tables must not crash on fetchone()[0]."""
+        content = self._provider_content()
+        start = content.index("class SFH3VectorDataProvider")
+        init_block = content[start : content.index("def featureCount(self)", start)]
+        self.assertIn("row = cur.fetchone()", init_block)
+        self.assertIn("self._is_valid = bool(row[0]) if row else False", init_block)
+        self.assertNotIn("self._is_valid = cur.fetchone()[0]", init_block)
+
 
 class TestIntegerColumnMapping(unittest.TestCase):
     """Regression: NUMBER/DECIMAL columns with scale 0 (including primary keys)
@@ -2249,6 +2258,12 @@ class TestIntegerColumnMapping(unittest.TestCase):
         self.assertIn("QMetaType.Type.LongLong", body)
         self.assertIn("NUMBER", body)
         self.assertIn("DECIMAL", body)
+        # Unknown / UDT types (e.g. TEMP.PUBLIC.PERSON_NAME) must not KeyError.
+        self.assertIn("mapping_snowflake_qgis_type.get(", body)
+        self.assertIn(
+            "mapping_snowflake_qgis_type.get(data_type, QMetaType.Type.QString)",
+            body,
+        )
 
     def test_table_branch_uses_scale_and_helper(self):
         content = self._provider()
@@ -2286,8 +2301,8 @@ class TestSchemaQualifiedFromClause(unittest.TestCase):
         content = self._provider()
         self.assertIn(
             "qualified_table_name(\n"
-            "                    database_name, self._schema_name, self._table_name\n"
-            "                )",
+            "                        database_name, self._schema_name, self._table_name\n"
+            "                    )",
             content,
         )
         # Bare-name fallback is still present for the db/schema-unknown case.

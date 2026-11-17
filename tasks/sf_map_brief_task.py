@@ -1,4 +1,4 @@
-"""Call Cortex AI_COMPLETE against a staged Map brief canvas image."""
+"""Call Cortex AI_COMPLETE against a local Map brief canvas PNG."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import typing
 from qgis.core import QgsTask
 from qgis.PyQt.QtCore import pyqtSignal
 
+from ..helpers.cortex import normalize_cortex_text
 from ..helpers.map_stage import MapImageSession
 from ..managers.sf_connection_manager import SFConnectionManager, build_op_tag
 
@@ -17,29 +18,12 @@ from ..managers.sf_connection_manager import SFConnectionManager, build_op_tag
 PROMPT_TEMPLATE = "{0}\n\n{1}"
 
 
-def _is_missing_staged_file_error(message: str) -> bool:
-    upper = message.upper()
-    missing_tokens = (
-        "DOES NOT EXIST",
-        "NOT FOUND",
-        "NO SUCH FILE",
-        "FAILED TO FETCH",
-    )
-    if not any(token in upper for token in missing_tokens):
-        return False
-    # Require a file/stage cue so privilege errors mentioning STAGE do not retry.
-    return any(
-        token in upper
-        for token in ("FILE", "PATH", "OBJECT", "STAGE_FILE", "TO_FILE")
-    )
-
-
 class SFMapBriefTask(QgsTask):
-    """Run AI_COMPLETE with TO_FILE against a session-owned staged PNG.
+    """Run AI_COMPLETE with TO_FILE(BINARY, image/png) against a session PNG.
 
-    Staging and cleanup belong to ``MapImageSession``; this task only calls
-    the model. Errors are stored in ``run()`` and emitted from ``finished()``
-    so the dialog always clears its busy state.
+    Local PNG lifecycle belongs to ``MapImageSession``; this task only reads
+    bytes and calls the model. Errors are stored in ``run()`` and emitted from
+    ``finished()`` so the dialog always clears its busy state.
     """
 
     on_handle_error = pyqtSignal(str, str)
@@ -60,11 +44,11 @@ class SFMapBriefTask(QgsTask):
         self._error_title = ""
         self._error_message = ""
 
-    def _run_complete(self, manager: SFConnectionManager):
+    def _run_complete(self, manager: SFConnectionManager, png_bytes: bytes):
         complete_sql = (
             "SELECT AI_COMPLETE("
             "%(model)s, "
-            "PROMPT(%(template)s, TO_FILE(%(stage_ref)s, %(stage_file)s), "
+            "PROMPT(%(template)s, TO_FILE(%(png_bytes)s, 'image/png'), "
             "%(prompt)s)"
             ")"
         )
@@ -77,8 +61,7 @@ class SFMapBriefTask(QgsTask):
                     "model": self.model,
                     "template": PROMPT_TEMPLATE,
                     "prompt": self.prompt,
-                    "stage_ref": self.session.stage_at(),
-                    "stage_file": self.session.staged_file,
+                    "png_bytes": png_bytes,
                 },
                 context_information=self.session.context_information,
                 op_tag=build_op_tag(
@@ -104,26 +87,16 @@ class SFMapBriefTask(QgsTask):
             if self.session.is_released:
                 self._error_title = "Map brief failed"
                 self._error_message = (
-                    "The staged map image was released before the task ran."
+                    "The map image was released before the task ran."
                 )
                 return False
-            self.session.ensure_staged()
+            png_bytes = self.session.read_png_bytes()
             if self.isCanceled():
                 self._error_title = "Map brief cancelled"
                 self._error_message = "The Map brief task was cancelled."
                 return False
 
-            try:
-                row = self._run_complete(manager)
-            except Exception as first_error:
-                if self.session.is_released or not _is_missing_staged_file_error(
-                    str(first_error)
-                ):
-                    raise
-                # Long-idle sessions can lose the temp stage; re-PUT once.
-                self.session.mark_needs_restage()
-                self.session.ensure_staged()
-                row = self._run_complete(manager)
+            row = self._run_complete(manager, png_bytes)
 
             if not row or row[0] is None:
                 self._error_title = "Map brief returned no text"
@@ -131,19 +104,13 @@ class SFMapBriefTask(QgsTask):
                     "AI_COMPLETE completed but produced an empty result."
                 )
                 return False
-            self._response = str(row[0])
+            self._response = normalize_cortex_text(str(row[0]))
             return True
         except Exception as e:
             message = str(e)
             hint = ""
             upper = message.upper()
-            if "CREATE STAGE" in upper or "INSUFFICIENT PRIVILEGES" in upper:
-                hint = (
-                    "\n\nHint: Map brief needs CREATE STAGE on the selected "
-                    "schema so the plugin can store a temporary SSE-encrypted "
-                    "image of the map."
-                )
-            elif "UNKNOWN_MODEL" in upper or (
+            if "UNKNOWN_MODEL" in upper or (
                 "MODEL" in upper and "NOT" in upper
             ):
                 hint = (
