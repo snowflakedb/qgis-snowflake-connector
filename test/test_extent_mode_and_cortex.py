@@ -278,6 +278,64 @@ class TestCortexSqlHelpers(unittest.TestCase):
         )
         self.assertIn("def set_query", _read("dialogs/sf_sql_query_dialog.py"))
         self.assertIn("sql_statement_is_read_only", _read("dialogs/sf_ask_dialog.py"))
+        ask = _read("dialogs/sf_ask_dialog.py")
+        self.assertIn("fetch_cortex_base_models", ask)
+        self.assertIn("models_for_ask_snowflake", ask)
+
+    def test_parse_cortex_base_model_rows_skips_eol(self):
+        from helpers.cortex import parse_cortex_base_model_rows
+
+        rows = [
+            (None, "llama3.1-70b", "CORTEX_BASE", "SNOWFLAKE", "MODELS", None, "GA"),
+            (None, "old-model", "CORTEX_BASE", "SNOWFLAKE", "MODELS", None, "EOL"),
+            (None, "pixtral-large", "CORTEX_BASE", "SNOWFLAKE", "MODELS", None, "GA"),
+        ]
+        names = parse_cortex_base_model_rows(rows)
+        self.assertEqual(names, ["llama3.1-70b", "pixtral-large"])
+
+    def test_parse_cortex_base_model_rows_uses_description(self):
+        from helpers.cortex import parse_cortex_base_model_rows
+
+        description = (
+            ("created_on",),
+            ("name",),
+            ("lifecycle_status",),
+        )
+        rows = [
+            ("ts", "claude-sonnet-4-5", "GA"),
+            ("ts", "dead-model", "EOL"),
+        ]
+        names = parse_cortex_base_model_rows(rows, description)
+        self.assertEqual(names, ["claude-sonnet-4-5"])
+
+    def test_models_for_ask_and_map_brief_filters(self):
+        from helpers.cortex import (
+            FALLBACK_MULTIMODAL_MODELS,
+            FALLBACK_SQL_MODELS,
+            choose_model,
+            models_for_ask_snowflake,
+            models_for_map_brief,
+        )
+
+        available = [
+            "llama3.1-70b",
+            "pixtral-large",
+            "claude-sonnet-4-5",
+            "multilingual-e5-large",
+        ]
+        ask = models_for_ask_snowflake(available)
+        self.assertIn("llama3.1-70b", ask)
+        self.assertIn("pixtral-large", ask)
+        self.assertNotIn("multilingual-e5-large", ask)
+
+        brief = models_for_map_brief(available)
+        self.assertEqual(brief, ["pixtral-large", "claude-sonnet-4-5"])
+        self.assertEqual(models_for_map_brief([]), list(FALLBACK_MULTIMODAL_MODELS))
+        self.assertEqual(models_for_ask_snowflake([]), list(FALLBACK_SQL_MODELS))
+        self.assertEqual(
+            choose_model(ask, "PIXTRAL-LARGE", "llama3.1-70b"),
+            "pixtral-large",
+        )
 
 
 class TestMapBriefHelpers(unittest.TestCase):
@@ -483,6 +541,8 @@ class TestMapBriefHelpers(unittest.TestCase):
         self.assertNotIn("Re-capture", dialog)
         self.assertNotIn("Save...", dialog)
         self.assertIn("QSignalBlocker", dialog)
+        self.assertIn("fetch_cortex_base_models", dialog)
+        self.assertIn("models_for_map_brief", dialog)
         capture = _read("helpers/map_capture.py")
         self.assertIn("def render_canvas_png", capture)
         self.assertIn("def build_canvas_map_context", capture)

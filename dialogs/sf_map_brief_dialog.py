@@ -24,9 +24,13 @@ from qgis.PyQt.QtWidgets import (
 from ..helpers.cortex import (
     BRIEF_SECTIONS,
     DEFAULT_MULTIMODAL_MODEL,
+    FALLBACK_MULTIMODAL_MODELS,
     build_brief_prompt,
     build_followup_prompt,
+    choose_model,
+    fetch_cortex_base_models,
     format_brief_label_text,
+    models_for_map_brief,
     split_brief_sections,
 )
 from ..helpers.map_capture import (
@@ -121,20 +125,7 @@ class SFMapBriefDialog(QDialog):
         advanced_layout.addWidget(QLabel("Model:"))
         self.model_combo = QComboBox()
         self.model_combo.setEditable(True)
-        for name in (
-            DEFAULT_MULTIMODAL_MODEL,
-            "pixtral-large",
-        ):
-            if self.model_combo.findText(name) < 0:
-                self.model_combo.addItem(name)
-        saved = self.settings.value(
-            "cortex/multimodal_model", defaultValue=DEFAULT_MULTIMODAL_MODEL
-        )
-        idx = self.model_combo.findText(str(saved))
-        if idx >= 0:
-            self.model_combo.setCurrentIndex(idx)
-        else:
-            self.model_combo.setEditText(str(saved))
+        self._populate_model_combo(FALLBACK_MULTIMODAL_MODELS)
         advanced_layout.addWidget(self.model_combo, stretch=1)
         layout.addWidget(advanced)
 
@@ -208,9 +199,37 @@ class SFMapBriefDialog(QDialog):
                 self.connection_combo.setCurrentIndex(0)
         self._on_connection_changed(self.connection_combo.currentText())
 
+    def _populate_model_combo(self, models: typing.Sequence[str]) -> None:
+        saved = str(
+            self.settings.value(
+                "cortex/multimodal_model", defaultValue=DEFAULT_MULTIMODAL_MODEL
+            )
+        )
+        selected = choose_model(models, saved, DEFAULT_MULTIMODAL_MODEL)
+        with QSignalBlocker(self.model_combo):
+            self.model_combo.clear()
+            self.model_combo.addItems(list(models))
+            idx = self.model_combo.findText(selected)
+            if idx >= 0:
+                self.model_combo.setCurrentIndex(idx)
+            else:
+                self.model_combo.setEditText(selected)
+
+    def _refresh_models(self, connection_name: str) -> None:
+        available = fetch_cortex_base_models(connection_name)
+        models = models_for_map_brief(available)
+        if not available:
+            QgsMessageLog.logMessage(
+                "Map brief: could not list Cortex models; using fallback list.",
+                "Snowflake Plugin",
+                Qgis.MessageLevel.Info,
+            )
+        self._populate_model_combo(models)
+
     def _on_connection_changed(self, connection_name: str) -> None:
         self.schema_combo.clear()
         if not connection_name:
+            self._populate_model_combo(FALLBACK_MULTIMODAL_MODELS)
             return
         try:
             from ..helpers.utils import get_authentification_information
@@ -243,12 +262,14 @@ class SFMapBriefDialog(QDialog):
                     self.schema_combo.setCurrentIndex(idx)
                 else:
                     self.schema_combo.setEditText(str(preferred))
+            self._refresh_models(connection_name)
         except Exception as e:
             QgsMessageLog.logMessage(
                 f"Map brief: could not list schemas: {e}",
                 "Snowflake Plugin",
                 Qgis.MessageLevel.Warning,
             )
+            self._populate_model_combo(FALLBACK_MULTIMODAL_MODELS)
 
     def _refresh_view_checks(self) -> None:
         self._warnings = []

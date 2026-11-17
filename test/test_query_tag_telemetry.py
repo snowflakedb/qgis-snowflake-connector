@@ -191,6 +191,8 @@ class TestQueryTagSourceCoverage(unittest.TestCase):
         self.assertIn("model=self.model", complete)
         self.assertIn('"cortex_map_brief"', brief)
         self.assertIn("model=self.model", brief)
+        cortex = self._read("helpers/cortex.py")
+        self.assertIn('"list_cortex_models"', cortex)
 
     def test_map_stage_ops(self):
         src = self._read("helpers/map_stage.py")

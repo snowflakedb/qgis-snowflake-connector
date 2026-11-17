@@ -19,7 +19,14 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
-from ..helpers.cortex import DEFAULT_SQL_MODEL, extract_sql
+from ..helpers.cortex import (
+    DEFAULT_SQL_MODEL,
+    FALLBACK_SQL_MODELS,
+    choose_model,
+    extract_sql,
+    fetch_cortex_base_models,
+    models_for_ask_snowflake,
+)
 from ..helpers.sql import quote_literal, sql_statement_is_read_only
 from ..helpers.utils import get_connection_child_groups, get_qsettings
 from ..managers.sf_connection_manager import SFConnectionManager, build_op_tag
@@ -72,19 +79,7 @@ class SFAskDialog(QDialog):
         model_row.addWidget(QLabel("Model:"))
         self.model_combo = QComboBox()
         self.model_combo.setEditable(True)
-        for name in (
-            DEFAULT_SQL_MODEL,
-            "llama3.1-8b",
-            "mistral-large2",
-            "snowflake-arctic",
-        ):
-            self.model_combo.addItem(name)
-        saved = self.settings.value("cortex/sql_model", defaultValue=DEFAULT_SQL_MODEL)
-        idx = self.model_combo.findText(str(saved))
-        if idx >= 0:
-            self.model_combo.setCurrentIndex(idx)
-        else:
-            self.model_combo.setEditText(str(saved))
+        self._populate_model_combo(FALLBACK_SQL_MODELS)
         model_row.addWidget(self.model_combo, stretch=1)
         layout.addLayout(model_row)
 
@@ -130,9 +125,35 @@ class SFAskDialog(QDialog):
                 self.connection_combo.setCurrentIndex(0)
         self._on_connection_changed(self.connection_combo.currentText())
 
+    def _populate_model_combo(self, models: typing.Sequence[str]) -> None:
+        saved = str(
+            self.settings.value("cortex/sql_model", defaultValue=DEFAULT_SQL_MODEL)
+        )
+        selected = choose_model(models, saved, DEFAULT_SQL_MODEL)
+        with QSignalBlocker(self.model_combo):
+            self.model_combo.clear()
+            self.model_combo.addItems(list(models))
+            idx = self.model_combo.findText(selected)
+            if idx >= 0:
+                self.model_combo.setCurrentIndex(idx)
+            else:
+                self.model_combo.setEditText(selected)
+
+    def _refresh_models(self, connection_name: str) -> None:
+        available = fetch_cortex_base_models(connection_name)
+        models = models_for_ask_snowflake(available)
+        if not available:
+            QgsMessageLog.logMessage(
+                "Ask Snowflake: could not list Cortex models; using fallback list.",
+                "Snowflake Plugin",
+                Qgis.MessageLevel.Info,
+            )
+        self._populate_model_combo(models)
+
     def _on_connection_changed(self, connection_name: str) -> None:
         self.schema_combo.clear()
         if not connection_name:
+            self._populate_model_combo(FALLBACK_SQL_MODELS)
             return
         try:
             from ..helpers.utils import get_authentification_information
@@ -165,12 +186,14 @@ class SFAskDialog(QDialog):
                     self.schema_combo.setCurrentIndex(idx)
                 else:
                     self.schema_combo.setEditText(str(preferred))
+            self._refresh_models(connection_name)
         except Exception as e:
             QgsMessageLog.logMessage(
                 f"Ask Snowflake: could not list schemas: {e}",
                 "Snowflake Plugin",
                 Qgis.MessageLevel.Warning,
             )
+            self._populate_model_combo(FALLBACK_SQL_MODELS)
 
     def _on_generate(self) -> None:
         connection_name = self.connection_combo.currentText().strip()

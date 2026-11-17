@@ -10,6 +10,38 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 DEFAULT_SQL_MODEL = "llama3.1-70b"
 DEFAULT_MULTIMODAL_MODEL = "claude-3-5-sonnet"
 
+# Used when SHOW CORTEX BASE MODELS is unavailable or returns nothing.
+FALLBACK_SQL_MODELS = (
+    DEFAULT_SQL_MODEL,
+    "llama3.1-8b",
+    "llama3.3-70b",
+    "mistral-large2",
+    "snowflake-arctic",
+)
+FALLBACK_MULTIMODAL_MODELS = (
+    DEFAULT_MULTIMODAL_MODEL,
+    "pixtral-large",
+    "claude-sonnet-4-5",
+    "openai-gpt-5",
+)
+
+# SHOW CORTEX BASE MODELS has no modality column; use name heuristics.
+_MULTIMODAL_NAME_HINTS = (
+    "claude",
+    "pixtral",
+    "gemini",
+    "openai-gpt",
+    "gpt-4o",
+    "qwen3-vl",
+    "llama4",
+)
+_EMBEDDING_NAME_HINTS = (
+    "e5-",
+    "embed",
+    "nv-embed",
+)
+_EXCLUDED_LIFECYCLE = frozenset({"EOL"})
+
 BRIEF_SECTIONS = (
     "Seen in the image",
     "From layer settings",
@@ -26,6 +58,135 @@ _HEADING_RE = re.compile(
     r"^\s{0,3}(?:#{1,6}\s*|\*\*|__)?\s*(?P<title>.+?)\s*(?:\*\*|__)?\s*$",
     re.IGNORECASE,
 )
+
+
+def is_likely_embedding_model(name: str) -> bool:
+    """Return True when ``name`` looks like an embedding model, not AI_COMPLETE."""
+    lowered = (name or "").strip().lower()
+    return bool(lowered) and any(hint in lowered for hint in _EMBEDDING_NAME_HINTS)
+
+
+def is_likely_multimodal_model(name: str) -> bool:
+    """Return True when ``name`` looks usable with image/PROMPT+TO_FILE inputs."""
+    lowered = (name or "").strip().lower()
+    return bool(lowered) and any(
+        lowered.startswith(hint) or hint in lowered for hint in _MULTIMODAL_NAME_HINTS
+    )
+
+
+def parse_cortex_base_model_rows(
+    rows: Sequence[Sequence[Any]],
+    description: Optional[Sequence[Sequence[Any]]] = None,
+) -> List[str]:
+    """Extract usable Cortex base model names from a SHOW result.
+
+    Skips blank names and models whose lifecycle status is ``EOL``. When
+    ``description`` is omitted, column 1 is treated as ``name`` and column 6
+    (0-based index 6) as ``lifecycle_status``, matching the documented
+    ``SHOW CORTEX BASE MODELS`` output order.
+    """
+    name_idx = 1
+    lifecycle_idx: Optional[int] = 6
+    if description:
+        headers = [str(col[0]).lower() for col in description]
+        if "name" in headers:
+            name_idx = headers.index("name")
+        lifecycle_idx = (
+            headers.index("lifecycle_status")
+            if "lifecycle_status" in headers
+            else None
+        )
+
+    names: List[str] = []
+    seen = set()
+    for row in rows:
+        if not row or len(row) <= name_idx:
+            continue
+        name = str(row[name_idx] or "").strip()
+        if not name or name.lower() in seen:
+            continue
+        if lifecycle_idx is not None and len(row) > lifecycle_idx:
+            status = str(row[lifecycle_idx] or "").strip().upper()
+            if status in _EXCLUDED_LIFECYCLE:
+                continue
+        seen.add(name.lower())
+        names.append(name)
+    names.sort(key=str.lower)
+    return names
+
+
+def models_for_ask_snowflake(available: Sequence[str]) -> List[str]:
+    """Models suitable for Ask Snowflake (text AI_COMPLETE)."""
+    filtered = [
+        name
+        for name in available
+        if name and not is_likely_embedding_model(name)
+    ]
+    return filtered or list(FALLBACK_SQL_MODELS)
+
+
+def models_for_map_brief(available: Sequence[str]) -> List[str]:
+    """Models suitable for Map brief (multimodal AI_COMPLETE)."""
+    filtered = [
+        name
+        for name in available
+        if name
+        and not is_likely_embedding_model(name)
+        and is_likely_multimodal_model(name)
+    ]
+    return filtered or list(FALLBACK_MULTIMODAL_MODELS)
+
+
+def choose_model(
+    available: Sequence[str],
+    preferred: Optional[str],
+    default: str,
+) -> str:
+    """Pick a model for a combo box from available names."""
+    names = [n for n in available if n]
+    preferred_name = (preferred or "").strip()
+    if preferred_name and any(n.lower() == preferred_name.lower() for n in names):
+        for n in names:
+            if n.lower() == preferred_name.lower():
+                return n
+    if default and any(n.lower() == default.lower() for n in names):
+        for n in names:
+            if n.lower() == default.lower():
+                return n
+    return names[0] if names else default
+
+
+def fetch_cortex_base_models(connection_name: str) -> List[str]:
+    """List Cortex base models available to the current role on ``connection_name``.
+
+    Runs ``SHOW CORTEX BASE MODELS IN SCHEMA SNOWFLAKE.MODELS``. Returns an
+    empty list when the command fails or the account does not support it; callers
+    should fall back to :data:`FALLBACK_SQL_MODELS` /
+    :data:`FALLBACK_MULTIMODAL_MODELS`.
+    """
+    if not connection_name:
+        return []
+    try:
+        from ..managers.sf_connection_manager import SFConnectionManager, build_op_tag
+
+        manager = SFConnectionManager.get_instance()
+        cursor = manager.execute_query(
+            connection_name=connection_name,
+            query="SHOW CORTEX BASE MODELS IN SCHEMA SNOWFLAKE.MODELS",
+            context_information={"connection_name": connection_name},
+            op_tag=build_op_tag(
+                "list_cortex_models",
+                connection_name=connection_name,
+                kind="sql",
+            ),
+        )
+        rows = cursor.fetchall() if cursor else []
+        description = cursor.description if cursor else None
+        if cursor:
+            cursor.close()
+        return parse_cortex_base_model_rows(rows, description)
+    except Exception:
+        return []
 
 
 def build_schema_context(
