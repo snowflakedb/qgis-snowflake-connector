@@ -270,7 +270,7 @@ class SFMapBriefDialog(QDialog):
             if manager.get_connection(connection_name) is None:
                 manager.connect(connection_name, auth)
             query = (
-                "SELECT DISTINCT TABLE_SCHEMA FROM INFORMATION_SCHEMA.TABLES "
+                "SELECT DISTINCT TABLE_SCHEMA FROM INFORMATION_SCHEMA.TABLES "  # nosec B608 - value escaped via quote_literal
                 f"WHERE TABLE_CATALOG = {quote_literal(database)} "
                 "ORDER BY TABLE_SCHEMA"
             )
@@ -404,11 +404,11 @@ class SFMapBriefDialog(QDialog):
             return
         try:
             self._task.on_handle_error.disconnect(self._on_task_error)
-        except Exception:
+        except Exception:  # nosec B110 - signal may already be disconnected; best-effort teardown
             pass
         try:
             self._task.on_complete.disconnect(self._on_task_complete)
-        except Exception:
+        except Exception:  # nosec B110 - signal may already be disconnected; best-effort teardown
             pass
 
     def _start_task(self, session: MapImageSession, model: str, prompt: str) -> None:
@@ -581,7 +581,7 @@ class SFMapBriefDialog(QDialog):
             self._cleanup_after_task = True
             try:
                 self._task.cancel()
-            except Exception:
+            except Exception:  # nosec B110 - task may already be finished; best-effort cancel
                 pass
             # If the task already finished between check and cancel, clean up now.
             if self._task is None:

@@ -394,12 +394,12 @@ class SFSpatialFilterDialog(QDialog):
             if self._extent_tool is not None:
                 try:
                     canvas.unsetMapTool(self._extent_tool)
-                except Exception:
+                except Exception:  # nosec B110 - map tool may already be unset; best-effort restore
                     pass
             if self._previous_map_tool is not None:
                 try:
                     canvas.setMapTool(self._previous_map_tool)
-                except Exception:
+                except Exception:  # nosec B110 - previous tool may be invalid; must not block dialog close
                     pass
         self._extent_tool = None
         self._previous_map_tool = None

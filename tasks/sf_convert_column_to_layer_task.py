@@ -8,7 +8,7 @@ from ..helpers.data_base import (
 )
 from ..helpers.map_zoom import zoom_canvas_to_layers
 from ..managers.sf_connection_manager import SFConnectionManager
-from ..helpers.utils import connection_uri_token
+from ..helpers.utils import connection_uri_token, ensure_auth_master_password
 from qgis.core import Qgis, QgsProject, QgsTask, QgsVectorLayer
 from qgis.PyQt.QtCore import pyqtSignal
 
@@ -54,6 +54,11 @@ class SFConvertColumnToLayerTask(QgsTask):
             self.zoom_on_success = zoom_on_success
 
             self.path = path
+            # Resolve authcfg on the GUI thread. QgsAuthManager deadlocks if a
+            # QgsTask worker and the main thread both loadAuthenticationConfig
+            # before the master password is cached (macOS Keychain).
+            ensure_auth_master_password()
+            self._uri_token = connection_uri_token(self.connection_name)
             self._run_thread_id: typing.Optional[int] = None
             self._pending_layers: typing.List[typing.Tuple[str, str]] = []
             self._cancelled = False
@@ -114,7 +119,7 @@ class SFConvertColumnToLayerTask(QgsTask):
                     self._cancelled = True
                     return False
                 uri = (
-                    f"{connection_uri_token(self.connection_name)} sql_query= "
+                    f"{self._uri_token} sql_query= "
                     f"schema_name={self.schema} "
                     f"table_name={self.table} srid={srid} "
                     f"geom_column={self.column} "
@@ -169,7 +174,7 @@ class SFConvertColumnToLayerTask(QgsTask):
                     duration=8,
                 )
                 return
-        except Exception:
+        except Exception:  # nosec B110 - message bar is best-effort; fall through to on_handle_error
             pass
         self.on_handle_error.emit(title, message)
 

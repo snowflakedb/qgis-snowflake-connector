@@ -25,7 +25,7 @@ def _layout_mm():
     try:
         return Qgis.LayoutUnit.Millimeters
     except Exception:
-        return QgsUnitTypes.LayoutMillimeters
+        return QgsUnitTypes.LayoutUnit.LayoutMillimeters
 
 
 def insert_brief_into_layout(
@@ -69,7 +69,7 @@ def insert_brief_into_layout(
                 try:
                     rect = item.sceneBoundingRect()
                     y = max(y, float(rect.y()) + float(rect.height()) + 5.0)
-                except Exception:
+                except Exception:  # nosec B112 - skip layout items that don't expose a usable rect
                     continue
     except Exception:
         y = 10.0

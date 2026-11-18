@@ -48,7 +48,7 @@ class SFCortexCompleteTask(QgsTask):
 
     def _fetch_schema_context(self, manager: SFConnectionManager) -> str:
         query = (
-            "SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE "
+            "SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE "  # nosec B608 - values escaped via quote_literal
             "FROM INFORMATION_SCHEMA.COLUMNS "
             f"WHERE TABLE_CATALOG = {quote_literal(self.database)} "
             f"AND TABLE_SCHEMA = {quote_literal(self.schema)} "
@@ -72,7 +72,7 @@ class SFCortexCompleteTask(QgsTask):
             if cursor is not None:
                 try:
                     cursor.close()
-                except Exception:
+                except Exception:  # nosec B110 - best-effort cursor close in finally
                     pass
         text, omitted = build_schema_context(rows)
         self.omitted_tables = omitted
@@ -149,7 +149,7 @@ class SFCortexCompleteTask(QgsTask):
             if cursor is not None:
                 try:
                     cursor.close()
-                except Exception:
+                except Exception:  # nosec B110 - best-effort cursor close in finally
                     pass
 
     def cancel(self) -> None:

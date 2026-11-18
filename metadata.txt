@@ -27,6 +27,14 @@ changelog=1.1.1 - Cortex Ask/Map brief hardening (release candidate):
    non-editable model list; clearer Focus help; mark Ask and Map brief
    experimental in banner and help.
  * Map brief sends canvas PNG as binary TO_FILE (no CREATE STAGE).
+ * Plugin Repository scan: annotate remaining Bandit B608/B110/B112 sites
+   (quoted INFORMATION_SCHEMA queries and best-effort teardown) and scope
+   QgsUnitTypes.LayoutUnit.LayoutMillimeters for the Qt6 checker. No
+   behaviour change.
+ * Avoid a QgsAuthManager deadlock on first layer load: resolve the URI
+   authcfg token on the GUI thread, cache it, and unlock the master password
+   at plugin init. Provider connect failures become an invalid layer instead
+   of a traceback dialog. SQL-query layers persist authcfg= like table layers.
  1.1.0 - Map-extent loading, toolbar, attribute tables, Cortex tools:
  * Map-extent loading (#106): layers with extent_mode=1 fetch only features
    intersecting the current map extent (per-request LIMIT), with a completed-

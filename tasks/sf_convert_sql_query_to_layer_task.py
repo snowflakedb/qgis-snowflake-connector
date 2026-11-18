@@ -8,6 +8,7 @@ from ..helpers.data_base import (
     get_type_from_query_geo_column,
 )
 from ..helpers.map_zoom import zoom_canvas_to_layers
+from ..helpers.utils import connection_uri_token, ensure_auth_master_password
 from ..managers.sf_connection_manager import SFConnectionManager
 from qgis.core import Qgis, QgsProject, QgsTask, QgsVectorLayer
 from qgis.PyQt.QtCore import pyqtSignal
@@ -44,6 +45,8 @@ class SFConvertSQLQueryToLayerTask(QgsTask):
             self.query = query
             self.layer_name = layer_name
             self.zoom_on_success = zoom_on_success
+            ensure_auth_master_password()
+            self._uri_token = connection_uri_token(self.connection_name)
             self._run_thread_id: typing.Optional[int] = None
             self._pending_layers: typing.List[typing.Tuple[str, str]] = []
             self._added_layers: typing.List[QgsVectorLayer] = []
@@ -105,7 +108,7 @@ class SFConvertSQLQueryToLayerTask(QgsTask):
                     self._cancelled = True
                     return False
                 uri = (
-                    f"connection_name={self.connection_name} "
+                    f"{self._uri_token} "
                     f"sql_query={self.query} "
                     f"schema_name={self.schema} "
                     f"srid={srid} "
@@ -154,7 +157,7 @@ class SFConvertSQLQueryToLayerTask(QgsTask):
                     duration=8,
                 )
                 return
-        except Exception:
+        except Exception:  # nosec B110 - message bar is best-effort; fall through to on_handle_error
             pass
         self.on_handle_error.emit(title, message)
 
