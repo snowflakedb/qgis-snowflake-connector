@@ -103,7 +103,7 @@ class BufferTableAlgorithm(QgsProcessingAlgorithm):
 
     def processAlgorithm(self, parameters, context, feedback):
         from ..helpers.utils import get_auth_information
-        from ..managers.sf_connection_manager import SFConnectionManager
+        from ..managers.sf_connection_manager import SFConnectionManager, build_op_tag
         from ..helpers.sql import quote_identifier, quote_literal
 
         connection_name = self.parameterAsString(parameters, self.CONNECTION, context)
@@ -141,6 +141,7 @@ class BufferTableAlgorithm(QgsProcessingAlgorithm):
                 f"WHERE TABLE_SCHEMA ILIKE {quote_literal(schema)} "
                 f"AND TABLE_NAME ILIKE {quote_literal(output)}",
                 ctx,
+                op_tag=build_op_tag("proc_buffer", connection_name=connection_name),
             )
             exists_row = exists_cursor.fetchone() if exists_cursor else None
             if exists_cursor:
@@ -158,6 +159,7 @@ class BufferTableAlgorithm(QgsProcessingAlgorithm):
             f"AND TABLE_NAME ILIKE {quote_literal(table)} "
             f"AND COLUMN_NAME ILIKE {quote_literal(geo_col)}",
             ctx,
+            op_tag=build_op_tag("proc_buffer", connection_name=connection_name),
         )
         type_row = type_cursor.fetchone() if type_cursor else None
         if type_cursor:
@@ -204,11 +206,15 @@ class BufferTableAlgorithm(QgsProcessingAlgorithm):
         try:
             for step_sql in steps:
                 feedback.pushInfo(f"Running buffer ({col_type}): {step_sql}")
-                mgr.execute_query(connection_name, step_sql, ctx)
+                mgr.execute_query(
+                    connection_name, step_sql, ctx,
+                    op_tag=build_op_tag("proc_buffer", connection_name=connection_name),
+                )
             count_cursor = mgr.execute_query(
                 connection_name,
                 f"SELECT COUNT(*) FROM {qs}.{qo}",  # nosec B608 - identifiers escaped via quote_identifier
                 ctx,
+                op_tag=build_op_tag("proc_buffer", connection_name=connection_name),
             )
             count_result = count_cursor.fetchone() if count_cursor else None
             if count_cursor:
@@ -226,6 +232,7 @@ class BufferTableAlgorithm(QgsProcessingAlgorithm):
                         connection_name,
                         f"DROP TABLE IF EXISTS {qs}.{qtmp}",  # nosec B608 - identifiers escaped via quote_identifier
                         ctx,
+                        op_tag=build_op_tag("proc_buffer", connection_name=connection_name),
                     )
                 except Exception:  # nosec B110 - best-effort temp-table cleanup in finally; a failed DROP IF EXISTS must not mask the original error or abort teardown
                     pass

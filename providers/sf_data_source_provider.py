@@ -1,6 +1,6 @@
 import typing
 from ..entities.sf_feature_iterator import SFFeatureIterator
-from ..managers.sf_connection_manager import SFConnectionManager
+from ..managers.sf_connection_manager import SFConnectionManager, build_op_tag
 from qgis.PyQt.QtCore import (
   QVariant,
   QMetaType,
@@ -77,6 +77,7 @@ class SFDataProvider(QgsDataProvider):
         query: str,
         connection_name: str,
         context_information: typing.Dict[str, typing.Union[str, None]] = None,
+        op_tag: typing.Optional[str] = None,
     ) -> snowflake.connector.cursor.SnowflakeCursor:
         """
         Executes the given query on the specified connection.
@@ -84,6 +85,7 @@ class SFDataProvider(QgsDataProvider):
         Args:
             query (str): The query to execute.
             connection_name (str): The name of the connection.
+            op_tag (str, optional): Structured QUERY_TAG JSON for telemetry.
 
         Raises:
             Exception: If there is an error executing the query.
@@ -92,6 +94,7 @@ class SFDataProvider(QgsDataProvider):
             connection_name=connection_name,
             query=query,
             context_information=context_information,
+            op_tag=op_tag,
         )
 
     snowflake_type_codes = {
@@ -140,6 +143,7 @@ class SFDataProvider(QgsDataProvider):
                     connection_name=connection_name,
                     query=query,
                     context_information=context_information,
+                    op_tag=build_op_tag("load_data", connection_name=connection_name),
                 )
             )
 

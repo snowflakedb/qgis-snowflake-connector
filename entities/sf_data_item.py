@@ -1,17 +1,21 @@
 from ..managers.sf_connection_manager import SFConnectionManager
 from ..helpers.data_base import (
     check_table_exceeds_size,
+    get_srid_from_table_geo_column,
     limit_size_for_table,
     get_column_iterator,
     get_features_iterator,
     get_table_geo_columns,
     get_table_iterator,
 )
+from ..helpers.limits import H3_COLUMN_TYPES
+from ..helpers.map_zoom import zoom_canvas_to_layer
 from ..helpers.messages import (
     LargeDatasetChoice,
     get_large_dataset_choice,
 )
 from ..helpers.utils import (
+    connection_uri_token,
     decodeUri,
     get_auth_information,
     get_auth_method_config,
@@ -26,13 +30,16 @@ from ..helpers.utils import (
 )
 from ..helpers.sql import quote_literal
 from ..tasks.sf_convert_column_to_layer_task import SFConvertColumnToLayerTask
+from ..tasks.sf_convert_sql_query_to_layer_task import SFConvertSQLQueryToLayerTask
 from ..dialogs.sf_connection_string_dialog import SFConnectionStringDialog
+from ..dialogs.sf_spatial_filter_dialog import SFSpatialFilterDialog
 from qgis.PyQt.QtCore import pyqtSignal, Qt
 from qgis.core import (
     QgsDataItem,
     Qgis,
     QgsApplication,
     QgsErrorItem,
+    QgsMessageLog,
     QgsProject,
     QgsVectorLayer
 )
@@ -496,48 +503,132 @@ ORDER BY {column_name}"""  # nosec B608 - column_name is a fixed literal; values
         """
         try:
             if self.item_type == "table_no_geom":
-                # SNOW-3712087: the table name is server-controlled and shown on
-                # the first line. Force plain text so Qt::mightBeRichText() can
-                # never switch the label to rich text and auto-load a UNC <img>
-                # (forced SMB auth / NTLM hash leak).
-                msg_box = QMessageBox(None)
-                msg_box.setIcon(QMessageBox.Icon.Information)
-                msg_box.setWindowTitle("No Geometry Column")
-                msg_box.setTextFormat(Qt.TextFormat.PlainText)
-                msg_box.setText(
-                    f"Table '{self.clean_name}' has no geometry column and cannot be displayed on the map.\n\n"
-                    "You can:\n"
-                    "• Use 'Execute SQL' to query this table\n"
-                    "• View/edit attributes via Processing tools"
-                )
-                msg_box.exec()
-                return True
+                return self._start_add_attribute_table_layer()
             if self.item_type == "table" and not self.geom_column:
                 return False
-            schema_data_item = self.parent()
-            if (
-                self.item_type == "table"
-                and self.path() not in schema_data_item._running_tasks
-            ):
-                auth_information = get_auth_information(self.connection_name)
-                context_information = {
-                    "connection_name": self.connection_name,
-                    "database_name": auth_information["database"],
-                    "schema_name": schema_data_item.clean_name,
-                    "table_name": self.clean_name,
-                    "geo_column": self.geom_column,
-                    "geom_type": self.geom_type,
-                }
+            if self.item_type == "table":
+                return self._start_add_table_layer(extent_mode=False)
+            return True
+        except Exception as e:
+            print(str(e))
+            return False
 
-                limit_size = limit_size_for_table(
-                    context_information=context_information
-                )
-                table_exceeds_size = check_table_exceeds_size(
-                    context_information=context_information,
-                )
+    def _start_add_attribute_table_layer(self) -> bool:
+        """Load a table with no geometry column as an attribute-only layer (#105)."""
+        schema_data_item = self.parent()
+        # table_no_geom items may sit under a "Tables (no geometry)" group.
+        if getattr(schema_data_item, "item_type", None) == "table_group":
+            schema_data_item = schema_data_item.parent()
+        if self.path() in getattr(schema_data_item, "_running_tasks", {}):
+            return True
 
-                load_all_rows = False
-                if table_exceeds_size:
+        auth_information = get_auth_information(self.connection_name)
+        context_information = {
+            "connection_name": self.connection_name,
+            "database_name": auth_information["database"],
+            "schema_name": schema_data_item.clean_name,
+            "table_name": self.clean_name,
+            "geom_type": "",
+        }
+
+        limit_size = limit_size_for_table(
+            context_information=context_information
+        )
+        table_exceeds_size = check_table_exceeds_size(
+            context_information=context_information,
+        )
+        load_all_rows = False
+        if table_exceeds_size:
+            choice = get_large_dataset_choice(
+                "Attribute table is too large",
+                (
+                    "The table is too large. Please consider using "
+                    '"Execute SQL" to limit the result set.\n\n'
+                    f'"Load sample" will load a random sample of {limit_size // 1000} '
+                    "thousand rows.\n"
+                    '"Load all rows" will load the full dataset '
+                    "(this may be slow and memory-intensive)."
+                ),
+            )
+            if choice == LargeDatasetChoice.CANCEL:
+                return False
+            load_all_rows = choice == LargeDatasetChoice.LOAD_ALL
+
+        primary_key = prompt_and_get_primary_key(
+            context_information=context_information, data_type=""
+        )
+
+        uri = (
+            f"{connection_uri_token(self.connection_name)} sql_query= "
+            f"schema_name={schema_data_item.clean_name} "
+            f"table_name={self.clean_name} srid= "
+            f"geom_column= geometry_type= geo_column_type= "
+            f"primary_key={primary_key}"
+        )
+        if load_all_rows:
+            uri += " load_all_rows=1"
+
+        layer = QgsVectorLayer(uri, self.clean_name, "snowflakedb")
+        if not layer.isValid():
+            # SNOW-3712087: table name is server-controlled; force plain text.
+            msg_box = QMessageBox(None)
+            msg_box.setIcon(QMessageBox.Icon.Warning)
+            msg_box.setWindowTitle("Could not load attribute table")
+            msg_box.setTextFormat(Qt.TextFormat.PlainText)
+            msg_box.setText(
+                f"Failed to load table '{self.clean_name}' as a Snowflake layer."
+            )
+            msg_box.exec()
+            return False
+        QgsProject.instance().addMapLayer(layer)
+        zoom_canvas_to_layer(layer)
+        return True
+
+    def _start_add_table_layer(self, extent_mode: bool = False) -> bool:
+        """Queue SFConvertColumnToLayerTask for this table item.
+
+        Args:
+            extent_mode: When True, the layer URI includes extent_mode=1 so
+                each render fetches only features inside the map extent (#106).
+        """
+        schema_data_item = self.parent()
+        if self.path() in schema_data_item._running_tasks:
+            return True
+
+        auth_information = get_auth_information(self.connection_name)
+        context_information = {
+            "connection_name": self.connection_name,
+            "database_name": auth_information["database"],
+            "schema_name": schema_data_item.clean_name,
+            "table_name": self.clean_name,
+            "geo_column": self.geom_column,
+            "geom_type": self.geom_type,
+        }
+
+        load_all_rows = False
+        effective_extent_mode = extent_mode
+        # Map-extent loading already caps per-request fetches; skip the
+        # whole-table sample/load-all prompt.
+        if not effective_extent_mode:
+            limit_size = limit_size_for_table(
+                context_information=context_information
+            )
+            table_exceeds_size = check_table_exceeds_size(
+                context_information=context_information,
+            )
+            if table_exceeds_size:
+                # Oversized H3 tables flicker/feel slow under random SAMPLE;
+                # default them to map-extent loading instead of the dialog.
+                if self.geom_type in H3_COLUMN_TYPES:
+                    effective_extent_mode = True
+                    QgsMessageLog.logMessage(
+                        f"H3 table {self.clean_name} exceeds the "
+                        f"{limit_size // 1000}k-row cap; enabling map-extent "
+                        "loading (viewport ST_INTERSECTS + LIMIT).",
+                        "Snowflake Plugin",
+                        Qgis.MessageLevel.Info,
+                    )
+                else:
                     choice = get_large_dataset_choice(
                         "SFConvertColumnToLayerTask Dataset is too large",
                         (
@@ -546,39 +637,39 @@ ORDER BY {column_name}"""  # nosec B608 - column_name is a fixed literal; values
                             f'"Load sample" will load a random sample of {limit_size // 1000} '
                             "thousand rows.\n"
                             '"Load all rows" will load the full dataset '
-                            "(this may be slow and memory-intensive)."
+                            "(this may be slow and memory-intensive).\n"
+                            'Or right-click the table and choose '
+                            '"Add with map-extent loading".'
                         ),
                     )
                     if choice == LargeDatasetChoice.CANCEL:
                         return False
                     load_all_rows = choice == LargeDatasetChoice.LOAD_ALL
 
-                context_information["primary_key"] = prompt_and_get_primary_key(
-                    context_information=context_information, data_type=self.geom_type
-                )
+        context_information["primary_key"] = prompt_and_get_primary_key(
+            context_information=context_information, data_type=self.geom_type
+        )
 
-                schema_data_item._running_tasks[self.path()] = True
-                snowflake_covert_column_to_layer_task = SFConvertColumnToLayerTask(
-                    context_information=context_information,
-                    path=self.path(),
-                    load_all_rows=load_all_rows,
-                )
-                snowflake_covert_column_to_layer_task.on_handle_error.connect(
-                    slot=on_handle_error
-                )
-                snowflake_covert_column_to_layer_task.on_handle_warning.connect(
-                    slot=on_handle_warning
-                )
-                snowflake_covert_column_to_layer_task.on_handle_finished.connect(
-                    slot=self.on_handle_finished
-                )
-                QgsApplication.taskManager().addTask(
-                    task=snowflake_covert_column_to_layer_task
-                )
-            return True
-        except Exception as e:
-            print(str(e))
-            return False
+        schema_data_item._running_tasks[self.path()] = True
+        snowflake_covert_column_to_layer_task = SFConvertColumnToLayerTask(
+            context_information=context_information,
+            path=self.path(),
+            load_all_rows=load_all_rows,
+            extent_mode=effective_extent_mode,
+        )
+        snowflake_covert_column_to_layer_task.on_handle_error.connect(
+            slot=on_handle_error
+        )
+        snowflake_covert_column_to_layer_task.on_handle_warning.connect(
+            slot=on_handle_warning
+        )
+        snowflake_covert_column_to_layer_task.on_handle_finished.connect(
+            slot=self.on_handle_finished
+        )
+        QgsApplication.taskManager().addTask(
+            task=snowflake_covert_column_to_layer_task
+        )
+        return True
 
     def on_handle_finished(self, path: str) -> None:
         """
@@ -649,6 +740,23 @@ ORDER BY {column_name}"""  # nosec B608 - column_name is a fixed literal; values
                 )
                 action_list.append(self.execute_sql_action)
 
+            if self.item_type == "table" and self.geom_column:
+                self.extent_mode_action = QAction(
+                    "Add with map-extent loading", None
+                )
+                self.extent_mode_action.triggered.connect(
+                    self.on_add_with_extent_mode_triggered
+                )
+                action_list.append(self.extent_mode_action)
+
+                self.spatial_filter_action = QAction(
+                    "Download with spatial filter…", None
+                )
+                self.spatial_filter_action.triggered.connect(
+                    self.on_download_with_spatial_filter_triggered
+                )
+                action_list.append(self.spatial_filter_action)
+
             if self.item_type == "root":
                 self.new_connection_action = QAction("New Connection", None)
                 self.new_connection_action.triggered.connect(
@@ -663,6 +771,103 @@ ORDER BY {column_name}"""  # nosec B608 - column_name is a fixed literal; values
                 "Data Item Actions Creation Error",
                 f"SFDataItem - Data item actions creation failed.\n\nExtended error information:\n{str(e)}",
             )
+
+    def on_add_with_extent_mode_triggered(self) -> None:
+        """Add this table as a layer that loads features by map extent (#106)."""
+        try:
+            self._start_add_table_layer(extent_mode=True)
+        except Exception as e:
+            QMessageBox.information(
+                None,
+                "Add with map-extent loading failed",
+                f"Could not add the layer.\n\nExtended error information:\n{str(e)}",
+            )
+
+    def on_download_with_spatial_filter_triggered(self) -> None:
+        """Open the spatial filter dialog and load the resulting SQL as a layer."""
+        try:
+            schema_data_item = self.parent()
+            auth_information = get_auth_information(self.connection_name)
+            geo_column_type = (self.geom_type or "GEOGRAPHY").upper()
+            srid = 4326
+            if geo_column_type == "GEOMETRY":
+                try:
+                    srid = (
+                        get_srid_from_table_geo_column(
+                            geo_column_name=self.geom_column,
+                            table_name=self.clean_name,
+                            context_information={
+                                "connection_name": self.connection_name,
+                                "database_name": auth_information["database"],
+                                "schema_name": schema_data_item.clean_name,
+                                "table_name": self.clean_name,
+                                "geo_column": self.geom_column,
+                            },
+                        )
+                        or 4326
+                    )
+                except Exception:
+                    srid = 4326
+
+            dialog = SFSpatialFilterDialog(
+                connection_name=self.connection_name,
+                schema=schema_data_item.clean_name,
+                table=self.clean_name,
+                geo_column=self.geom_column,
+                parent=None,
+                geo_column_type=geo_column_type,
+                srid=srid,
+            )
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+
+            params = dialog.get_parameters()
+            context_information = {
+                "connection_name": self.connection_name,
+                "database_name": auth_information["database"],
+                "schema_name": schema_data_item.clean_name,
+                "table_name": self.clean_name,
+                "geo_column": self.geom_column,
+                "geo_column_name": self.geom_column,
+                "geom_type": self.geom_type,
+                "geo_column_type_is_h3": geo_column_type in ("NUMBER", "TEXT"),
+                "h3_sf_col_type": self.geom_type,
+            }
+            context_information["primary_key"] = prompt_and_get_primary_key(
+                context_information=context_information,
+                data_type=self.geom_type,
+            )
+
+            task = SFConvertSQLQueryToLayerTask(
+                query=params["sql"],
+                layer_name=f"{self.clean_name}_filtered",
+                context_information=context_information,
+                zoom_on_success=True,
+            )
+            task.on_handle_error.connect(self._on_spatial_filter_message)
+            QgsApplication.taskManager().addTask(task)
+        except Exception as e:
+            self._on_spatial_filter_message(
+                "Download with spatial filter failed",
+                f"Could not start the filtered download.\n\nExtended error information:\n{str(e)}",
+            )
+
+    def _on_spatial_filter_message(self, title: str, message: str) -> None:
+        """Push cancel/empty/failure feedback to the message bar (plain text)."""
+        try:
+            from qgis.utils import iface
+
+            if iface is not None:
+                iface.messageBar().pushMessage(
+                    title,
+                    message.replace("\n", " "),
+                    level=Qgis.MessageLevel.Warning,
+                    duration=8,
+                )
+                return
+        except Exception:
+            pass
+        on_handle_error(title, message)
 
     def on_execute_sql_action_triggered(self) -> None:
         """

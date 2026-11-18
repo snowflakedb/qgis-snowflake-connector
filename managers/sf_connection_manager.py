@@ -1,8 +1,10 @@
 from collections import defaultdict
 from typing import Dict, List, Optional
+import configparser
 import json
 import threading
 import typing
+from pathlib import Path
 import snowflake.connector
 
 from qgis.core import Qgis, QgsMessageLog
@@ -11,7 +13,8 @@ from ..helpers.utils import connection_settings_exist, get_auth_information
 from ..helpers.sql import quote_identifier
 
 
-_BASE_QUERY_TAG = "qgis-snowflake-connector"
+_APP_NAME = "qgis-snowflake-connector"
+_plugin_version_cache: Optional[str] = None
 
 # Upper bound (seconds) for any single statement on a plugin connection. Acts
 # as a safety net so a pathological/stuck query (e.g. a bad server-side spatial
@@ -21,26 +24,70 @@ _BASE_QUERY_TAG = "qgis-snowflake-connector"
 _STATEMENT_TIMEOUT_SECONDS = 900
 
 
+def _plugin_version() -> str:
+    """Read plugin version from metadata.txt (cached)."""
+    global _plugin_version_cache
+    if _plugin_version_cache is not None:
+        return _plugin_version_cache
+    meta = Path(__file__).resolve().parent.parent / "metadata.txt"
+    cfg = configparser.ConfigParser()
+    cfg.read(meta)
+    _plugin_version_cache = cfg.get("general", "version", fallback="0.0.0")
+    return _plugin_version_cache
+
+
 def build_op_tag(
     op: str,
     connection_name: typing.Optional[str] = None,
     schema: typing.Optional[str] = None,
     table: typing.Optional[str] = None,
+    model: typing.Optional[str] = None,
+    kind: typing.Optional[str] = None,
 ) -> str:
-    """Build a JSON-encoded QUERY_TAG payload for cost attribution.
+    """Build a JSON-encoded QUERY_TAG payload for Snowflake telemetry.
 
     The resulting string is set as the Snowflake session QUERY_TAG so that
-    ACCOUNT_USAGE.QUERY_HISTORY rows issued by the plugin can be filtered by
-    operation type and target layer.
+    QUERY_HISTORY / ACCOUNT_USAGE rows can be filtered by app, version,
+    operation, layer, and Cortex model. Keep the payload compact (no SQL).
     """
-    payload = {"app": _BASE_QUERY_TAG, "op": op}
+    if kind is None:
+        if model or str(op).startswith("cortex"):
+            kind = "cortex"
+        elif str(op).startswith("stage_"):
+            kind = "ddl"
+        elif op == "edit":
+            kind = "dml"
+        else:
+            kind = "sql"
+    payload: Dict[str, str] = {
+        "app": _APP_NAME,
+        "ver": _plugin_version(),
+        "op": op,
+        "kind": kind,
+    }
     if connection_name:
         payload["conn"] = connection_name
     if schema and table:
         payload["layer"] = f"{schema}.{table}"
     elif table:
         payload["layer"] = table
+    if model:
+        payload["model"] = model
     return json.dumps(payload, separators=(",", ":"))
+
+
+def default_query_tag() -> str:
+    """Structured session default (PARSE_JSON-safe)."""
+    return build_op_tag("session", kind="sql")
+
+
+def untagged_query_tag() -> str:
+    """Fallback when a caller omits op_tag (still structured JSON)."""
+    return build_op_tag("untagged", kind="sql")
+
+
+# Back-compat alias: older tests/docs referred to a bare string constant.
+_BASE_QUERY_TAG = _APP_NAME
 
 
 class SFConnectionManager:
@@ -111,7 +158,7 @@ class SFConnectionManager:
                 "login_timeout": 5,
                 "client_session_keep_alive": True,
                 "session_parameters": {
-                    "QUERY_TAG": _BASE_QUERY_TAG,
+                    "QUERY_TAG": default_query_tag(),
                     "STATEMENT_TIMEOUT_IN_SECONDS": _STATEMENT_TIMEOUT_SECONDS,
                 },
             }
@@ -140,7 +187,7 @@ class SFConnectionManager:
             # Fresh session: forget whatever schema / query tag we thought was
             # active on the previous socket.
             self._active_schemas.pop(connection_name, None)
-            self._active_query_tags[connection_name] = _BASE_QUERY_TAG
+            self._active_query_tags[connection_name] = default_query_tag()
         except Exception as e:
             if connection_name in self.opened_connections:
                 del self.opened_connections[connection_name]
@@ -277,17 +324,17 @@ class SFConnectionManager:
     ) -> None:
         """Issue `ALTER SESSION SET QUERY_TAG` only when the tag changes (E3).
 
-        ``op_tag=None`` means "no operation-specific tag", which we map to the
-        base plugin tag so untagged queries don't inherit whatever operation
-        tag the previous query set on the session.
+        ``op_tag=None`` means "no operation-specific tag", which we map to a
+        structured ``untagged`` JSON tag so QUERY_HISTORY stays PARSE_JSON-able
+        and does not inherit the previous operation's tag.
         """
-        effective = op_tag or _BASE_QUERY_TAG
+        effective = op_tag or untagged_query_tag()
         active = self._active_query_tags.get(connection_name)
         if active == effective:
             return
-        # effective is either the base tag constant or a build_op_tag() JSON
-        # payload of short string fields, so the only character we need to
-        # escape for a Snowflake string literal is the single quote.
+        # effective is a build_op_tag() JSON payload of short string fields, so
+        # the only character we need to escape for a Snowflake string literal
+        # is the single quote.
         escaped = effective.replace("'", "''")
         cursor.execute(f"ALTER SESSION SET QUERY_TAG = '{escaped}'")
         self._active_query_tags[connection_name] = effective

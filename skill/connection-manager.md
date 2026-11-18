@@ -42,7 +42,33 @@ Configured in `dialogs/sf_connection_string_dialog.py`, stored in QSettings via 
 | Single sign-on (SSO) | `authenticator="externalbrowser"` |
 | Key Pair | `private_key_file`, `private_key_file_pwd` (optional) |
 
-All types also set: `warehouse`, `database`, `application="OSGeo_QGIS"`, `login_timeout=5`, `client_session_keep_alive=True`, `QUERY_TAG="qgis-snowflake-connector"`.
+All types also set: `warehouse`, `database`, `application="OSGeo_QGIS"`, `login_timeout=5`, `client_session_keep_alive=True`, and a structured JSON `QUERY_TAG` (via `default_query_tag()` / `build_op_tag`).
+
+### QUERY_TAG telemetry
+
+`build_op_tag(op, ...)` in `managers/sf_connection_manager.py` builds a compact JSON tag:
+
+```json
+{"app":"qgis-snowflake-connector","ver":"1.0.x","op":"features","kind":"sql","conn":"MyConn","layer":"PUBLIC.CITIES"}
+```
+
+Optional fields: `model` (Cortex), `kind` (`sql` | `cortex` | `ddl` | `dml`). Connect sets `op=session`; callers that omit `op_tag` get `op=untagged` (still JSON). `execute_query` / `execute_query_with_params` apply the tag with `ALTER SESSION SET QUERY_TAG` only when it changes.
+
+Snowflake-side filter:
+
+```sql
+SELECT query_id, start_time,
+       TRY_PARSE_JSON(query_tag):op::string AS op,
+       TRY_PARSE_JSON(query_tag):model::string AS model,
+       total_elapsed_time
+FROM TABLE(INFORMATION_SCHEMA.QUERY_HISTORY())
+WHERE TRY_PARSE_JSON(query_tag):app::string = 'qgis-snowflake-connector'
+ORDER BY start_time DESC;
+```
+
+Prefer `TRY_PARSE_JSON` so non-JSON tags from other clients do not fail the query.
+
+Use `ACCOUNT_USAGE.QUERY_HISTORY` for org-wide history (with latency).
 
 ## Settings Storage
 

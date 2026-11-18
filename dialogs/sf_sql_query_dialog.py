@@ -67,6 +67,10 @@ class SFSQLQueryDialog(QDialog, Ui_QgsQueryResultWidgetBase):
         self.mSqlErrorText.clear()
         self.mGeometryColumnCheckBox.setChecked(False)
 
+    def set_query(self, query: str) -> None:
+        """Replace the SQL editor contents (used by Ask Snowflake)."""
+        self.mSqlErrorText.setText(query or "")
+
     def get_query_without_semicolon(self):
         query: str = self.mSqlErrorText.text()
         stripped_query = query.strip()

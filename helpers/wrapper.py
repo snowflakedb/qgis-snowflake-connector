@@ -21,6 +21,7 @@ def parse_uri(
     primary_key = parsed_uri.get("primary_key", "")
     load_all_rows = parsed_uri.get("load_all_rows", "") == "1"
     single_geom_layer = parsed_uri.get("single_geom_layer", "") == "1"
+    extent_mode = parsed_uri.get("extent_mode", "") == "1"
 
     # check parsing results
     if not connection_name:
@@ -43,4 +44,5 @@ def parse_uri(
         primary_key,
         load_all_rows,
         single_geom_layer,
+        extent_mode,
     )

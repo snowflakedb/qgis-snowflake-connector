@@ -1,13 +1,15 @@
 import threading
 import typing
+
 from ..enums.snowflake_metadata_type import SnowflakeMetadataType
 from ..helpers.data_base import (
     get_geo_column_type_from_query,
     get_srid_from_sql_query_geo_column,
     get_type_from_query_geo_column,
 )
+from ..helpers.map_zoom import zoom_canvas_to_layers
 from ..managers.sf_connection_manager import SFConnectionManager
-from qgis.core import QgsProject, QgsTask, QgsVectorLayer
+from qgis.core import Qgis, QgsProject, QgsTask, QgsVectorLayer
 from qgis.PyQt.QtCore import pyqtSignal
 
 
@@ -20,6 +22,7 @@ class SFConvertSQLQueryToLayerTask(QgsTask):
         query: str,
         layer_name: str,
         context_information: typing.Dict[str, typing.Union[str, None]] = None,
+        zoom_on_success: bool = True,
     ):
         try:
             self.context_information = context_information
@@ -40,26 +43,29 @@ class SFConvertSQLQueryToLayerTask(QgsTask):
 
             self.query = query
             self.layer_name = layer_name
+            self.zoom_on_success = zoom_on_success
             self._run_thread_id: typing.Optional[int] = None
+            self._pending_layers: typing.List[typing.Tuple[str, str]] = []
+            self._added_layers: typing.List[QgsVectorLayer] = []
+            self._error_title = ""
+            self._error_message = ""
+            self._cancelled = False
             super().__init__(
-                f"Snowflake convert query to layer: {self.query}",
+                f"Snowflake convert query to layer: {self.layer_name}",
                 QgsTask.Flag.CanCancel,
             )
         except Exception as e:
             self.on_handle_error.emit(
-                "SFConvertColumnToLayerTask init failed",
-                f"Initializing snowflake convert column to layer task failed.\n\nExtended error information:\n{str(e)}",
+                "SFConvertSQLQueryToLayerTask init failed",
+                f"Initializing snowflake convert SQL query to layer task failed.\n\nExtended error information:\n{str(e)}",
             )
 
     def run(self) -> bool:
-        """
-        Executes the task to convert a Snowflake column to a layer.
-
-        Returns:
-            bool: True if the task is executed successfully, False otherwise.
-        """
+        """Collect layer URIs on the worker thread."""
         try:
             self._run_thread_id = threading.get_ident()
+            self._pending_layers = []
+            self.setProgress(5)
             if self.geo_column_type_is_h3:
                 geo_column_type = (
                     "TEXT" if self.h3_sf_col_type == SnowflakeMetadataType.TEXT.value
@@ -70,6 +76,10 @@ class SFConvertSQLQueryToLayerTask(QgsTask):
                     query=self.query,
                     context_information=self.context_information,
                 )
+            if self.isCanceled():
+                self._cancelled = True
+                return False
+            self.setProgress(30)
             srid = (
                 get_srid_from_sql_query_geo_column(
                     query=self.query,
@@ -78,6 +88,10 @@ class SFConvertSQLQueryToLayerTask(QgsTask):
                 if geo_column_type == "GEOMETRY"
                 else 4326
             )
+            if self.isCanceled():
+                self._cancelled = True
+                return False
+            self.setProgress(55)
             geo_type_list = (
                 get_type_from_query_geo_column(
                     query=self.query,
@@ -87,6 +101,9 @@ class SFConvertSQLQueryToLayerTask(QgsTask):
                 else ["MultiPolygon"]
             )
             for geo_type in geo_type_list:
+                if self.isCanceled():
+                    self._cancelled = True
+                    return False
                 uri = (
                     f"connection_name={self.connection_name} "
                     f"sql_query={self.query} "
@@ -97,8 +114,6 @@ class SFConvertSQLQueryToLayerTask(QgsTask):
                     f"geo_column_type={geo_column_type} "
                     f"primary_key={self.primary_key}"
                 )
-                # Single geometry family -> the layer covers every row, so
-                # featureCount()/extent() can skip the per-row type predicate.
                 if len(geo_type_list) == 1:
                     uri += " single_geom_layer=1"
 
@@ -107,35 +122,90 @@ class SFConvertSQLQueryToLayerTask(QgsTask):
                     if len(geo_type_list) == 1
                     else f"{self.layer_name}_{geo_type}"
                 )
-                layer = QgsVectorLayer(uri, layer_name, "snowflakedb")
-                QgsProject.instance().addMapLayer(layer)
+                self._pending_layers.append((uri, layer_name))
+            self.setProgress(90)
             return True
         except Exception as e:
-            self.on_handle_error.emit(
-                "SFConvertColumnToLayerTask run failed",
-                f"Running snowflake convert column to layer task failed.\n\nExtended error information:\n{str(e)}",
+            self._error_title = "SFConvertSQLQueryToLayerTask run failed"
+            self._error_message = (
+                "Running snowflake convert SQL query to layer task failed.\n\n"
+                f"Extended error information:\n{str(e)}"
             )
             return False
 
     def cancel(self) -> None:
         """Propagate user cancel to any in-flight Snowflake query (A9)."""
+        self._cancelled = True
         if self._run_thread_id is not None:
             SFConnectionManager.get_instance().cancel_pending_on_thread(
                 self._run_thread_id
             )
         super().cancel()
 
+    def _push_message(self, title: str, message: str) -> None:
+        try:
+            from qgis.utils import iface
+
+            if iface is not None:
+                iface.messageBar().pushMessage(
+                    title,
+                    message,
+                    level=Qgis.MessageLevel.Warning,
+                    duration=8,
+                )
+                return
+        except Exception:
+            pass
+        self.on_handle_error.emit(title, message)
+
     def finished(self, result: bool) -> None:
-        """
-        Callback function called when the task is finished.
+        """Create and add layers on the main thread."""
+        if result:
+            self._added_layers = []
+            for uri, layer_name in getattr(self, "_pending_layers", []):
+                layer = QgsVectorLayer(uri, layer_name, "snowflakedb")
+                if not layer.isValid():
+                    self._push_message(
+                        "Could not load filtered layer",
+                        f"The layer '{layer_name}' is not valid.",
+                    )
+                    return
+                QgsProject.instance().addMapLayer(layer)
+                self._added_layers.append(layer)
+            if not self._added_layers:
+                self._push_message(
+                    "No data to load",
+                    "The query did not produce a loadable layer.",
+                )
+                return
+            total_features = 0
+            try:
+                total_features = sum(
+                    max(0, int(layer.featureCount()))
+                    for layer in self._added_layers
+                )
+            except Exception:
+                total_features = -1
+            if total_features == 0:
+                self._push_message(
+                    "Empty result",
+                    f"The filtered query for '{self.layer_name}' returned no features.",
+                )
+            elif self.zoom_on_success:
+                zoom_canvas_to_layers(self._added_layers)
+            self.setProgress(100)
+            self.on_success.emit()
+            return
 
-        Args:
-            result (bool): The result of the task.
+        if self._cancelled or self.isCanceled():
+            self._push_message(
+                "Snowflake",
+                f"Layer download was canceled ({self.layer_name})",
+            )
+            return
 
-        Returns:
-            None
-        """
-        self.on_success.emit() if result else self.on_handle_error.emit(
-            "SFConvertColumnToLayerTask failed",
-            "Running snowflake convert column to layer task did not finished.",
+        title = self._error_title or "SFConvertSQLQueryToLayerTask failed"
+        message = self._error_message or (
+            "Running snowflake convert SQL query to layer task did not finish."
         )
+        self._push_message(title, message)

@@ -15,9 +15,31 @@ SFVectorDataProvider          (base, handles fields, URI parsing, capabilities)
         - extent via H3_CELL_TO_BOUNDARY lat/lon bounds
 ```
 
-Factory: `SFVectorDataProvider.createProvider(uri, options, flags)` reads `_geo_column_type` from the parsed URI and returns the correct subclass.
+Factory: `SFVectorDataProvider.createProvider(uri, options, flags)` reads `_geo_column_type` from the parsed URI and returns the correct subclass. Empty / unknown `geo_column_type` keeps the base provider for attribute-only tables (#105).
 
 Provider key: `"snowflakedb"`
+
+## Map-extent loading (`extent_mode=1`)
+
+When the URI includes `extent_mode=1`:
+
+- Provider skips the whole-table row-count probe (`_is_limited_unordered` stays False).
+- Feature iterator never writes the shared `_features` cache.
+- Each request with a filter rectangle pushes `ST_INTERSECTS` and applies `LIMIT` (not `SAMPLE`).
+- Last-result cache on the provider (`_extent_cache_key` / `_extent_cache_features`) reuses an identical rectangle + filter for repaints; `reloadData()` clears it.
+
+## Download with spatial filter
+
+Browser action **Download with spatial filter…** (`SFDataItem`) opens `SFSpatialFilterDialog`. Extent sources: current canvas, another vector layer’s extent, or `QgsMapToolExtent` draw. SQL uses `ST_INTERSECTS` with `TO_GEOGRAPHY` (GEOGRAPHY/H3 via `H3_CELL_TO_BOUNDARY`) or `ST_GEOMETRYFROMWKT` + SRID (GEOMETRY). Accepted SQL is loaded via `SFConvertSQLQueryToLayerTask` (URI `sql_query=…`). After successful Browser/filter/convert adds, `helpers/map_zoom.py` zooms the canvas to the layer extent with a ~1.1 buffer.
+
+## Attribute-only layers
+
+URI with empty `geom_column` / `geo_column_type`:
+
+- `wkbType()` → `NoGeometry`
+- Iterator skips geometry-type predicates, spatial filters, and `ST_ASWKB`
+- Base `featureCount()` uses cheap row count / `COUNT(*)`
+- `extent()` returns an empty rectangle
 
 ## Fields
 

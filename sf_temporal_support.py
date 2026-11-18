@@ -54,7 +54,7 @@ def configure_temporal_for_layer(layer):
 
         from .helpers.sql import quote_literal
         from .helpers.utils import get_auth_information
-        from .managers.sf_connection_manager import SFConnectionManager
+        from .managers.sf_connection_manager import SFConnectionManager, build_op_tag
 
         mgr = SFConnectionManager.get_instance()
         if mgr.get_connection(conn_name) is None:
@@ -69,7 +69,10 @@ def configure_temporal_for_layer(layer):
             f"AND DATA_TYPE IN ({types_in}) "
             f"ORDER BY ORDINAL_POSITION"
         )
-        cursor = mgr.execute_query(conn_name, sql, {"schema_name": schema})
+        cursor = mgr.execute_query(
+            conn_name, sql, {"schema_name": schema},
+            op_tag=build_op_tag("temporal", connection_name=conn_name),
+        )
         rows = cursor.fetchall() if cursor else []
         cursor.close() if cursor else None
         timestamp_fields = [(r[0], r[1]) for r in rows]
@@ -156,12 +159,7 @@ def _apply_fixed_temporal_range(props, mgr, conn_name, schema, table, ts_field_n
             conn_name,
             sql,
             {"schema_name": schema},
-            op_tag=build_op_tag(
-                "temporal-range",
-                connection_name=conn_name,
-                schema=schema,
-                table=table,
-            ),
+            op_tag=build_op_tag("temporal", connection_name=conn_name),
         )
         row = cursor.fetchone() if cursor else None
         cursor.close() if cursor else None

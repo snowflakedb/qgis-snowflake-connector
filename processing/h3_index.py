@@ -101,7 +101,7 @@ class H3IndexAlgorithm(QgsProcessingAlgorithm):
 
     def processAlgorithm(self, parameters, context, feedback):
         from ..helpers.utils import get_auth_information
-        from ..managers.sf_connection_manager import SFConnectionManager
+        from ..managers.sf_connection_manager import SFConnectionManager, build_op_tag
         from ..helpers.sql import quote_identifier, quote_literal
 
         connection_name = self.parameterAsString(parameters, self.CONNECTION, context)
@@ -137,6 +137,7 @@ class H3IndexAlgorithm(QgsProcessingAlgorithm):
                 f"WHERE TABLE_SCHEMA ILIKE {quote_literal(schema)} "
                 f"AND TABLE_NAME ILIKE {quote_literal(output)}",
                 {"schema_name": schema},
+                op_tag=build_op_tag("proc_h3", connection_name=connection_name),
             )
             exists_row = exists_cursor.fetchone() if exists_cursor else None
             if exists_row and exists_row[0] > 0:
@@ -158,11 +159,15 @@ class H3IndexAlgorithm(QgsProcessingAlgorithm):
         feedback.pushInfo(f"Running H3 indexing at resolution {resolution}: {sql}")
 
         try:
-            mgr.execute_query(connection_name, sql, {"schema_name": schema})
+            mgr.execute_query(
+                connection_name, sql, {"schema_name": schema},
+                op_tag=build_op_tag("proc_h3", connection_name=connection_name),
+            )
             count_cursor = mgr.execute_query(
                 connection_name,
                 f"SELECT COUNT(*) FROM {qs}.{qo}",  # nosec B608 - identifiers escaped via quote_identifier
                 {"schema_name": schema},
+                op_tag=build_op_tag("proc_h3", connection_name=connection_name),
             )
             count_result = count_cursor.fetchone() if count_cursor else None
             row_count = count_result[0] if count_result else 0
