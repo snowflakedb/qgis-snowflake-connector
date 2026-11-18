@@ -58,7 +58,7 @@ def zoom_canvas_to_layers(
                 combined = QgsRectangle(extent)
             else:
                 combined.combineExtentWith(extent)
-        except Exception:
+        except Exception:  # nosec B112 - skip layers whose extent cannot be transformed
             continue
 
     if combined is None or combined.isEmpty() or combined.isNull():
@@ -66,7 +66,7 @@ def zoom_canvas_to_layers(
 
     try:
         combined.scale(float(buffer_scale))
-    except Exception:
+    except Exception:  # nosec B110 - buffer is optional; zoom still applies the combined extent
         pass
     canvas.setExtent(combined)
     canvas.refresh()

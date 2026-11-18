@@ -192,6 +192,7 @@ def remove_connection(settings: QSettings, connection_name: str) -> None:
     layer_authcfg = settings.value(_LAYER_AUTHCFG_MAP_KEY, defaultValue="")
     credential_config_id = settings.value("config_id", defaultValue="")
     settings.endGroup()
+    _forget_layer_authcfg(connection_name, layer_authcfg)
 
     settings.beginGroup(f"connections/{connection_name}")
     settings.remove("")
@@ -530,6 +531,7 @@ def get_auth_method_config(config_id: str) -> QgsAuthMethodConfig:
     Returns:
         QgsAuthMethodConfig: The authentication method configuration.
     """
+    ensure_auth_master_password()
     auth_manager = QgsApplication.authManager()
     method_config = QgsAuthMethodConfig()
     auth_manager.loadAuthenticationConfig(config_id, method_config, True)
@@ -543,6 +545,55 @@ def get_auth_method_config(config_id: str) -> QgsAuthMethodConfig:
 # The auth DB is per-machine, so the id is meaningless on any other machine.
 _LAYER_AUTHCFG_MAP_KEY = "layer_authcfg"
 
+# In-process cache so later lookups never re-enter QgsAuthManager (which
+# deadlocks if a QgsTask worker and the GUI thread both call it before the
+# master password is cached).
+_LAYER_AUTHCFG_BY_NAME = {}
+_LAYER_AUTHCFG_BY_ID = {}
+_AUTH_MASTER_PASSWORD_READY = False
+
+
+def ensure_auth_master_password() -> bool:
+    """Unlock the QGIS auth-DB master password on the calling thread.
+
+    Must run on the GUI thread before any QgsTask can touch QgsAuthManager.
+    After the first success, later calls are a no-op. Failures are swallowed
+    so plugin startup / task construction never crash on an empty auth DB.
+    """
+    global _AUTH_MASTER_PASSWORD_READY
+    if _AUTH_MASTER_PASSWORD_READY:
+        return True
+    try:
+        auth_manager = QgsApplication.authManager()
+        if auth_manager is None:
+            return False
+        is_set = getattr(auth_manager, "masterPasswordIsSet", None)
+        if callable(is_set) and is_set():
+            _AUTH_MASTER_PASSWORD_READY = True
+            return True
+        setter = getattr(auth_manager, "setMasterPassword", None)
+        if not callable(setter):
+            return False
+        if setter(True):
+            _AUTH_MASTER_PASSWORD_READY = True
+            return True
+        return False
+    except Exception:
+        return False
+
+
+def _remember_layer_authcfg(connection_name: str, config_id: str) -> None:
+    if connection_name and config_id:
+        _LAYER_AUTHCFG_BY_NAME[connection_name] = config_id
+        _LAYER_AUTHCFG_BY_ID[config_id] = connection_name
+
+
+def _forget_layer_authcfg(connection_name: str, config_id: str = "") -> None:
+    cached_id = _LAYER_AUTHCFG_BY_NAME.pop(connection_name, None)
+    drop_id = config_id or cached_id
+    if drop_id:
+        _LAYER_AUTHCFG_BY_ID.pop(drop_id, None)
+
 
 def get_or_create_connection_authcfg(connection_name: str):
     """Return a QGIS auth-config id whose config-map hides ``connection_name``.
@@ -554,12 +605,16 @@ def get_or_create_connection_authcfg(connection_name: str):
     """
     if not connection_name:
         return None
+    cached = _LAYER_AUTHCFG_BY_NAME.get(connection_name)
+    if cached:
+        return cached
     try:
         settings = get_qsettings()
         settings.beginGroup(f"connections/{connection_name}")
         existing = settings.value(_LAYER_AUTHCFG_MAP_KEY, defaultValue="")
         settings.endGroup()
 
+        ensure_auth_master_password()
         auth_manager = QgsApplication.authManager()
         if existing:
             # full=True so the encrypted config map (connection_name) is
@@ -567,6 +622,7 @@ def get_or_create_connection_authcfg(connection_name: str):
             # never reuse the stored id, leaking a new auth config every call.
             probe = get_auth_method_config(existing)
             if probe.isValid() and probe.config("connection_name") == connection_name:
+                _remember_layer_authcfg(connection_name, existing)
                 return existing
 
         method_config = QgsAuthMethodConfig()
@@ -583,6 +639,7 @@ def get_or_create_connection_authcfg(connection_name: str):
         settings.setValue(_LAYER_AUTHCFG_MAP_KEY, config_id)
         settings.endGroup()
         settings.sync()
+        _remember_layer_authcfg(connection_name, config_id)
         return config_id
     except Exception:
         return None
@@ -596,11 +653,18 @@ def resolve_authcfg_connection_name(config_id: str):
     """
     if not config_id:
         return None
+    cached = _LAYER_AUTHCFG_BY_ID.get(config_id)
+    if cached:
+        return cached
     try:
+        ensure_auth_master_password()
         method_config = get_auth_method_config(config_id)
         if not method_config.isValid():
             return None
-        return method_config.config("connection_name") or None
+        name = method_config.config("connection_name") or None
+        if name:
+            _remember_layer_authcfg(name, config_id)
+        return name
     except Exception:
         return None
 

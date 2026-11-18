@@ -140,10 +140,10 @@ class SFVectorDataProvider(QgsVectorDataProvider):
         if self._auth_information.get("database"):
             self._context_information["database_name"] = self._auth_information["database"]
 
-        self.connect_database()
         self._is_limited_unordered = False
 
         try:
+            self.connect_database()
             if self._sql_query and not self._table_name:
                 if not sql_statement_is_read_only(self._sql_query):
                     message = (
@@ -1067,7 +1067,7 @@ class SFGeoVectorDataProvider(SFVectorDataProvider):
             if cur is not None:
                 try:
                     cur.close()
-                except Exception:
+                except Exception:  # nosec B110 - best-effort cursor close in finally
                     pass
 
     def _geometry_type_filter(self) -> str:
@@ -1215,7 +1215,7 @@ class SFH3VectorDataProvider(SFVectorDataProvider):
         if cur is not None:
             try:
                 cur.close()
-            except Exception:
+            except Exception:  # nosec B110 - best-effort cursor close after H3 probe
                 pass
 
     def featureCount(self) -> int:

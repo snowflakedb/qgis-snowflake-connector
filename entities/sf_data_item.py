@@ -865,7 +865,7 @@ ORDER BY {column_name}"""  # nosec B608 - column_name is a fixed literal; values
                     duration=8,
                 )
                 return
-        except Exception:
+        except Exception:  # nosec B110 - message bar is best-effort; fall through to on_handle_error
             pass
         on_handle_error(title, message)
 

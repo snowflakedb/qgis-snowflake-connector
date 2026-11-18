@@ -972,11 +972,88 @@ class TestPhase4AuthcfgUri(unittest.TestCase):
         task = (ROOT / "tasks" / "sf_convert_column_to_layer_task.py").read_text(
             encoding="utf-8"
         )
+        sql_task = (ROOT / "tasks" / "sf_convert_sql_query_to_layer_task.py").read_text(
+            encoding="utf-8"
+        )
         meta = (ROOT / "providers" / "sf_metadata_provider.py").read_text(
             encoding="utf-8"
         )
         self.assertIn("connection_uri_token(", task)
+        self.assertIn("self._uri_token", task)
+        self.assertIn("connection_uri_token(", sql_task)
+        self.assertIn("self._uri_token", sql_task)
         self.assertIn("connection_uri_token(", meta)
+
+    def test_layer_authcfg_memory_cache_roundtrip(self):
+        mod = self._load_utils()
+        mod._remember_layer_authcfg("c1", "id1")
+        self.assertEqual(mod.get_or_create_connection_authcfg("c1"), "id1")
+        self.assertEqual(mod.resolve_authcfg_connection_name("id1"), "c1")
+        mod._forget_layer_authcfg("c1", "id1")
+        self.assertIsNone(mod.get_or_create_connection_authcfg("c1"))
+        self.assertIsNone(mod.resolve_authcfg_connection_name("id1"))
+
+    def test_ensure_auth_master_password_is_idempotent(self):
+        mod = self._load_utils()
+        self.assertFalse(mod.ensure_auth_master_password())
+        mod._AUTH_MASTER_PASSWORD_READY = True
+        self.assertTrue(mod.ensure_auth_master_password())
+
+    def test_remove_connection_drops_authcfg_cache(self):
+        content = (ROOT / "helpers" / "utils.py").read_text(encoding="utf-8")
+        idx = content.index("def remove_connection(")
+        next_def = content.index("\ndef connection_settings_exist(", idx)
+        body = content[idx:next_def]
+        self.assertIn("_forget_layer_authcfg", body)
+
+    def test_plugin_unlocks_auth_master_password_on_init(self):
+        content = (ROOT / "qgis_snowflake_connector.py").read_text(encoding="utf-8")
+        idx = content.index("def initGui(self)")
+        next_def = content.index("\n    def ", idx + 1)
+        self.assertIn("ensure_auth_master_password()", content[idx:next_def])
+
+    def test_convert_tasks_resolve_authcfg_in_init_not_run(self):
+        """QgsTask.run() must not touch QgsAuthManager (deadlock on macOS)."""
+        banned = (
+            "connection_uri_token(",
+            "get_or_create_connection_authcfg(",
+            "get_auth_method_config(",
+            "get_encrypted_credentials(",
+            "resolve_authcfg_connection_name(",
+            "authManager()",
+        )
+        for rel, cls in (
+            ("tasks/sf_convert_column_to_layer_task.py", "SFConvertColumnToLayerTask"),
+            ("tasks/sf_convert_sql_query_to_layer_task.py", "SFConvertSQLQueryToLayerTask"),
+            ("tasks/sf_connect_task.py", "SFConnectTask"),
+            ("tasks/sf_execute_sql_query_task.py", "SFExecuteSQLQueryTask"),
+            ("tasks/sf_cortex_complete_task.py", "SFCortexCompleteTask"),
+            ("tasks/sf_map_brief_task.py", "SFMapBriefTask"),
+        ):
+            content = (ROOT / rel).read_text(encoding="utf-8")
+            class_idx = content.index(f"class {cls}")
+            run_idx = content.index("    def run(", class_idx)
+            next_def = content.find("\n    def ", run_idx + 1)
+            if next_def == -1:
+                next_def = len(content)
+            run_body = content[run_idx:next_def]
+            for needle in banned:
+                self.assertNotIn(
+                    needle,
+                    run_body,
+                    f"{cls}.run() must not call {needle}",
+                )
+
+    def test_provider_connect_is_inside_init_try(self):
+        content = (ROOT / "providers" / "sf_vector_data_provider.py").read_text(
+            encoding="utf-8"
+        )
+        marker = "self._is_limited_unordered = False"
+        start = content.index(marker)
+        window = content[start : start + 400]
+        self.assertIn("try:", window)
+        self.assertLess(window.index("try:"), window.index("self.connect_database()"))
+        self.assertIn("self.pushError(message)", content[start : start + 2500])
 
 
 class TestPhase5Hardening(unittest.TestCase):

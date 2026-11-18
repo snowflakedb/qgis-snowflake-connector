@@ -77,7 +77,7 @@ class SFMapBriefTask(QgsTask):
             if cur is not None:
                 try:
                     cur.close()
-                except Exception:
+                except Exception:  # nosec B110 - best-effort cursor close in finally
                     pass
 
     def run(self) -> bool:

@@ -59,7 +59,7 @@ def _symbol_color_hex(symbol) -> Optional[str]:
         color = symbol.color()
         if isinstance(color, QColor) and color.isValid():
             return color.name()
-    except Exception:
+    except Exception:  # nosec B110 - optional symbol color API; skip when unavailable
         pass
     return None
 
@@ -87,7 +87,7 @@ def _renderer_details(renderer) -> Tuple[str, Optional[str], List[Dict[str, str]
             continue
         try:
             items = list(getter())
-        except Exception:
+        except Exception:  # nosec B112 - optional renderer API; skip layers that don't expose it
             continue
         for item in items[:12]:
             label = ""
@@ -120,7 +120,7 @@ def _renderer_details(renderer) -> Tuple[str, Optional[str], List[Dict[str, str]
                         label = str(child.label() or "")
                     if label:
                         classes.append({"label": label})
-            except Exception:
+            except Exception:  # nosec B110 - optional rule-based renderer API
                 pass
 
     return kind, class_field, classes
@@ -139,7 +139,7 @@ def collect_layer_record(layer, draw_order: int) -> Dict[str, Any]:
     record["geometry_kind"] = _geometry_kind(layer)
     try:
         record["opacity"] = round(float(layer.opacity()), 2)
-    except Exception:
+    except Exception:  # nosec B110 - opacity is optional layer metadata
         pass
     try:
         record["scale_dependent"] = bool(
@@ -151,7 +151,7 @@ def collect_layer_record(layer, draw_order: int) -> Dict[str, Any]:
         subset = layer.subsetString()
         if subset:
             record["subset_filter"] = subset
-    except Exception:
+    except Exception:  # nosec B110 - subset string is optional layer metadata
         pass
 
     try:
@@ -183,7 +183,7 @@ def collect_layer_record(layer, draw_order: int) -> Dict[str, Any]:
             elif table:
                 record["snowflake_table"] = table
             record["extent_mode"] = uri_has_extent_mode(uri)
-    except Exception:
+    except Exception:  # nosec B110 - Snowflake URI extras are optional layer metadata
         pass
 
     return record
@@ -210,7 +210,7 @@ def layers_intersect_canvas(canvas, layers: Sequence) -> bool:
                 extent = transform.transformBoundingBox(extent)
             if extent.intersects(canvas_extent):
                 return True
-        except Exception:
+        except Exception:  # nosec B112 - skip layers whose extent cannot be compared
             continue
     return False
 
@@ -297,7 +297,7 @@ def render_canvas_png(
     # Keep the upload size predictable on HiDPI screens.
     try:
         settings.setDevicePixelRatio(1)
-    except Exception:
+    except Exception:  # nosec B110 - setDevicePixelRatio is unavailable on older QGIS
         pass
     size = settings.outputSize()
     width = max(size.width(), 1)
@@ -314,7 +314,7 @@ def render_canvas_png(
         cache = canvas.mapRendererCache()
         if cache is not None and hasattr(job, "setCache"):
             job.setCache(cache)
-    except Exception:
+    except Exception:  # nosec B110 - renderer cache is optional
         pass
     job.start()
     job.waitForFinished()
@@ -329,7 +329,7 @@ def render_canvas_png(
         if created_temp and os.path.isfile(output_path):
             try:
                 os.remove(output_path)
-            except Exception:
+            except Exception:  # nosec B110 - best-effort temp-file cleanup; original save error is re-raised
                 pass
         raise RuntimeError(f"Failed to save map image to {output_path}")
     return output_path, image

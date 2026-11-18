@@ -68,7 +68,7 @@ from .helpers.toolbar import (
     selected_snowflake_layers,
     toggle_extent_mode_uri,
 )
-from .helpers.utils import get_connection_child_groups
+from .helpers.utils import ensure_auth_master_password, get_connection_child_groups
 
 from qgis.gui import QgsGui
 
@@ -221,6 +221,10 @@ class QGISSnowflakeConnectorPlugin(object):
             self._init_toolbar()
 
         register_sf_functions()
+        # Unlock the auth-DB master password on the GUI thread so later
+        # QgsTask workers never hit QgsAuthManager while the Keychain prompt
+        # is still pending (that combination deadlocks QGIS on macOS).
+        ensure_auth_master_password()
 
         threading.Thread(
             target=self._check_for_updates, daemon=True
