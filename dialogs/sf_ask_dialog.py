@@ -59,8 +59,8 @@ class SFAskDialog(QDialog):
 
         header = QHBoxLayout()
         notice = QLabel(
-            "Your question and selected schema metadata are sent to Snowflake "
-            "Cortex on your connection."
+            "Experimental feature. Your question and selected schema metadata "
+            "are sent to Snowflake Cortex on your connection."
         )
         notice.setWordWrap(True)
         notice.setTextFormat(Qt.TextFormat.PlainText)
@@ -126,14 +126,15 @@ class SFAskDialog(QDialog):
             self,
             "Ask Snowflake help",
             "How to use Ask Snowflake (Cortex)\n\n"
+            "Experimental feature.\n\n"
             "1. Choose a Snowflake connection and schema that contain the "
             "tables you want to query.\n"
-            "2. Pick a text Cortex model (the list comes from SHOW CORTEX "
-            "BASE MODELS for your role).\n"
-            "3. Describe what you want in plain language, then click "
-            "Generate SQL.\n"
-            "4. Review the generated SELECT, then Open in SQL editor to run "
-            "or load it as a layer.\n\n"
+            "2. Pick a text Cortex model from the list available for your "
+            "role.\n"
+            "3. Describe what you want in plain language (what to select, "
+            "filter, group, or limit), then click Generate SQL.\n"
+            "4. Review the generated read-only SELECT, then Open in SQL "
+            "editor to run it or load it as a layer.\n\n"
             "What is sent to Cortex: your question text and compact schema "
             "metadata (table and column names/types) for the selected schema. "
             "No map images are sent.",

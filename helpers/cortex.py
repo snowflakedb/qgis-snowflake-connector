@@ -80,10 +80,12 @@ def is_likely_multimodal_model(name: str) -> bool:
 
 
 def normalize_cortex_text(text: Optional[str]) -> str:
-    """Strip quote-wrapping that AI_COMPLETE sometimes adds around plain text.
+    """Strip quote-wrapping and expand literal escape sequences from AI_COMPLETE.
 
-    When the model returns a single line with literal ``\\n`` escapes (no real
-    newlines), expand those escapes so Map brief section headings can parse.
+    Models often return Ask SQL or Map brief text as one line (or mixed with a
+    few real newlines) using literal ``\\n`` / ``\\t`` escapes. Expand those
+    whenever present so ``extract_sql`` and ``split_brief_sections`` see real
+    line breaks. Double-encoded payloads (``\\\\n``) are collapsed iteratively.
     """
     if not text:
         return ""
@@ -94,13 +96,40 @@ def normalize_cortex_text(text: Optional[str]) -> str:
         result = result[1:].lstrip()
     if result.endswith('"'):
         result = result[:-1].rstrip()
-    # Only unescape when there are no real newlines — otherwise leave intact.
-    if "\n" not in result and "\\n" in result:
-        result = (
-            result.replace("\\n", "\n")
-            .replace("\\t", "\t")
-            .replace('\\"', '"')
-        )
+    # Collapse JSON-style escapes. Do doubled backslashes first so "\\n"
+    # becomes a real newline instead of a leftover "\n" pair. Also unescape
+    # \" even when the response has no literal \n (common in Ask SQL).
+    # Cap loops for pathological inputs.
+    for _ in range(4):
+        if (
+            "\\\\n" in result
+            or "\\\\t" in result
+            or "\\\\r" in result
+            or '\\\\"' in result
+        ):
+            result = (
+                result.replace("\\\\r\\\\n", "\n")
+                .replace("\\\\n", "\n")
+                .replace("\\\\t", "\t")
+                .replace("\\\\r", "\n")
+                .replace('\\\\"', '"')
+            )
+            continue
+        if (
+            "\\n" in result
+            or "\\t" in result
+            or "\\r" in result
+            or '\\"' in result
+        ):
+            result = (
+                result.replace("\\r\\n", "\n")
+                .replace("\\n", "\n")
+                .replace("\\t", "\t")
+                .replace("\\r", "\n")
+                .replace('\\"', '"')
+            )
+            continue
+        break
     return result
 
 
@@ -293,12 +322,13 @@ def build_sql_prompt(
 def extract_sql(response_text: Optional[str]) -> str:
     """Extract the first SQL statement from a model response.
 
-    Strips Markdown code fences and trailing semicolons. Returns an empty
-    string when nothing usable is found.
+    Normalizes quote-wrapping and literal ``\\n`` escapes first, then strips
+    Markdown code fences and trailing semicolons. Returns an empty string when
+    nothing usable is found.
     """
     if not response_text:
         return ""
-    text = str(response_text).strip()
+    text = normalize_cortex_text(response_text)
     fence = _CODE_FENCE_RE.search(text)
     if fence:
         text = fence.group(1).strip()
@@ -476,13 +506,22 @@ def build_brief_prompt(
         "outside them:\n"
         f"{headings}\n\n"
         "Rules:\n"
-        "- Under 'Seen in the image', describe only what is visible in the PNG.\n"
-        "- Under 'From layer settings', use only names and encodings from the "
-        "map context (layer names, fields, class labels).\n"
-        "- Under 'Not determinable from this view', list what cannot be "
-        "concluded from the image or context.\n"
-        "- Do not invent place names, counts, or statistics that are not in "
-        "the image or context.\n"
+        "- Under 'Seen in the image', describe visual-only facts from the PNG "
+        "(symbol color, shape, size, relative density, clusters, empty "
+        "regions). Do not name places, streets, landmarks, districts, "
+        "'city centre', hospitals, or similar unless those words are "
+        "readable as labels in the PNG.\n"
+        "- Under 'From layer settings', use only exact strings from the map "
+        "context (layer names, renderer/classes, fields, table ids). Do not "
+        "expand table names, layer names, or the extent into real-world "
+        "geography.\n"
+        "- Under 'Not determinable from this view', list geography, place "
+        "identity, or 'what this area is' that is not labeled on the image "
+        "and not listed in the map context. Put guesses here; do not put "
+        "them under the other sections.\n"
+        "- Do not use external/world knowledge about the coordinates, city, "
+        "or table name. Do not invent place names, counts, or statistics "
+        "that are not in the image or context.\n"
         f"{empty_rule}"
         f"\nFocus: {focus_line}\n\n"
         f"Map context:\n{map_context}\n"
@@ -505,8 +544,15 @@ def build_followup_prompt(
     history_block = "\n\n".join(history_lines)
     parts = [
         "Answer a follow-up question about the same QGIS map image.",
-        "Use the image and the prior brief. Do not invent place names or "
-        "numbers that are not supported by them.",
+        "Use only the image, the prior brief, and any exact strings already "
+        "stated there. Visual-only descriptions of the PNG are allowed "
+        "(colors, symbols, relative density).",
+        "Do not invent place names, streets, landmarks, districts, "
+        "'city centre', hospitals, counts, or other geography from world "
+        "knowledge about the coordinates, city, or table name unless those "
+        "words are readable as labels in the PNG or already appear in the "
+        "prior brief/context.",
+        "If place identity is unknown, say it is not determinable.",
         f"\nPrior brief:\n{brief}",
     ]
     if history_block:
@@ -526,15 +572,21 @@ def _normalize_heading(title: str) -> Optional[str]:
     return None
 
 
-def split_brief_sections(text: Optional[str]) -> Dict[str, str]:
-    """Parse a four-section brief tolerantly.
+def _looks_like_brief_dump(text: str) -> bool:
+    """True when text still looks like an unsplit four-section brief."""
+    if not text:
+        return False
+    lower = text.lower()
+    heading_hits = sum(
+        1 for section in BRIEF_SECTIONS if section.lower() in lower
+    )
+    return heading_hits >= 2 or text.count("##") >= 2
 
-    Missing sections become empty strings. Any preamble or unmatched content
-    is kept under ``Other`` so nothing is lost.
-    """
+
+def _parse_brief_section_buckets(text: str) -> Dict[str, str]:
+    """Split already-normalized brief text into section buckets."""
     result = {section: "" for section in BRIEF_SECTIONS}
     result["Other"] = ""
-    text = normalize_cortex_text(text)
     if not text:
         return result
 
@@ -551,6 +603,54 @@ def split_brief_sections(text: Optional[str]) -> Dict[str, str]:
 
     for key, lines in buckets.items():
         result[key] = "\n".join(lines).strip()
+    return result
+
+
+def split_brief_sections(text: Optional[str]) -> Dict[str, str]:
+    """Parse a four-section brief tolerantly.
+
+    Missing sections become empty strings. Any preamble or unmatched content
+    is kept under ``Other`` so nothing is lost. If ``Other`` still contains
+    literal ``\\n`` escapes or an unsplit brief dump, re-parse it so the four
+    section panels fill instead of showing raw escaped text.
+    """
+    result = _parse_brief_section_buckets(normalize_cortex_text(text))
+    other = result.get("Other") or ""
+    if not other:
+        return result
+
+    needs_retry = (
+        "\\n" in other
+        or "\\t" in other
+        or (
+            _looks_like_brief_dump(other)
+            and not any(result.get(section) for section in BRIEF_SECTIONS)
+        )
+    )
+    if not needs_retry:
+        # Sections already filled but Other is a leftover escaped dump.
+        if _looks_like_brief_dump(other) and (
+            "\\n" in other or other.count("##") >= 2
+        ):
+            filled = sum(1 for section in BRIEF_SECTIONS if result.get(section))
+            if filled >= 2:
+                result["Other"] = ""
+        return result
+
+    expanded = normalize_cortex_text(
+        other.replace("\\n", "\n").replace("\\t", "\t").replace("\\r", "\n")
+    )
+    retry = _parse_brief_section_buckets(expanded)
+    filled_retry = sum(1 for section in BRIEF_SECTIONS if retry.get(section))
+    filled_now = sum(1 for section in BRIEF_SECTIONS if result.get(section))
+    if filled_retry > filled_now:
+        return retry
+    if filled_now >= 2 and _looks_like_brief_dump(other):
+        # Prefer the already-parsed panels; drop the escaped leftover dump.
+        result["Other"] = ""
+        return result
+    if "\\n" in other or "\\t" in other:
+        result["Other"] = expanded
     return result
 
 

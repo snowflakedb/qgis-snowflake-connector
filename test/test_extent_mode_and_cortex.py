@@ -270,6 +270,39 @@ class TestCortexSqlHelpers(unittest.TestCase):
         self.assertEqual(extract_sql('"SELECT 1"'), "SELECT 1")
         self.assertEqual(extract_sql("'SELECT * FROM T'"), "SELECT * FROM T")
 
+    def test_extract_sql_unescapes_literal_newlines(self):
+        from helpers.cortex import extract_sql
+
+        bn = "\\n"
+        raw = (
+            f'SELECT SEVERITY_DESCRIPTION, COUNT(*) AS ACCIDENT_COUNT{bn}'
+            f'FROM "CARTO"."BRISTOL_TRAFFIC_ACCIDENTS"{bn}'
+            f"GROUP BY SEVERITY_DESCRIPTION{bn}"
+            f"ORDER BY ACCIDENT_COUNT DESC"
+        )
+        sql = extract_sql(raw)
+        self.assertNotIn("\\n", sql)
+        self.assertIn("\nFROM", sql)
+        self.assertTrue(sql.upper().startswith("SELECT"))
+
+    def test_extract_sql_unescapes_literal_quotes(self):
+        from helpers.cortex import extract_sql
+
+        # Ask SQL often returns \"identifiers\" with no literal newlines.
+        bq = '\\"'
+        raw = (
+            "SELECT REF_NUMBER, SEVERITY_DESCRIPTION, CASUALTIES FROM "
+            f"{bq}CARTO_ACADEMY__DATA_FOR_TUTORIALS{bq}.{bq}CARTO{bq}."
+            f"{bq}BRISTOL_TRAFFIC_ACCIDENTS{bq} WHERE CASUALTIES > 2 LIMIT 100"
+        )
+        self.assertIn('\\"', raw)
+        sql = extract_sql(raw)
+        self.assertNotIn('\\"', sql)
+        self.assertIn(
+            '"CARTO_ACADEMY__DATA_FOR_TUTORIALS"."CARTO"."BRISTOL_TRAFFIC_ACCIDENTS"',
+            sql,
+        )
+
     def test_ask_dialog_and_task_exist(self):
         self.assertIn("class SFAskDialog", _read("dialogs/sf_ask_dialog.py"))
         self.assertIn(
@@ -478,8 +511,107 @@ class TestMapBriefHelpers(unittest.TestCase):
         self.assertIn("Zoom in", sections["Suggested next steps"])
         self.assertEqual(sections["Other"], "")
 
+        # Mixed real newline + literal \n must still unescape (Map brief gap).
+        bn = "\\n"
+        mixed = (
+            "## Seen in the image\n"
+            "- Green circles"
+            + bn
+            + bn
+            + "## From layer settings"
+            + bn
+            + "- bristol_ok"
+            + bn
+            + bn
+            + "## Not determinable from this view"
+            + bn
+            + "- Place names"
+            + bn
+            + bn
+            + "## Suggested next steps"
+            + bn
+            + "- Zoom in"
+        )
+        self.assertIn("\n", mixed)
+        self.assertIn("\\n", mixed)
+        sections = split_brief_sections(mixed)
+        self.assertIn("Green circles", sections["Seen in the image"])
+        self.assertIn("bristol_ok", sections["From layer settings"])
+        self.assertIn("Place names", sections["Not determinable from this view"])
+        self.assertIn("Zoom in", sections["Suggested next steps"])
+        self.assertEqual(sections["Other"], "")
+
+        # Double-encoded \\n (two backslashes + n) must fully collapse.
+        bn2 = "\\\\n"
+        doubled = (
+            '"## Seen in the image'
+            + bn2
+            + "- Green circles"
+            + bn2
+            + bn2
+            + "## From layer settings"
+            + bn2
+            + "- bristol_ok"
+            + bn2
+            + bn2
+            + "## Not determinable from this view"
+            + bn2
+            + "- Place names"
+            + bn2
+            + bn2
+            + "## Suggested next steps"
+            + bn2
+            + '- Zoom in"'
+        )
+        sections = split_brief_sections(doubled)
+        self.assertIn("Green circles", sections["Seen in the image"])
+        self.assertIn("bristol_ok", sections["From layer settings"])
+        self.assertIn("Place names", sections["Not determinable from this view"])
+        self.assertIn("Zoom in", sections["Suggested next steps"])
+        self.assertEqual(sections["Other"], "")
+        self.assertNotIn("\\n", sections["Seen in the image"])
+
+        # Escaped dump left in Other while sections already filled → drop Other.
+        bn = "\\n"
+        escaped_dump = (
+            "## Seen in the image"
+            + bn
+            + "- A collection of green markers"
+            + bn
+            + "## From layer settings"
+            + bn
+            + "- bristol_ok"
+            + bn
+            + "## Not determinable from this view"
+            + bn
+            + "- Place names"
+            + bn
+            + "## Suggested next steps"
+            + bn
+            + "- Zoom in"
+        )
+        hybrid = (
+            "## Seen in the image\n"
+            "- Dense green markers on beige\n\n"
+            "## From layer settings\n"
+            "- Layer name: bristol_ok\n\n"
+            "## Not determinable from this view\n"
+            "- City identity\n\n"
+            "## Suggested next steps\n"
+            "- Zoom to densest cluster\n\n"
+            + escaped_dump
+        )
+        sections = split_brief_sections(hybrid)
+        self.assertIn("Dense green markers", sections["Seen in the image"])
+        self.assertIn("bristol_ok", sections["From layer settings"])
+        self.assertEqual(sections["Other"], "")
+
     def test_build_brief_prompt_contains_headings_and_warnings(self):
-        from helpers.cortex import BRIEF_SECTIONS, build_brief_prompt
+        from helpers.cortex import (
+            BRIEF_SECTIONS,
+            build_brief_prompt,
+            build_followup_prompt,
+        )
 
         map_context = (
             "CRS: EPSG:4326\n"
@@ -498,6 +630,21 @@ class TestMapBriefHelpers(unittest.TestCase):
         self.assertIn("road safety", prompt)
         # Warnings are not duplicated outside map context.
         self.assertEqual(prompt.count("No visible layers"), 1)
+        # Anti-hallucination / visual-only constraints.
+        self.assertIn("visual-only", prompt)
+        self.assertIn("place names", prompt.lower())
+        self.assertIn("world knowledge", prompt.lower())
+        self.assertIn("readable as labels in the PNG", prompt)
+
+        followup = build_followup_prompt(
+            "Where is densest?",
+            "## Seen in the image\nGreen points\n",
+        )
+        followup_l = followup.lower()
+        self.assertIn("visual-only", followup_l)
+        self.assertIn("place names", followup_l)
+        self.assertIn("world knowledge", followup_l)
+        self.assertIn("not determinable", followup_l)
 
     def test_project_notes_and_label_text(self):
         from datetime import datetime, timezone
@@ -573,13 +720,27 @@ class TestMapBriefHelpers(unittest.TestCase):
         self.assertIn("Save to project notes", dialog)
         self.assertIn("sent to", dialog)
         self.assertIn("Snowflake Cortex", dialog)
+        self.assertIn("Experimental feature", dialog)
         self.assertIn("self.help_btn", dialog)
         self.assertIn("How to use Map brief", dialog)
+        self.assertIn("Focus (optional)", dialog)
+        self.assertIn("road safety committee", dialog)
+        self.assertIn("three short bullets", dialog)
+        self.assertNotIn("audience or length", dialog)
         self.assertNotIn("Re-capture", dialog)
         self.assertNotIn("Save...", dialog)
         self.assertIn("QSignalBlocker", dialog)
         self.assertIn("fetch_cortex_base_models", dialog)
         self.assertIn("models_for_map_brief", dialog)
+        self.assertIn("self.model_combo.setEditable(False)", dialog)
+        self.assertIn(
+            "multimodal Cortex models available for your role",
+            dialog,
+        )
+        self.assertNotIn(
+            "should be a multimodal Cortex model that can read images",
+            dialog,
+        )
         capture = _read("helpers/map_capture.py")
         self.assertIn("def render_canvas_png", capture)
         self.assertIn("def build_canvas_map_context", capture)
@@ -671,6 +832,8 @@ class TestExtentCacheAndCapabilities(unittest.TestCase):
         self.assertNotIn("ILIKE", ask)
         self.assertIn("sent to Snowflake", ask)
         self.assertIn("Cortex on your connection", ask)
+        self.assertIn("Experimental feature", ask)
+        self.assertIn("read-only SELECT", ask)
         self.assertIn("_cleanup_task", ask)
         self.assertIn("self.help_btn", ask)
         self.assertIn("How to use Ask Snowflake", ask)

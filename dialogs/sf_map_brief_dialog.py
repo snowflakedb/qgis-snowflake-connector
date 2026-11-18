@@ -93,8 +93,8 @@ class SFMapBriefDialog(QDialog):
 
         notice_row = QHBoxLayout()
         notice = QLabel(
-            "The current map image and visible layer details are sent to "
-            "Snowflake Cortex on your connection."
+            "Experimental feature. The current map image and visible layer "
+            "details are sent to Snowflake Cortex on your connection."
         )
         notice.setWordWrap(True)
         notice.setTextFormat(Qt.TextFormat.PlainText)
@@ -121,7 +121,7 @@ class SFMapBriefDialog(QDialog):
         focus_row.addWidget(QLabel("Focus (optional):"))
         self.focus_edit = QLineEdit()
         self.focus_edit.setPlaceholderText(
-            "e.g. road safety committee, three bullet points"
+            "e.g. for a city council briefing; keep each section to 3 bullets"
         )
         focus_row.addWidget(self.focus_edit, stretch=1)
         layout.addLayout(focus_row)
@@ -132,7 +132,7 @@ class SFMapBriefDialog(QDialog):
         advanced_layout = QHBoxLayout(advanced)
         advanced_layout.addWidget(QLabel("Model:"))
         self.model_combo = QComboBox()
-        self.model_combo.setEditable(True)
+        self.model_combo.setEditable(False)
         self._populate_model_combo(FALLBACK_MULTIMODAL_MODELS)
         advanced_layout.addWidget(self.model_combo, stretch=1)
         layout.addWidget(advanced)
@@ -200,10 +200,16 @@ class SFMapBriefDialog(QDialog):
             self,
             "Map brief help",
             "How to use Map brief (Cortex)\n\n"
-            "1. Pan/zoom the map so the canvas shows what you want described.\n"
-            "2. Choose a connection (and schema). Advanced → Model should be a "
-            "multimodal Cortex model that can read images.\n"
-            "3. Optionally add a Focus (audience or length), then Write brief.\n"
+            "Experimental feature.\n\n"
+            "1. Pan/zoom the map so the canvas shows what you want described. "
+            "Prefer one clear visible layer when possible.\n"
+            "2. Choose a connection (and schema). Advanced → Model shows "
+            "multimodal Cortex models available for your role.\n"
+            "3. Focus (optional): short guidance for the model — who the brief "
+            "is for and/or how long or detailed it should be. Examples: "
+            "\"for a road safety committee\", \"three short bullets per "
+            "section\". Leave blank for a general brief. Then click Write "
+            "brief.\n"
             "4. Review the four sections. You can Ask follow-ups about the same "
             "capture, Insert into print layout, or Save to project notes.\n\n"
             "What is sent to Cortex: a PNG of the current map canvas plus "
@@ -236,8 +242,8 @@ class SFMapBriefDialog(QDialog):
             idx = self.model_combo.findText(selected)
             if idx >= 0:
                 self.model_combo.setCurrentIndex(idx)
-            else:
-                self.model_combo.setEditText(selected)
+            elif self.model_combo.count() > 0:
+                self.model_combo.setCurrentIndex(0)
 
     def _refresh_models(self, connection_name: str) -> None:
         available = fetch_cortex_base_models(connection_name)
